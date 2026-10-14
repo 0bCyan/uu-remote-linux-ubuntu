@@ -15,7 +15,7 @@ mod capture;
 mod file_trans;
 mod input;
 mod input_mapping;
-mod port_forward;
+mod port_mapping;
 mod power;
 mod signaling;
 mod terminal;

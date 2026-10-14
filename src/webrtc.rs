@@ -289,6 +289,18 @@ impl WebRtcSession {
         let file_channel: Arc<std::sync::Mutex<Option<Arc<RTCDataChannel>>>> = Arc::new(std::sync::Mutex::new(None));
         let (file_tx, mut file_rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
         let peer_files = crate::file_trans::FileSession::new(file_tx, control_sequence.clone());
+        // 端口映射 frames (Message 27) also travel on FILE_DATA_CHANNEL; one session per peer.
+        let port_mapping = crate::port_mapping::Session::new(file_channel.clone(), control_sequence.clone());
+        {
+            let (end_pc, mapping) = (pc.clone(), port_mapping.clone());
+            tokio::spawn(async move {
+                use webrtc::peer_connection::peer_connection_state::RTCPeerConnectionState as State;
+                while !matches!(end_pc.connection_state(), State::Closed | State::Failed) {
+                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                }
+                mapping.shutdown();
+            });
+        }
         {
             let slot = file_channel.clone();
             tokio::spawn(async move {
@@ -315,6 +327,7 @@ impl WebRtcSession {
             let out_sequence = control_sequence.clone();
             let shared_clipboard_ready = text_clipboard_ready.clone();
             let peer_files = peer_files.clone();
+            let peer_port_mapping = port_mapping.clone();
             let peer_video_settings = video_settings.clone();
             let peer_actions = peer_actions.clone();
             if label == "FILE_DATA_CHANNEL" { *file_channel.lock().unwrap() = Some(d.clone()); }
@@ -486,6 +499,7 @@ impl WebRtcSession {
                     let clipboard_ready = clipboard_enabled.clone();
                     let rich_incoming=rich_state.clone();
                     let file_worker = file_session.clone();
+                    let mapping = peer_port_mapping.clone();
                     let video_settings = channel_video_settings.clone();
                     let actions = channel_actions.clone();
 
@@ -523,6 +537,9 @@ impl WebRtcSession {
                                 let _ = rpc_out.send(crate::initialization::envelope(out_sequence.fetch_add(1, std::sync::atomic::Ordering::Relaxed), ts, 22, &response));
                                 return;
                             }
+                        }
+                        if let Ok(fields) = crate::protocol::decode_wire(&msg.data) {
+                            if mapping.handle(&fields, &channel_name) { return; }
                         }
                         if let Some(files) = &file_worker {
                             if let Ok(fields) = crate::protocol::decode_wire(&msg.data) {
