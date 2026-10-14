@@ -1,0 +1,142 @@
+//! Native Linux X11 Capture Engine via XShm
+
+use std::sync::Mutex;
+
+#[cfg(target_os = "linux")]
+extern "C" {
+    fn x11_init(display_name: *const libc::c_char) -> libc::c_int;
+    fn x11_get_dimensions(out_w: *mut libc::c_int, out_h: *mut libc::c_int) -> libc::c_int;
+    fn x11_capture_frame(
+        out_buffer: *mut libc::c_uchar,
+        out_w: *mut libc::c_int,
+        out_h: *mut libc::c_int,
+    ) -> libc::c_int;
+    fn x11_close();
+    fn x11_wake_display() -> libc::c_int;
+    fn x11_display_name() -> *const libc::c_char;
+}
+
+#[cfg(not(target_os = "linux"))]
+unsafe fn x11_init(_: *const libc::c_char) -> libc::c_int { 0 }
+#[cfg(not(target_os = "linux"))]
+unsafe fn x11_get_dimensions(out_w: *mut libc::c_int, out_h: *mut libc::c_int) -> libc::c_int {
+    *out_w = 1920;
+    *out_h = 1080;
+    0
+}
+#[cfg(not(target_os = "linux"))]
+unsafe fn x11_capture_frame(
+    out_buffer: *mut libc::c_uchar,
+    out_w: *mut libc::c_int,
+    out_h: *mut libc::c_int,
+) -> libc::c_int {
+    *out_w = 1920;
+    *out_h = 1080;
+    std::ptr::write_bytes(out_buffer, 0, (1920 * 1080 * 4) as usize);
+    0
+}
+#[cfg(not(target_os = "linux"))]
+unsafe fn x11_close() {}
+
+#[cfg(not(target_os = "linux"))]
+unsafe fn x11_display_name() -> *const libc::c_char { b":0\0".as_ptr().cast() }
+
+pub struct ScreenCapture {
+    pub backend: crate::desktop_backend::DesktopBackend,
+    pub init_error: Option<String>,
+    pub portal: Option<std::sync::Arc<crate::portal::PortalSession>>,
+    pub display: String,
+    pub width: u32,
+    pub height: u32,
+    buffer: Mutex<Vec<u8>>,
+}
+
+impl ScreenCapture {
+    pub fn new() -> Result<Self, String> {
+        let backend=crate::desktop_backend::detect()?;
+        if backend == crate::desktop_backend::DesktopBackend::Portal {
+            let session=std::sync::Arc::new(crate::portal::PortalSession::open()?);
+            let (width,height)=(session.width,session.height);
+            return Ok(Self { backend,init_error:None,portal:Some(session),display:"wayland:portal".into(),width,height,
+                buffer:Mutex::new(vec![0;(width as usize)*(height as usize)*4]) });
+        }
+        if backend == crate::desktop_backend::DesktopBackend::Wayland {
+            let (width,height)=crate::wayland::init()?;
+            return Ok(Self { backend, init_error:None, portal:None, display:"wayland:native".into(), width,height,
+                buffer:Mutex::new(vec![0;(width as usize)*(height as usize)*4]) });
+        }
+        let ret = unsafe { x11_init(std::ptr::null()) };
+        if ret != 0 {
+            return Err(format!("x11_init failed with code {}", ret));
+        }
+
+        let mut w: libc::c_int = 0;
+        let mut h: libc::c_int = 0;
+        unsafe { x11_get_dimensions(&mut w, &mut h) };
+
+        if w <= 0 || h <= 0 {
+            return Err(format!("Invalid screen dimensions: {}x{}", w, h));
+        }
+
+        let buf_size = (w * h * 4) as usize;
+        let buffer = Mutex::new(vec![0u8; buf_size]);
+
+        log::info!("ScreenCapture initialized: {}x{}", w, h);
+        let display_ptr = unsafe { x11_display_name() };
+        if display_ptr.is_null() { return Err("Capture display name unavailable".into()); }
+        let display = unsafe { std::ffi::CStr::from_ptr(display_ptr) }.to_string_lossy().into_owned();
+        log::info!("Selected capture display: {}", display);
+        Ok(Self {
+            backend,
+            init_error:None,
+            portal:None,
+            display,
+            width: w as u32,
+            height: h as u32,
+            buffer,
+        })
+    }
+
+    /// Metadata for non-desktop tools. Never advertise a usable fake screen.
+    pub fn unavailable(error:String)->Self {
+        Self { backend:crate::desktop_backend::detect().unwrap_or(crate::desktop_backend::DesktopBackend::X11),
+            init_error:Some(error), portal:None, display:String::new(), width:0,height:0,buffer:Mutex::new(Vec::new()) }
+    }
+
+    /// 截取一帧 BGRA 图像
+    pub fn capture_frame(&self) -> Result<Vec<u8>, String> {
+        if let Some(error)=&self.init_error { return Err(error.clone()); }
+        let mut buf = self.buffer.lock().unwrap();
+        if let Some(session)=&self.portal { session.capture(&mut buf)?; return Ok(buf.clone()); }
+        if self.backend == crate::desktop_backend::DesktopBackend::Wayland {
+            crate::wayland::capture(&mut buf)?;
+            return Ok(buf.clone());
+        }
+        let mut w: libc::c_int = self.width as libc::c_int;
+        let mut h: libc::c_int = self.height as libc::c_int;
+
+        let ret = unsafe { x11_capture_frame(buf.as_mut_ptr(), &mut w, &mut h) };
+        if ret != 0 {
+            return Err(format!("x11_capture_frame failed with code {}", ret));
+        }
+
+        Ok(buf.clone())
+    }
+}
+
+impl Drop for ScreenCapture {
+    fn drop(&mut self) {
+        if self.init_error.is_none() && self.backend==crate::desktop_backend::DesktopBackend::X11 { unsafe { x11_close() }; }
+    }
+}
+
+/// Keep the display visible only while a peer is streaming; never unlock it.
+pub fn keep_display_awake() -> Result<(), String> {
+    if crate::desktop_backend::detect()? == crate::desktop_backend::DesktopBackend::Portal { return Ok(()); }
+    if crate::desktop_backend::detect()? == crate::desktop_backend::DesktopBackend::Wayland {
+        return crate::wayland::wake();
+    }
+    #[cfg(target_os = "linux")]
+    if unsafe { x11_wake_display() } != 0 { return Err("X11 display wake failed".into()); }
+    Ok(())
+}

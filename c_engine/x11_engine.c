@@ -1,0 +1,272 @@
+/**
+ * Native Linux X11 High-Performance Capture & Input Injection Engine
+ * Zero-Wine dependency, zero-overhead, thread-safe.
+ */
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/shm.h>
+#include <sys/ipc.h>
+#include <X11/Xlib.h>
+#include <X11/Xutil.h>
+#include <X11/extensions/XShm.h>
+#include <X11/extensions/XTest.h>
+#include <X11/extensions/Xfixes.h>
+#include <stdint.h>
+#include <poll.h>
+
+static Display *g_display = NULL;
+static Window g_root = 0;
+static int g_screen = 0;
+static int g_width = 0;
+static int g_height = 0;
+static int g_depth = 0;
+
+static XShmSegmentInfo g_shminfo;
+static XImage *g_shm_image = NULL;
+static int g_use_shm = 0;
+static unsigned char g_injected_down[32]; // keycodes currently held by the remote viewer
+static int g_injected_count = 0;
+static int g_restore_repeat = 0;
+
+// Injected keys must not auto-repeat on the host: the viewer sends its own repeats, and with
+// network delay the key-up can arrive after the 500 ms X repeat delay ("wunnnnnnami").
+// XTEST events repeat through the master keyboard, so global auto-repeat is switched off only
+// while a remote key is held and restored when the last one is released.
+static void track_injected_key(int keycode, int is_press) {
+    if (keycode < 0 || keycode > 255) return;
+    unsigned char bit = 1u << (keycode & 7), *slot = &g_injected_down[keycode >> 3];
+    if (is_press && !(*slot & bit)) {
+        if (g_injected_count++ == 0) {
+            XKeyboardState state;
+            XGetKeyboardControl(g_display, &state);
+            g_restore_repeat = state.global_auto_repeat == AutoRepeatModeOn;
+            if (g_restore_repeat) XAutoRepeatOff(g_display);
+        }
+        *slot |= bit;
+    } else if (!is_press && (*slot & bit)) {
+        *slot &= ~bit;
+        if (--g_injected_count == 0 && g_restore_repeat) { XAutoRepeatOn(g_display); g_restore_repeat = 0; }
+    }
+}
+
+int x11_init(const char *display_name) {
+    if (g_display) return 0;
+    
+    XInitThreads();
+    if (display_name && *display_name) {
+        g_display = XOpenDisplay(display_name);
+    } else {
+        const char *configured = getenv("DISPLAY");
+        if (configured && *configured) g_display = XOpenDisplay(configured);
+        if (!g_display) g_display = XOpenDisplay(":0");
+        if (!g_display) g_display = XOpenDisplay(":1");
+    }
+    if (!g_display) {
+        return -1;
+    }
+    
+    g_screen = DefaultScreen(g_display);
+    g_root = RootWindow(g_display, g_screen);
+    g_width = DisplayWidth(g_display, g_screen);
+    g_height = DisplayHeight(g_display, g_screen);
+    g_depth = DefaultDepth(g_display, g_screen);
+    
+    // 尝试初始化 XShm
+    if (XShmQueryExtension(g_display)) {
+        g_shm_image = XShmCreateImage(g_display, DefaultVisual(g_display, g_screen),
+                                      g_depth, ZPixmap, NULL, &g_shminfo, g_width, g_height);
+        if (g_shm_image) {
+            g_shminfo.shmid = shmget(IPC_PRIVATE, g_shm_image->bytes_per_line * g_shm_image->height, IPC_CREAT | 0777);
+            if (g_shminfo.shmid != -1) {
+                g_shminfo.shmaddr = g_shm_image->data = (char *)shmat(g_shminfo.shmid, 0, 0);
+                g_shminfo.readOnly = False;
+                if (g_shminfo.shmaddr != (char *)-1) {
+                    if (XShmAttach(g_display, &g_shminfo)) {
+                        XSync(g_display, False);
+                        shmctl(g_shminfo.shmid, IPC_RMID, 0); // 标记删除，进程退出时自动回收
+                        g_use_shm = 1;
+                    }
+                }
+            }
+        }
+    }
+    
+    return 0;
+}
+
+int x11_get_dimensions(int *out_w, int *out_h) {
+    if (!g_display) return -1;
+    *out_w = g_width;
+    *out_h = g_height;
+    return 0;
+}
+
+/**
+ * 截取一帧画面（RGBA/BGRA 格式）
+ * @param out_buffer 输出缓冲区，大小必须至少为 width * height * 4
+ */
+int x11_capture_frame(unsigned char *out_buffer, int *out_w, int *out_h) {
+    if (!g_display) return -1;
+    *out_w = g_width;
+    *out_h = g_height;
+    
+    if (g_use_shm && g_shm_image) {
+        if (!XShmGetImage(g_display, g_root, g_shm_image, 0, 0, AllPlanes)) {
+            return -2;
+        }
+        memcpy(out_buffer, g_shm_image->data, g_width * g_height * 4);
+        return 0;
+    }
+    
+    // Fallback: XGetImage
+    XImage *img = XGetImage(g_display, g_root, 0, 0, g_width, g_height, AllPlanes, ZPixmap);
+    if (!img) return -3;
+    memcpy(out_buffer, img->data, g_width * g_height * 4);
+    XDestroyImage(img);
+    return 0;
+}
+
+// ============ 原生输入注入 ============
+
+const char *x11_display_name(void) {
+    return g_display ? DisplayString(g_display) : NULL;
+}
+
+/* Reset display-idle activity during an active remote session without moving
+ * the pointer or changing the screen-lock policy. */
+int x11_wake_display(void) {
+    if (!g_display) return -1;
+    XTestFakeRelativeMotionEvent(g_display, 0, 0, CurrentTime);
+    XFlush(g_display);
+    return 0;
+}
+
+int x11_mouse_move(int x, int y) {
+    if (!g_display) return -1;
+    XTestFakeMotionEvent(g_display, g_screen, x, y, CurrentTime);
+    XFlush(g_display);
+    return 0;
+}
+
+int x11_mouse_relative(int dx, int dy) {
+    if (!g_display) return -1;
+    XTestFakeRelativeMotionEvent(g_display, dx, dy, CurrentTime);
+    XFlush(g_display);
+    return 0;
+}
+
+int x11_mouse_button(int button, int is_press) {
+    if (!g_display) return -1;
+    // button: 1=Left, 2=Middle, 3=Right, 4=ScrollUp, 5=ScrollDown
+    int ok = XTestFakeButtonEvent(g_display, button, is_press ? True : False, CurrentTime);
+    XFlush(g_display);
+    return ok ? 0 : -2;
+}
+
+int x11_pointer_state(int *x, int *y, unsigned int *mask) {
+    if (!g_display) return -1;
+    Window root, child; int wx, wy;
+    return XQueryPointer(g_display,g_root,&root,&child,x,y,&wx,&wy,mask) ? 0 : -2;
+}
+
+int x11_key_symbol(unsigned long symbol, int is_press) {
+    if (!g_display) return -1;
+    KeyCode code = XKeysymToKeycode(g_display, (KeySym)symbol);
+    if (!code) return -2;
+    if (is_press) track_injected_key(code, 1);
+    XTestFakeKeyEvent(g_display, code, is_press ? True : False, CurrentTime);
+    if (!is_press) track_injected_key(code, 0);
+    XFlush(g_display);
+    return 0;
+}
+
+int x11_key_event(int keycode, int is_press) {
+    if (!g_display) return -1;
+    if (is_press) track_injected_key(keycode, 1);
+    XTestFakeKeyEvent(g_display, keycode, is_press ? True : False, CurrentTime);
+    if (!is_press) track_injected_key(keycode, 0);
+    XFlush(g_display);
+    return 0;
+}
+
+void x11_close() {
+    if (!g_display) return;
+    if (g_use_shm) {
+        XShmDetach(g_display, &g_shminfo);
+        if (g_shm_image) {
+            XDestroyImage(g_shm_image);
+            g_shm_image = NULL;
+        }
+        if (g_shminfo.shmaddr && g_shminfo.shmaddr != (char *)-1) {
+            shmdt(g_shminfo.shmaddr);
+        }
+    }
+    XCloseDisplay(g_display);
+    g_display = NULL;
+}
+
+// ============ Pointer shape monitor ============
+// A dedicated connection: input injection shares g_display across threads,
+// while this one is owned by the single monitor thread.
+static Display *g_cursor_display = NULL;
+static int g_cursor_event_base = 0;
+static unsigned long g_cursor_serial = 0;
+
+int x11_cursor_open(const char *display_name) {
+    if (g_cursor_display) return 0;
+    g_cursor_display = XOpenDisplay(display_name);
+    if (!g_cursor_display) return -1;
+    int error_base;
+    if (!XFixesQueryExtension(g_cursor_display, &g_cursor_event_base, &error_base)) {
+        XCloseDisplay(g_cursor_display);
+        g_cursor_display = NULL;
+        return -2;
+    }
+    XFixesSelectCursorInput(g_cursor_display, DefaultRootWindow(g_cursor_display),
+                            XFixesDisplayCursorNotifyMask);
+    XFlush(g_cursor_display);
+    return 0;
+}
+
+/* Blocks until the X server has an event (e.g. a cursor change) or timeout_ms passes,
+ * so a shape change is forwarded immediately instead of on the next polling tick. */
+int x11_cursor_wait(int timeout_ms) {
+    if (!g_cursor_display) return -1;
+    if (XPending(g_cursor_display)) return 1;
+    struct pollfd fd = { ConnectionNumber(g_cursor_display), POLLIN, 0 };
+    return poll(&fd, 1, timeout_ms);
+}
+
+/* Copies the current cursor when it changed (or when force is set).
+ * pixels receive premultiplied ARGB32. Returns 1 copied, 0 unchanged, <0 error. */
+int x11_cursor_poll(uint32_t *pixels, int max_pixels, int *width, int *height,
+                    int *hot_x, int *hot_y, int force) {
+    if (!g_cursor_display) return -1;
+    int changed = force;
+    while (XPending(g_cursor_display)) {
+        XEvent event;
+        XNextEvent(g_cursor_display, &event);
+        if (event.type == g_cursor_event_base + XFixesCursorNotify) changed = 1;
+    }
+    if (!changed) return 0;
+    XFixesCursorImage *image = XFixesGetCursorImage(g_cursor_display);
+    if (!image) return -2;
+    int result = 0;
+    if (force || image->cursor_serial != g_cursor_serial) {
+        int count = image->width * image->height;
+        if (image->width == 0 || image->height == 0 || count > max_pixels) {
+            result = -3;
+        } else {
+            for (int i = 0; i < count; i++) pixels[i] = (uint32_t)image->pixels[i];
+            *width = image->width;
+            *height = image->height;
+            *hot_x = image->xhot;
+            *hot_y = image->yhot;
+            g_cursor_serial = image->cursor_serial;
+            result = 1;
+        }
+    }
+    XFree(image);
+    return result;
+}
