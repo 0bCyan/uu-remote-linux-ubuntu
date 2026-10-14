@@ -49,6 +49,15 @@ use webrtc::WebRtcSession;
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
+    // An unknown argument must never fall through to starting a second full host server.
+    const SUBCOMMANDS: [&str; 8] = ["login", "unlock-check", "desktop-probe", "desktop-video-probe", "wayland-capture",
+        "wayland-input-probe", "clipboard-acceptance", "portal-acceptance"];
+    if let Some(arg) = std::env::args().nth(1).filter(|a| !SUBCOMMANDS.contains(&a.as_str())) {
+        let usage = format!("usage: uuremote-server [{}]\n  (no argument: run the host)", SUBCOMMANDS.join(" | "));
+        if matches!(arg.as_str(), "help" | "-h" | "--help") { println!("{usage}"); return Ok(()); }
+        eprintln!("unknown argument: {arg}\n{usage}");
+        std::process::exit(2);
+    }
     if std::env::args().nth(1).as_deref() == Some("clipboard-acceptance") {
         return tokio::task::spawn_blocking(clipboard_probe::run).await?.map_err(Into::into);
     }
