@@ -1,6 +1,6 @@
 [package]
 name = "uu-remote-linux"
-version = "0.1.2"
+version = "0.1.3"
 edition = "2021"
 authors = ["uu-remote-linux contributors"]
 description = "Unofficial Linux host for NetEase UU Remote: control a Linux desktop from the official clients"
