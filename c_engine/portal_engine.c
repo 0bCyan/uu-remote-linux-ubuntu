@@ -46,6 +46,7 @@ struct uu_portal {
     int error;
     uint32_t node, width, height;
     int logical_width, logical_height;
+    int absolute_stream_pixels;
     enum spa_video_format format;
     uint8_t *frame;
     size_t frame_length;
@@ -271,6 +272,13 @@ struct uu_portal *uu_portal_open_persist(const char *restore, void (*save_token)
     *error = 0; *width = *height = 0;
     struct uu_portal *p = calloc(1, sizeof(*p));
     if (!p) { *error = 8; return NULL; }
+    /* GNOME forwards NotifyPointerMotionAbsolute into Mutter's stream-to-stage
+     * transform. It expects stream pixels, unlike the compositor-sized KDE path.
+     * Do not apply the compositor scale twice on fractional-scale displays. */
+    gchar **desktops = g_strsplit(g_getenv("XDG_CURRENT_DESKTOP") ? g_getenv("XDG_CURRENT_DESKTOP") : "", ":", -1);
+    for (gchar **desktop = desktops; *desktop; desktop++)
+        if (!g_ascii_strcasecmp(*desktop, "GNOME")) p->absolute_stream_pixels = 1;
+    g_strfreev(desktops);
     pthread_mutex_init(&p->lock, NULL); pthread_cond_init(&p->changed, NULL);
     p->context = g_main_context_new(); g_main_context_push_thread_default(p->context);
     p->bus = g_bus_get_sync(G_BUS_TYPE_SESSION, NULL, NULL);
@@ -359,6 +367,9 @@ struct uu_portal *uu_portal_open_persist(const char *restore, void (*save_token)
     p->dbus_started = 1;
     *error = connect_pipewire(p);
     if (*error) { uu_portal_close(p); return NULL; }
+    fprintf(stderr, "Portal pointer geometry: frame=%ux%u compositor=%dx%d absolute=%s\n",
+        p->width, p->height, p->logical_width, p->logical_height,
+        p->absolute_stream_pixels ? "stream-pixels" : "compositor-logical");
     *width = p->width; *height = p->height;
     return p;
 done:
@@ -447,7 +458,8 @@ int uu_portal_move(struct uu_portal *p, double x, double y, int relative) {
         x * p->logical_width / p->width, y * p->logical_height / p->height));
     if (x < 0 || y < 0 || x >= p->width || y >= p->height) return 11;
     return notify(p, "NotifyPointerMotionAbsolute", g_variant_new("(o@a{sv}udd)", p->session, empty_options(), p->node,
-        x * p->logical_width / p->width, y * p->logical_height / p->height));
+        p->absolute_stream_pixels ? x : x * p->logical_width / p->width,
+        p->absolute_stream_pixels ? y : y * p->logical_height / p->height));
 }
 int uu_portal_button(struct uu_portal *p, int button, int pressed) {
     if (!p) return 11;

@@ -71,6 +71,35 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         tokio::time::sleep(std::time::Duration::from_secs(3)).await;
         let input=InputInjector::new();
         input.bind_portal(screen.portal.clone());
+        if std::env::args().nth(2).as_deref() == Some("--clipboard-targets") {
+            let read = || -> Result<serde_json::Value, Box<dyn std::error::Error>> {
+                Ok(serde_json::from_slice(&std::fs::read("/tmp/uuremote-clipboard-official.json")?)?)
+            };
+            let before = read()?;
+            if before["native_wayland"] != true || before["window_active"] != true { return Err("Native clipboard fixture must be focused".into()); }
+            for name in ["check", "copy"] {
+                let bounds = before[format!("{name}_bounds")].as_array().ok_or("Missing test button bounds")?;
+                let number = |index: usize| bounds[index].as_f64().ok_or("Invalid button bounds");
+                let x = number(0)? + number(2)? / 2.0;
+                let y = number(1)? + number(3)? / 2.0;
+                let width = before["window_size"][0].as_f64().ok_or("Missing test window width")?;
+                let height = before["window_size"][1].as_f64().ok_or("Missing test window height")?;
+                input.mouse_absolute_normalized(x / width, y / height, (screen.width,screen.height));
+                input.mouse_button(1,true); input.mouse_button(1,false);
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                let after = read()?;
+                let key = format!("{name}_activations");
+                if after[&key].as_u64() != before[&key].as_u64().map(|n| n+1) {
+                    return Err(format!("Portal small-target click missed: {name}").into());
+                }
+                let position = after["last_position"].as_array().ok_or("Missing native test pointer position")?;
+                if (position[0].as_f64().ok_or("Invalid pointer x")? - x).abs() > 2.0 || (position[1].as_f64().ok_or("Invalid pointer y")? - y).abs() > 2.0 {
+                    return Err("Portal small-target pointer error exceeds two logical pixels".into());
+                }
+                println!("Portal native small-target click passed: {name}; pointer_error<=2px");
+            }
+            return Ok(());
+        }
         input.mouse_absolute_normalized(0.25,0.25,(screen.width,screen.height));input.flush_pointer();
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         input.mouse_absolute_normalized(0.5,0.5,(screen.width,screen.height));input.flush_pointer();

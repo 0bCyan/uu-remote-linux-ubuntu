@@ -46,6 +46,11 @@ def activate(app):
  gesture.connect('pressed',pressed_seen);window.add_controller(gesture)
  window.present();window.fullscreen()
  state['native_wayland']='wayland' in type(Gdk.Display.get_default()).__name__.lower()
- def record(): report.write_text(json.dumps(state));return True
+ def record():
+  state['window_size']=[window.get_width(),window.get_height()]
+  for name,button in [('check',check),('copy',copy)]:
+   ok,bounds=button.compute_bounds(window)
+   if ok:state[name+'_bounds']=[bounds.get_x(),bounds.get_y(),bounds.get_width(),bounds.get_height()]
+  report.write_text(json.dumps(state));return True
  GLib.timeout_add(200,record)
 app.connect('activate',activate);app.run([])
