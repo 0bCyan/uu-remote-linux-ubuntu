@@ -89,6 +89,15 @@ impl DependencyGate{
 // Aborting the owner task drops Child, whose kill_on_drop kills only this encoder.
 struct EncoderTask(tokio::task::JoinHandle<Result<(), String>>);
 impl Drop for EncoderTask { fn drop(&mut self) { self.0.abort(); } }
+impl EncoderTask {
+    async fn restart(&mut self, future: impl std::future::Future<Output = Result<(), String>> + Send + 'static) {
+        // abort() alone can leave the old producer running until its next yield.
+        // Finish it before a new IDR can be followed by an old encoder's P-frame.
+        self.0.abort();
+        let _ = (&mut self.0).await;
+        self.0 = tokio::spawn(future);
+    }
+}
 
 async fn read_encoder(
     size: (u32, u32), display: String, portal:Option<Arc<crate::portal::PortalSession>>,
@@ -296,7 +305,7 @@ pub async fn stream_desktop(pc: Arc<RTCPeerConnection>, track: Arc<TrackLocalSta
                 // still queued from the old encoder remain a valid chain before it.
                 let next = *settings.borrow_and_update();
                 timeline.fps = u64::from(next.fps);
-                reader = EncoderTask(tokio::spawn(read_encoder(size, display.clone(), portal.clone(), latest.clone(), next, sequence.clone())));
+                reader.restart(read_encoder(size, display.clone(), portal.clone(), latest.clone(), next, sequence.clone())).await;
             },
             frame = receiver.recv() => {
                 // A closed queue means the reader ended; its JoinHandle carries the reason.
@@ -336,6 +345,59 @@ pub async fn stream_desktop(pc: Arc<RTCPeerConnection>, track: Arc<TrackLocalSta
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn encoder_restart_stops_old_producer_before_starting_new_chain() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        struct MarkStopped(Arc<AtomicBool>);
+        impl Drop for MarkStopped {
+            fn drop(&mut self) { self.0.store(true, Ordering::SeqCst); }
+        }
+        let stopped = Arc::new(AtomicBool::new(false));
+        let old_stopped = stopped.clone();
+        let (tx, mut rx) = mpsc::channel(4);
+        let old_tx = tx.clone();
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let frame = |sequence, idr| Arc::new(CompleteFrame {
+            sequence, completed_at: Instant::now(),
+            data: vec![0, 0, 1, 9, 240, 0, 0, 1, if idr { 5 } else { 1 }, 42],
+        });
+        let mut reader = EncoderTask(tokio::spawn(async move {
+            let _stopped = MarkStopped(old_stopped);
+            let mut gate = DependencyGate::default();
+            gate.submit(&old_tx, frame(1, true));
+            gate.submit(&old_tx, frame(2, false));
+            started_tx.send(()).unwrap();
+            std::future::pending::<Result<(), String>>().await
+        }));
+        started_rx.await.unwrap();
+        let replacement_stopped = stopped.clone();
+        reader.restart(async move {
+            assert!(replacement_stopped.load(Ordering::SeqCst));
+            DependencyGate::default().submit(&tx, frame(3, true));
+            Ok(())
+        }).await;
+        // On this current-thread runtime, abort without awaiting cannot drop the old
+        // future before returning here. No sleep or scheduler race is needed.
+        assert!(stopped.load(Ordering::SeqCst), "old producer is still alive after restart");
+        (&mut reader.0).await.unwrap().unwrap();
+        for (sequence, idr) in [(1, true), (2, false), (3, true)] {
+            let queued = rx.recv().await.unwrap();
+            assert_eq!(queued.sequence, sequence);
+            assert_eq!(is_independent_frame(&queued.data), idr);
+        }
+    }
+    #[tokio::test]
+    async fn encoder_restart_replaces_an_already_failed_producer() {
+        let mut reader = EncoderTask(tokio::spawn(async { Err("encoder ended".into()) }));
+        while !reader.0.is_finished() { tokio::task::yield_now().await; }
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        reader.restart(async move {
+            started_tx.send(()).unwrap();
+            Ok(())
+        }).await;
+        started_rx.await.unwrap();
+        (&mut reader.0).await.unwrap().unwrap();
+    }
     #[test]
     fn boundaries_accept_complete_idr_and_reject_dependent_frames() {
         let bytes = [0,0,0,1,9,240,0,0,1,7,1,0,0,1,5,42,0,0,1,9,240];
