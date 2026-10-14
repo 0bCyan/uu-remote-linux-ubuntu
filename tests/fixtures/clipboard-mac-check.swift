@@ -6,6 +6,17 @@ final class MarkerCheck: NSObject {
     let kde = NSTextField(labelWithString: "KDE → Mac: not checked")
     let copied = NSTextField(labelWithString: "Mac marker: not copied")
     let formats = NSTextField(labelWithString: "Known text formats: not checked")
+    // The official viewer drops remote format offers before ACK unless its
+    // remote window is key (viewer 0x100380f20 -> isKeyWindow). A delayed
+    // marker-only comparison lets it stay key throughout negotiation.
+    @objc func armGnome() {
+        gnome.stringValue = "GNOME → Mac: armed; return to UU and copy VM marker"
+        DispatchQueue.main.asyncAfter(deadline: .now() + 15) { self.compareGnome() }
+    }
+    @objc func armKde() {
+        kde.stringValue = "KDE → Mac: armed; return to UU and copy VM marker"
+        DispatchQueue.main.asyncAfter(deadline: .now() + 15) { self.compareKde() }
+    }
     @objc func copyMarker() {
         NSPasteboard.general.clearContents()
         let ok = NSPasteboard.general.setString("UU-Mac-to-VM 中文🙂", forType: .string)
@@ -32,14 +43,17 @@ final class MarkerCheck: NSObject {
         NSButton(title: title, target: self, action: action)
     }
     func show() {
-        let window = NSWindow(contentRect: NSRect(x: 0,y: 0,width: 500,height: 360), styleMask: [.titled,.closable], backing: .buffered, defer: false)
+        let window = NSWindow(contentRect: NSRect(x: 0,y: 0,width: 620,height: 500), styleMask: [.titled,.closable], backing: .buffered, defer: false)
         window.title = "UU synthetic clipboard acceptance"
         window.isReleasedWhenClosed = false
         let stack = NSStackView(views: [
             NSTextField(labelWithString: "Only fixed test-marker matches are displayed."),
+            NSTextField(labelWithString: "Keep the UU remote window key until format ACK / text request."),
             button("Copy Mac test marker", #selector(copyMarker)), copied,
             button("Compare GNOME VM marker", #selector(compareGnome)), gnome,
             button("Compare KDE VM marker", #selector(compareKde)), kde, formats,
+            button("Arm GNOME comparison in 15 seconds", #selector(armGnome)),
+            button("Arm KDE comparison in 15 seconds", #selector(armKde)),
             button("Quit test fixture", #selector(quit))])
         stack.orientation = .vertical; stack.spacing = 14
         stack.translatesAutoresizingMaskIntoConstraints = false
