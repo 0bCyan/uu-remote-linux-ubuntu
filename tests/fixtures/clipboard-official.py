@@ -34,6 +34,7 @@ def activate(app):
   state['button_presses']+=1
   state['last_button']=gesture.get_current_button()
   state['last_modifiers']=int(gesture.get_current_event_state())
+  state['last_position']=[round(x,1),round(y,1)]
   widget=window.pick(x,y,Gtk.PickFlags.DEFAULT)
   state['last_target']='other'
   while widget:
