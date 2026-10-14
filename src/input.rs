@@ -33,14 +33,17 @@ struct PendingPointer {
 unsafe fn x11_pointer_state(_: *mut libc::c_int,_:*mut libc::c_int,_:*mut libc::c_uint)->libc::c_int {-1}
 #[derive(Default)]
 struct HeldInput { buttons: std::collections::BTreeSet<i32>, keys: std::collections::BTreeSet<u64> }
-pub struct InputInjector { portal:std::sync::Mutex<Option<std::sync::Arc<crate::portal::PortalSession>>>, backend: crate::desktop_backend::DesktopBackend, pending: std::sync::Mutex<PendingPointer>, held: std::sync::Mutex<HeldInput> }
+pub struct InputInjector { portal_failures: std::sync::atomic::AtomicUsize, portal_outcomes: std::sync::atomic::AtomicUsize, portal:std::sync::Mutex<Option<std::sync::Arc<crate::portal::PortalSession>>>, backend: crate::desktop_backend::DesktopBackend, pending: std::sync::Mutex<PendingPointer>, held: std::sync::Mutex<HeldInput> }
 
 impl InputInjector {
     pub fn new() -> Self {
-        Self { portal:std::sync::Mutex::new(None), backend:crate::desktop_backend::detect().unwrap_or(crate::desktop_backend::DesktopBackend::X11), pending: std::sync::Mutex::new(PendingPointer::default()), held:std::sync::Mutex::new(HeldInput::default()) }
+        Self { portal_failures: std::sync::atomic::AtomicUsize::new(0), portal_outcomes: std::sync::atomic::AtomicUsize::new(0), portal:std::sync::Mutex::new(None), backend:crate::desktop_backend::detect().unwrap_or(crate::desktop_backend::DesktopBackend::X11), pending: std::sync::Mutex::new(PendingPointer::default()), held:std::sync::Mutex::new(HeldInput::default()) }
     }
 
-    pub fn bind_portal(&self,session:Option<std::sync::Arc<crate::portal::PortalSession>>) { *self.portal.lock().unwrap()=session; }
+    pub fn bind_portal(&self,session:Option<std::sync::Arc<crate::portal::PortalSession>>) {
+        log::info!("Desktop portal input binding updated: bound={}", session.is_some());
+        *self.portal.lock().unwrap()=session;
+    }
     pub fn mouse_move(&self, x: i32, y: i32) {
         self.inject_move(x,y,false);
     }
@@ -99,7 +102,7 @@ impl InputInjector {
         if result == 0 {
             let mut held = self.held.lock().unwrap();
             if is_press { held.buttons.insert(button); } else { held.buttons.remove(&button); }
-        } else { log::warn!("Desktop mouse injection failed: {}",result); }
+        } else if self.backend != crate::desktop_backend::DesktopBackend::Portal { log::warn!("Desktop mouse injection failed: {}",result); }
         static BUTTON_AUDIT:std::sync::atomic::AtomicUsize=std::sync::atomic::AtomicUsize::new(0);
         if self.backend==crate::desktop_backend::DesktopBackend::X11 && BUTTON_AUDIT.fetch_add(1,std::sync::atomic::Ordering::Relaxed)<24 {
             let (mut x,mut y,mut mask)=(0,0,0);
@@ -129,21 +132,40 @@ impl InputInjector {
         for key in &held.keys {self.inject_key(*key,false);}
         *held=HeldInput::default();
     }
+    // Per-injector budgets cover missing bindings, locked sessions, stale handles
+    // and D-Bus errors. Never include keys, coordinates, text or portal tokens.
+    fn portal_result(&self, operation: &str, result: Result<(), String>) -> i32 {
+        use std::sync::atomic::Ordering::Relaxed;
+        if self.portal_outcomes.fetch_add(1, Relaxed) < 16 {
+            log::info!("Portal input outcome: operation={} success={}", operation, result.is_ok());
+        }
+        match result {
+            Ok(()) => 0,
+            Err(reason) => {
+                let index = self.portal_failures.fetch_add(1, Relaxed);
+                if index < 16 {
+                    log::warn!("Portal input injection failed: operation={} reason={} failure={}/16{}",
+                        operation, reason, index + 1, if index == 15 { " (further failures suppressed)" } else { "" });
+                }
+                -1
+            }
+        }
+    }
     fn inject_move(&self,x:i32,y:i32,relative:bool)->i32 {
-        if let Some(portal)=self.portal.lock().unwrap().as_ref() { return if portal.move_pointer(f64::from(x),f64::from(y),relative).is_ok() {0} else {-1}; }
-        if self.backend==crate::desktop_backend::DesktopBackend::Portal {return -1;}
+        if let Some(portal)=self.portal.lock().unwrap().as_ref() { return self.portal_result("motion", portal.move_pointer(f64::from(x),f64::from(y),relative)); }
+        if self.backend==crate::desktop_backend::DesktopBackend::Portal {return self.portal_result("motion", Err("Portal input session is not bound".into()));}
         if self.backend==crate::desktop_backend::DesktopBackend::Wayland { crate::wayland::move_pointer(x,y,relative) }
         else if relative { unsafe { x11_mouse_relative(x,y) } } else { unsafe { x11_mouse_move(x,y) } }
     }
     fn inject_button(&self,button:i32,pressed:bool)->i32 {
-        if let Some(portal)=self.portal.lock().unwrap().as_ref() { return if portal.button(button,pressed).is_ok() {0} else {-1}; }
-        if self.backend==crate::desktop_backend::DesktopBackend::Portal {return -1;}
+        if let Some(portal)=self.portal.lock().unwrap().as_ref() { return self.portal_result("button", portal.button(button,pressed)); }
+        if self.backend==crate::desktop_backend::DesktopBackend::Portal {return self.portal_result("button", Err("Portal input session is not bound".into()));}
         if self.backend==crate::desktop_backend::DesktopBackend::Wayland { crate::wayland::button(button,pressed) }
         else { unsafe { x11_mouse_button(button,i32::from(pressed)) } }
     }
     fn inject_key(&self,symbol:u64,pressed:bool)->i32 {
-        if let Some(portal)=self.portal.lock().unwrap().as_ref() { return if portal.key(symbol,pressed).is_ok() {0} else {-1}; }
-        if self.backend==crate::desktop_backend::DesktopBackend::Portal {return -1;}
+        if let Some(portal)=self.portal.lock().unwrap().as_ref() { return self.portal_result("keyboard", portal.key(symbol,pressed)); }
+        if self.backend==crate::desktop_backend::DesktopBackend::Portal {return self.portal_result("keyboard", Err("Portal input session is not bound".into()));}
         if self.backend==crate::desktop_backend::DesktopBackend::Wayland { crate::wayland::key(symbol,pressed) }
         else { unsafe { x11_key_symbol(symbol as libc::c_ulong,i32::from(pressed)) } }
     }
