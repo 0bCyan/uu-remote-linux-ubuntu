@@ -47,6 +47,28 @@ pub enum SignalingEvent {
 
 pub struct SignalingClient {
     tx_outgoing: mpsc::Sender<String>,
+    // Belongs to this room only; fresh-room reconnect must not reuse it.
+    _reconnect_key: Arc<std::sync::Mutex<Option<String>>>,
+}
+
+fn refreshed_key(ack:&Value)->Option<String> {
+    let values=ack.as_array()?;
+    if values.first()?.as_str()? != "success" { return None; }
+    let key=values.get(1)?.get("reconnect_key")?.as_str()?;
+    (!key.is_empty() && key.len()<=16384).then(||key.to_owned())
+}
+
+#[cfg(test)]
+mod refresh_tests {
+    use super::refreshed_key;
+    use serde_json::json;
+    #[test]
+    fn accepts_only_successful_complete_reconnect_key_ack() {
+        assert_eq!(refreshed_key(&json!(["success",{"reconnect_key":"synthetic-key"}])),Some("synthetic-key".into()));
+        for ack in [json!(["failure",{"reconnect_key":"synthetic-key"}]),json!(["success"]),json!(["success",{"reconnect_key":""}]),json!(["success",{"reconnect_key":123}]),json!({"reconnect_key":"synthetic-key"})] {
+            assert!(refreshed_key(&ack).is_none());
+        }
+    }
 }
 
 impl SignalingClient {
@@ -91,6 +113,8 @@ impl SignalingClient {
         let tx_out_clone = tx_outgoing.clone();
         static GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
         let generation=GENERATION.fetch_add(1,std::sync::atomic::Ordering::Relaxed);
+        let reconnect_key=Arc::new(std::sync::Mutex::new(None));
+        let refreshed=reconnect_key.clone();
 
         // 接收与状态机协程
         tokio::spawn(async move {
@@ -99,9 +123,33 @@ impl SignalingClient {
             let mut last_ping=started;
             let mut pings=0u64;
             let mut pong_queued=0u64;
+            let mut connected=false;
+            let mut next_refresh=tokio::time::Instant::now()+std::time::Duration::from_secs(30);
+            let mut refresh_ack=None;
             // Socket.IO binary event awaiting attachments: (event name, header JSON).
             let mut pending_binary: Option<(String, Value)> = None;
-            while let Some(msg_res) = read.next().await {
+            loop {
+                let msg_res=tokio::select! {
+                    _=event_sender.closed()=>break,
+                    // Official ControlledSession RefreshSignalTokenLoop: first
+                    // 30s, success every ~300s, failure retry after 30s. Native
+                    // libstreamer 0x885774 / 0x885e58; emit has NO payload args.
+                    _=tokio::time::sleep_until(next_refresh), if connected => {
+                        req_counter+=1;
+                        refresh_ack=Some(req_counter);
+                        let packet=format!("42{}[\"refresh_reconnect_key\"]",req_counter);
+                        if tx_out_clone.send(packet).await.is_err() {
+                            let _=event_sender.send(SignalingEvent::Disconnected).await;break;
+                        }
+                        next_refresh=tokio::time::Instant::now()+std::time::Duration::from_secs(30);
+                        log::info!("Signaling reconnect-key refresh requested: generation={} age_s={}",generation,started.elapsed().as_secs());
+                        continue;
+                    },
+                    msg=read.next()=>match msg {
+                        Some(msg)=>msg,
+                        None=>{let _=event_sender.send(SignalingEvent::Disconnected).await;break;}
+                    },
+                };
                 match msg_res {
                     Ok(Message::Text(txt)) => {
                         // Engine.IO 报文处理
@@ -119,6 +167,8 @@ impl SignalingClient {
                                 log::info!("Signaling heartbeat progress: generation={} age_s={} pings={} pong_queued={} gap_s={}",generation,started.elapsed().as_secs(),pings,pong_queued,gap);
                             }
                         } else if txt.starts_with("40") {
+                            connected=true;
+                            next_refresh=tokio::time::Instant::now()+std::time::Duration::from_secs(30);
                             // Socket.IO connected -> 发送 room_info 请求
                             req_counter += 1;
                             let room_req = format!("42{}[\"room_info\"]", req_counter);
@@ -126,9 +176,20 @@ impl SignalingClient {
                             let _ = event_sender.send(SignalingEvent::Connected).await;
                         } else if txt.starts_with("43") {
                             // Socket.IO ack 回调
-                            let payload = &txt[txt.find('[').unwrap_or(2)..];
+                            let begin=txt.find('[').unwrap_or(2);
+                            let ack_id=txt[2..begin].parse::<u64>().ok();
+                            let payload = &txt[begin..];
                             if let Ok(v) = serde_json::from_str::<Value>(payload) {
-                                let _ = event_sender.send(SignalingEvent::RoomInfoAck(v)).await;
+                                if ack_id.is_some() && ack_id==refresh_ack {
+                                    let key=refreshed_key(&v);
+                                    let success=key.is_some();
+                                    if success {
+                                        *refreshed.lock().unwrap()=key;
+                                        next_refresh=tokio::time::Instant::now()+std::time::Duration::from_secs(300);
+                                    }
+                                    refresh_ack=None;
+                                    log::info!("Signaling reconnect-key refresh acknowledged: generation={} age_s={} success={}",generation,started.elapsed().as_secs(),success);
+                                } else { let _ = event_sender.send(SignalingEvent::RoomInfoAck(v)).await; }
                             }
                         } else if txt.starts_with("45") || txt.starts_with("46") {
                             // Socket.IO binary event/ack: header text, attachments follow as binary frames.
@@ -240,9 +301,10 @@ impl SignalingClient {
                     _ => {}
                 }
             }
+            log::info!("Signaling receiver stopped: generation={} age_s={}",generation,started.elapsed().as_secs());
         });
 
-        Ok(Self { tx_outgoing })
+        Ok(Self { tx_outgoing, _reconnect_key:reconnect_key })
     }
 
     pub async fn emit_event(&self, event: &str, payload: serde_json::Value) -> Result<(), String> {
