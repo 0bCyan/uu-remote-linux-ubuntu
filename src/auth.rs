@@ -196,10 +196,38 @@ impl UUAuthClient {
         if code == TOKEN_INVALID { return Err(RoomError::LoginExpired); }
         if status == 200 && code == 0 {
             if let Some(data) = body.get("data") {
-                return serde_json::from_value(data.clone()).map_err(|e| RoomError::Other(format!("room data decode failed: {e}")));
+                let room: RoomData = serde_json::from_value(data.clone()).map_err(|e| RoomError::Other(format!("room data decode failed: {e}")))?;
+                let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
+                log::info!("Room token lifetime: remaining_s={:?}", room_token_lifetime(&room.token, now));
+                return Ok(room);
             }
         }
         Err(RoomError::Other(format!("create_room error http {status} code {code}: {}",
             body.get("msg").and_then(|m| m.as_str()).unwrap_or(""))))
+    }
+}
+
+// Report only the remaining lifetime; never return or log token/claim contents.
+fn room_token_lifetime(token: &str, now: u64) -> Option<i64> {
+    use base64::Engine as _;
+    let payload = token.split('.').nth(1)?;
+    if payload.len() > 16384 { return None; }
+    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(payload)
+        .or_else(|_| base64::engine::general_purpose::URL_SAFE.decode(payload)).ok()?;
+    let claims: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+    let remaining = claims.get("exp")?.as_i64()?.saturating_sub(i64::try_from(now).ok()?);
+    (remaining.unsigned_abs() <= 7 * 24 * 3600).then_some(remaining)
+}
+
+#[cfg(test)]
+mod room_lifetime_tests {
+    use super::room_token_lifetime;
+    use base64::Engine as _;
+    #[test]
+    fn exposes_only_remaining_seconds_and_handles_opaque_tokens() {
+        let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(br#"{"exp":2200,"ignored":"test-only"}"#);
+        assert_eq!(room_token_lifetime(&format!("h.{payload}.s"),1000),Some(1200));
+        assert_eq!(room_token_lifetime("opaque",1000),None);
+        assert_eq!(room_token_lifetime("h.invalid.s",1000),None);
     }
 }
