@@ -29,24 +29,20 @@ def activate(app):
   label.set_label('VM marker copied')
  check.connect('clicked',read);copy.connect('clicked',write)
  window.connect('notify::is-active',lambda *_:state.update(window_active=window.is_active()))
- controller=Gtk.EventControllerLegacy();controller.set_propagation_phase(Gtk.PropagationPhase.CAPTURE)
- def event_seen(controller,event):
-  kind=event.get_event_type()
-  if kind in (Gdk.EventType.BUTTON_PRESS,Gdk.EventType.BUTTON_RELEASE):
-   down=kind==Gdk.EventType.BUTTON_PRESS
-   name='button_presses' if down else 'button_releases'
-   state[name]+=1
-   state['last_button']=event.get_button()
-   state['last_modifiers']=int(event.get_modifier_state())
-   x,y=event.get_position()
-   widget=window.pick(x,y,Gtk.PickFlags.DEFAULT)
-   state['last_target']='other'
-   while widget:
-    if widget is check:state['last_target']='check';break
-    if widget is copy:state['last_target']='copy';break
-    widget=widget.get_parent()
-  return False
- controller.connect('event',event_seen);window.add_controller(controller)
+ gesture=Gtk.GestureClick();gesture.set_propagation_phase(Gtk.PropagationPhase.CAPTURE)
+ def pressed_seen(gesture,count,x,y):
+  state['button_presses']+=1
+  state['last_button']=gesture.get_current_button()
+  state['last_modifiers']=int(gesture.get_current_event_state())
+  widget=window.pick(x,y,Gtk.PickFlags.DEFAULT)
+  state['last_target']='other'
+  while widget:
+   if widget is check:state['last_target']='check';break
+   if widget is copy:state['last_target']='copy';break
+   widget=widget.get_parent()
+  # An observer must not compete with the button's own click gesture.
+  gesture.set_state(Gtk.EventSequenceState.DENIED)
+ gesture.connect('pressed',pressed_seen);window.add_controller(gesture)
  window.present();window.fullscreen()
  state['native_wayland']='wayland' in type(Gdk.Display.get_default()).__name__.lower()
  def record(): report.write_text(json.dumps(state));return True
