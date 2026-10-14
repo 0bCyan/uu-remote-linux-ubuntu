@@ -69,6 +69,29 @@ mod refresh_tests {
             assert!(refreshed_key(&ack).is_none());
         }
     }
+    #[tokio::test]
+    async fn closes_obsolete_socket_even_if_peer_retains_client() {
+        use futures_util::{SinkExt,StreamExt};
+        use tokio_tungstenite::tungstenite::Message;
+        let listener=tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address=listener.local_addr().unwrap();
+        let server=tokio::spawn(async move {
+            let (tcp,_)=listener.accept().await.unwrap();
+            let mut socket=tokio_tungstenite::accept_async(tcp).await.unwrap();
+            socket.send(Message::Text("0{}".into())).await.unwrap();
+            assert_eq!(socket.next().await.unwrap().unwrap(),Message::Text("40".into()));
+            socket.send(Message::Text("40{}".into())).await.unwrap();
+            assert!(socket.next().await.unwrap().unwrap().into_text().unwrap().contains("room_info"));
+            matches!(socket.next().await,None|Some(Err(_))|Some(Ok(Message::Close(_))))
+        });
+        let (sender,mut events)=tokio::sync::mpsc::channel(4);
+        let retained=super::SignalingClient::connect(&format!("ws://{address}"),"synthetic-only",sender).await.unwrap();
+        assert!(matches!(events.recv().await,Some(super::SignalingEvent::Connected)));
+        drop(events);
+        assert!(tokio::time::timeout(std::time::Duration::from_secs(2),server).await.unwrap().unwrap());
+        // Retain it until after the server sees closure, just like PC callbacks.
+        drop(retained);
+    }
 }
 
 impl SignalingClient {
@@ -101,7 +124,7 @@ impl SignalingClient {
         let (tx_outgoing, mut rx_outgoing) = mpsc::channel::<String>(32);
 
         // 发送协程
-        tokio::spawn(async move {
+        let writer=tokio::spawn(async move {
             while let Some(msg) = rx_outgoing.recv().await {
                 if let Err(e) = write.send(Message::Text(msg)).await {
                     log::warn!("WS send error: {}", e);
@@ -302,6 +325,9 @@ impl SignalingClient {
                 }
             }
             log::info!("Signaling receiver stopped: generation={} age_s={}",generation,started.elapsed().as_secs());
+            // Live peer callbacks can retain the old SignalingClient sender.
+            // Explicitly drop its write half too when this room stops reading.
+            writer.abort();
         });
 
         Ok(Self { tx_outgoing, _reconnect_key:reconnect_key })
