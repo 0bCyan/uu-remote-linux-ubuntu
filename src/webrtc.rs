@@ -271,7 +271,11 @@ impl WebRtcSession {
         let input_clone = input.clone();
         let control_capture = capture.clone();
         let control_sequence = Arc::new(std::sync::atomic::AtomicU64::new(1));
-        let text_clipboard_ready = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        // Capability belongs to the granted session, including while GNOME is
+        // locked. Echo can precede TEXT readiness and CONTROL auto-unlock;
+        // advertising false here would disable clipboard for the entire peer.
+        let portal_clipboard_supported = desktop && capture.portal.as_ref().is_some_and(|session| session.clipboard_supported());
+        let text_clipboard_ready = Arc::new(std::sync::atomic::AtomicBool::new(portal_clipboard_supported));
         // One file-transfer session per peer. The viewer may send FileTransferFtp RPCs on CONTROL,
         // but it receives file traffic only through streamerDidReceiveFileData, so every reply and
         // host-initiated request goes out on FILE_DATA_CHANNEL.

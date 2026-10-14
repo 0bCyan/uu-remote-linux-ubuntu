@@ -10,6 +10,7 @@ mod native {
     use std::{ffi::c_void, ptr::NonNull, sync::Mutex};
     extern "C" {
         fn uu_portal_open_persist(restore: *const libc::c_char, save: extern "C" fn(*const libc::c_char, *mut c_void), data: *mut c_void, error: *mut i32, width: *mut u32, height: *mut u32) -> *mut c_void;
+        fn uu_portal_clipboard_supported(portal: *mut c_void) -> i32;
         fn uu_portal_clipboard_ready(portal: *mut c_void) -> i32;
         fn uu_portal_clipboard_set(portal: *mut c_void, text: *const u8, length: usize) -> i32;
         fn uu_portal_clipboard_poll(portal: *mut c_void, text: *mut u8, capacity: usize) -> i32;
@@ -89,6 +90,9 @@ mod native {
             if code == 10 || code == 9 { super::blank(frame); Ok(()) } else { super::check(code) }
         }
 
+        pub fn clipboard_supported(&self) -> bool {
+            self.handle.lock().is_ok_and(|handle| unsafe { uu_portal_clipboard_supported(handle.0.as_ptr()) != 0 })
+        }
         pub fn clipboard_ready(&self) -> bool {
             self.handle.lock().is_ok_and(|handle| unsafe { uu_portal_clipboard_ready(handle.0.as_ptr()) != 0 })
         }
@@ -144,6 +148,7 @@ pub use native::Session as PortalSession;
 pub struct PortalSession { pub width: u32, pub height: u32 }
 #[cfg(not(all(target_os = "linux", feature = "portal")))]
 impl PortalSession {
+    pub fn clipboard_supported(&self) -> bool { false }
     pub fn clipboard_ready(&self) -> bool { false }
     pub fn clipboard_set(&self, _: &str) -> Result<(), String> { Err(error(2)) }
     pub fn clipboard_poll(&self) -> Option<String> { None }

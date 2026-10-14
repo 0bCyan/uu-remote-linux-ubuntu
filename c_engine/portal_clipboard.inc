@@ -94,6 +94,7 @@ static void selection_transfer(GDBusConnection *bus,const gchar *sender,const gc
         g_variant_new("(oub)",p->session,serial,success),NULL,G_DBUS_CALL_FLAGS_NONE,2000,NULL,NULL);
     if (reply) g_variant_unref(reply);
 }
+int uu_portal_clipboard_supported(struct uu_portal *p) { return p && p->clipboard_enabled; }
 int uu_portal_clipboard_ready(struct uu_portal *p) { return p && p->clipboard_enabled && uu_portal_alive(p); }
 int uu_portal_clipboard_set(struct uu_portal *p,const uint8_t *text,size_t length) {
     if (!uu_portal_clipboard_ready(p) || length>CLIP_LIMIT || !g_utf8_validate((const char *)text,(gssize)length,NULL)) return -1;
