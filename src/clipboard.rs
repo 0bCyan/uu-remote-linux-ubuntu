@@ -173,6 +173,15 @@ pub fn start_portal(session: std::sync::Arc<crate::portal::PortalSession>) -> Cl
     let (output,outgoing)=watch::channel(None);
     let (ready_tx,ready)=tokio::sync::oneshot::channel();
     tokio::task::spawn_blocking(move || {
+        // GNOME closes the native portal while locked. A desktop connection
+        // starts its TEXT channel before CONTROL auto-unlock/capture recovery.
+        // Wait for that same Arc to recover instead of permanently disabling
+        // clipboard on an already authorized but temporarily closed session.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+        while !session.is_alive() && std::time::Instant::now() < deadline {
+            if output.is_closed() || input.has_changed().is_err() { return; }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
         let available=session.clipboard_ready(); let _=ready_tx.send(available);
         if !available { return; }
         let mut last=None; let mut pending=None;
