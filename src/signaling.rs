@@ -148,7 +148,8 @@ impl SignalingClient {
             let mut pong_queued=0u64;
             let mut connected=false;
             let mut next_refresh=tokio::time::Instant::now()+std::time::Duration::from_secs(30);
-            let mut refresh_ack=None;
+            let mut refresh_acks=std::collections::VecDeque::new();
+            let mut accepted_refresh=0;
             // Socket.IO binary event awaiting attachments: (event name, header JSON).
             let mut pending_binary: Option<(String, Value)> = None;
             loop {
@@ -159,7 +160,8 @@ impl SignalingClient {
                     // libstreamer 0x885774 / 0x885e58; emit has NO payload args.
                     _=tokio::time::sleep_until(next_refresh), if connected => {
                         req_counter+=1;
-                        refresh_ack=Some(req_counter);
+                        refresh_acks.push_back(req_counter);
+                        if refresh_acks.len()>16 { refresh_acks.pop_front(); }
                         let packet=format!("42{}[\"refresh_reconnect_key\"]",req_counter);
                         if tx_out_clone.send(packet).await.is_err() {
                             let _=event_sender.send(SignalingEvent::Disconnected).await;break;
@@ -203,14 +205,17 @@ impl SignalingClient {
                             let ack_id=txt[2..begin].parse::<u64>().ok();
                             let payload = &txt[begin..];
                             if let Ok(v) = serde_json::from_str::<Value>(payload) {
-                                if ack_id.is_some() && ack_id==refresh_ack {
+                                if let Some(id)=ack_id.filter(|id|refresh_acks.contains(id)) {
+                                    refresh_acks.retain(|pending|*pending!=id);
                                     let key=refreshed_key(&v);
                                     let success=key.is_some();
-                                    if success {
+                                    // Accept a delayed retry response, but never replace
+                                    // a newer key with an older successful response.
+                                    if success && id>accepted_refresh {
+                                        accepted_refresh=id;
                                         *refreshed.lock().unwrap()=key;
                                         next_refresh=tokio::time::Instant::now()+std::time::Duration::from_secs(300);
                                     }
-                                    refresh_ack=None;
                                     log::info!("Signaling reconnect-key refresh acknowledged: generation={} age_s={} success={}",generation,started.elapsed().as_secs(),success);
                                 } else { let _ = event_sender.send(SignalingEvent::RoomInfoAck(v)).await; }
                             }
