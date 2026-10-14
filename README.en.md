@@ -165,6 +165,12 @@ Common environment variables:
 Host settings such as "lock after remote session" and "mute host" are stored in
 `~/.config/uuremote/host_settings.json`.
 
+## Let an AI agent install or develop it
+
+If you use Claude Code, Codex, Cursor or a similar coding agent, have it read [AGENTS.md](AGENTS.md) first.
+It is written for language models: build and install steps, a code map, protocol notes and development rules,
+enough to take over installation or development.
+
 ## How it works
 
 ```mermaid

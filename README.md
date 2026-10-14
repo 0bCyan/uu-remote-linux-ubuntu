@@ -157,6 +157,11 @@ journalctl --user -u uuremote-native.service -f   # 看到 availability=Some("re
 
 「远程结束后自动锁屏」「静音运行」等设置保存在 `~/.config/uuremote/host_settings.json`。
 
+## 让 AI 帮你安装或开发
+
+如果你用 Claude Code、Codex、Cursor 等 AI 编程工具，让它先阅读 [AGENTS.md](AGENTS.md)。
+这份文档写给大模型看，里面有编译安装步骤、代码地图、协议要点和开发规范，读完就能接手编译安装或继续开发。
+
 ## 工作原理
 
 ```mermaid
