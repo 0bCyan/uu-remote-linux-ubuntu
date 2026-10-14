@@ -166,7 +166,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         if login::run(gui).await.is_err() { std::process::exit(1); } // error already shown
         return Ok(());
     }
-    log::info!("Starting UU Remote Pure Native Rust Server v1.0.0...");
+    log::info!("Starting uu-remote-linux host v{}...", env!("CARGO_PKG_VERSION"));
 
     let mut capture = Arc::new((if desktop_backend::detect()?==desktop_backend::DesktopBackend::Portal
         && std::env::var("UU_PORTAL_PREAUTHORIZE").ok().as_deref()!=Some("1") {
