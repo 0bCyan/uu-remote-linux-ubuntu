@@ -50,8 +50,8 @@
 | KDE Plasma | X11 | ✅ 虚拟机测试通过 | 默认 |
 | Xfce | X11 | ✅ 虚拟机测试通过 | 默认 |
 | Cinnamon / MATE | X11 | ✅ 虚拟机测试通过 | 默认 |
-| Hyprland | Wayland（wlroots 原生协议） | ✅ 虚拟机测试通过（部分功能受限，见下） | `--features wayland` |
-| GNOME / KDE Plasma | Wayland（xdg-desktop-portal） | ✅ 虚拟机测试通过（部分功能受限，见下） | `--features wayland,portal` |
+| Hyprland | Wayland（wlroots 原生协议） | 🧪 实验性，虚拟机测试（部分功能受限，见下） | `--features wayland` |
+| GNOME / KDE Plasma | Wayland（xdg-desktop-portal） | 🧪 实验性，虚拟机测试（部分功能受限，见下） | `--features wayland,portal` |
 
 除 GNOME（X11）外，其余桌面目前都是在虚拟机里测试的。如果你在真机上遇到问题，欢迎[提交 issue](../../issues)，
 请附上发行版、桌面环境、显卡型号和 `journalctl --user -u uuremote-native.service` 里的相关日志。
@@ -179,6 +179,10 @@ flowchart LR
 - 日志不记录键盘输入、终端内容、剪贴板内容、文件内容、密码和令牌。
 - 自动解锁的密码保存在**控制端**（官方客户端）里，被控端只拿来做一次 PAM 校验，不落盘、不写日志。
 - 能连上这台机器的，只有登录了同一个 UU 账号的设备。请保管好你的 UU 账号。
+
+## 许可证
+
+本项目以 [GPL-3.0](LICENSE) 许可证发布：可以自由使用、修改和再发布，但再发布（包括修改后的版本）必须同样以 GPL-3.0 开源。
 
 ## 免责声明
 

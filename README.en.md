@@ -54,8 +54,8 @@
 | KDE Plasma | X11 | ✅ Tested in a VM | default |
 | Xfce | X11 | ✅ Tested in a VM | default |
 | Cinnamon / MATE | X11 | ✅ Tested in a VM | default |
-| Hyprland | Wayland (native wlroots protocols) | ✅ Tested in a VM (some features limited, see below) | `--features wayland` |
-| GNOME / KDE Plasma | Wayland (xdg-desktop-portal) | ✅ Tested in a VM (some features limited, see below) | `--features wayland,portal` |
+| Hyprland | Wayland (native wlroots protocols) | 🧪 Experimental, tested in a VM (some features limited, see below) | `--features wayland` |
+| GNOME / KDE Plasma | Wayland (xdg-desktop-portal) | 🧪 Experimental, tested in a VM (some features limited, see below) | `--features wayland,portal` |
 
 Apart from GNOME on X11, these desktops have been tested in virtual machines so far. If something goes wrong on
 real hardware, please [open an issue](../../issues) with your distribution, desktop, GPU and the relevant lines from
@@ -189,6 +189,11 @@ flowchart LR
 - For auto unlock the password is stored in the **viewer** (the official client). The host only checks it
   once with PAM; it is never written to disk or logs.
 - Only devices logged in to the same UU account can connect. Keep your UU account safe.
+
+## License
+
+Released under the [GPL-3.0](LICENSE): you may use, modify and redistribute it, but redistributed versions
+(including modified ones) must also be released under the GPL-3.0.
 
 ## Disclaimer
 

@@ -1,10 +1,12 @@
 [package]
 name = "uu-remote-linux"
-version = "1.0.0"
+version = "0.1.0"
 edition = "2021"
 authors = ["uu-remote-linux contributors"]
 description = "Unofficial Linux host for NetEase UU Remote: control a Linux desktop from the official clients"
 readme = "README.md"
+license = "GPL-3.0-or-later"
+repository = "https://github.com/xtftbwvfp/uu-remote-linux"
 
 # The executable keeps its established name (deploy scripts, systemd units, docs).
 [[bin]]
