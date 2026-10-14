@@ -4,7 +4,7 @@ from pathlib import Path
 gi.require_version('Gtk','4.0'); gi.require_version('Gdk','4.0')
 from gi.repository import Gtk,Gdk,GLib
 assert Path('/proc/sys/kernel/hostname').read_text().strip()=='uu-hyprland-test'
-state={'native_wayland':False,'mac_to_vm':False,'reverse_owned':False,'button_presses':0,'button_releases':0,'check_activations':0,'copy_activations':0,'window_active':False}
+state={'native_wayland':False,'mac_to_vm':False,'reverse_owned':False,'button_presses':0,'button_releases':0,'check_activations':0,'copy_activations':0,'window_active':False,'key_presses':0,'key_releases':0}
 report=Path('/tmp/uuremote-clipboard-official.json')
 app=Gtk.Application(application_id='dev.uuremote.ClipboardOfficial')
 def activate(app):
@@ -28,6 +28,11 @@ def activate(app):
   clipboard.set('UU-VM-to-Mac 中文🚀');state['reverse_owned']=True
   label.set_label('VM marker copied')
  check.connect('clicked',read);copy.connect('clicked',write)
+ keys=Gtk.EventControllerKey();keys.set_propagation_phase(Gtk.PropagationPhase.CAPTURE)
+ def key_seen(*_):state['key_presses']+=1;return False
+ keys.connect('key-pressed',key_seen)
+ keys.connect('key-released',lambda *_:state.update(key_releases=state['key_releases']+1))
+ window.add_controller(keys)
  window.connect('notify::is-active',lambda *_:state.update(window_active=window.is_active()))
  gesture=Gtk.GestureClick();gesture.set_propagation_phase(Gtk.PropagationPhase.CAPTURE)
  def pressed_seen(gesture,count,x,y):
