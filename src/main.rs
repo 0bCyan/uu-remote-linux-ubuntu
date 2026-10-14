@@ -76,6 +76,48 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             if report.get(key).and_then(serde_json::Value::as_bool)!=Some(true) { return Err(format!("Portal native GTK acceptance failed: {key}").into()); }
         }
         println!("Portal native GTK input acceptance passed: motion/click/keyboard/text");
+        if std::env::args().nth(2).as_deref() == Some("--lock-recovery") {
+            let session = screen.portal.as_ref().unwrap();
+            let before = report["key_presses"].as_u64().ok_or("Missing GTK key count")?;
+            let run_lock = |action: &str| -> Result<(), String> {
+                if std::process::Command::new("timeout").args(["5s", "loginctl", "--no-ask-password", action]).arg(
+                    String::from_utf8(std::process::Command::new("loginctl").args(["show-user", &unsafe { libc::getuid() }.to_string(), "-p", "Display", "--value"]).output().map_err(|_| "Display session unavailable")?.stdout).map_err(|_| "Invalid display session")?.trim()
+                ).status().map_err(|_| "loginctl unavailable")?.success() {
+                    Ok(())
+                } else { Err("Test VM lock command failed".into()) }
+            };
+            let locked = session_lock::watch_locked();
+            run_lock("lock-session")?;
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+            while *locked.borrow() != Some(true) && std::time::Instant::now() < deadline {
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            }
+            if *locked.borrow() != Some(true) { return Err("Test VM did not lock".into()); }
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            let closed = !session.is_alive();
+            run_lock("unlock-session")?;
+            let mut frame = vec![0; screen.width as usize * screen.height as usize * 4];
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+            loop {
+                session.capture(&mut frame)?;
+                if *locked.borrow() == Some(false) && session.is_alive() { break; }
+                if std::time::Instant::now() >= deadline { return Err("Test VM portal did not recover".into()); }
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            }
+            // Keep the original InputInjector and Arc: no rebind after recovery.
+            tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+            input.mouse_absolute_normalized(0.5,0.5,(screen.width,screen.height));
+            input.mouse_button(1,true); input.mouse_button(1,false);
+            for key in b"UUWAYLAND" { input.windows_key_event(i32::from(*key),true); input.windows_key_event(i32::from(*key),false); }
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            input.release_held();
+            let after:serde_json::Value=serde_json::from_slice(&std::fs::read("/tmp/uuremote-input-acceptance.json")?)?;
+            if after["key_presses"].as_u64() != Some(before + 9) || after["key_releases"].as_u64() != Some(before + 9) {
+                return Err("Original portal input binding failed after lock recovery".into());
+            }
+            println!("Portal same-Arc lock recovery input passed: session_closed={} balanced_new_keys=9", closed);
+            return Ok(());
+        }
         let path=std::env::args().nth(2);
         return video::probe((screen.width,screen.height),screen.display.clone(),screen.portal.clone(),path).await.map_err(|e|e.into());
     }

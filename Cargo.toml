@@ -6,7 +6,7 @@ authors = ["uu-remote-linux contributors"]
 description = "Unofficial Linux host for NetEase UU Remote: control a Linux desktop from the official clients"
 readme = "README.md"
 license = "GPL-3.0-or-later"
-repository = "https://github.com/xtftbwvfp/uu-remote-linux"
+repository = "https://github.com/VallierDev/uu-remote-linux"
 
 # The executable keeps its established name (deploy scripts, systemd units, docs).
 [[bin]]
