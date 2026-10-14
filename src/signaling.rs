@@ -89,10 +89,16 @@ impl SignalingClient {
         });
 
         let tx_out_clone = tx_outgoing.clone();
+        static GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        let generation=GENERATION.fetch_add(1,std::sync::atomic::Ordering::Relaxed);
 
         // 接收与状态机协程
         tokio::spawn(async move {
             let mut req_counter = 10;
+            let started=std::time::Instant::now();
+            let mut last_ping=started;
+            let mut pings=0u64;
+            let mut pong_queued=0u64;
             // Socket.IO binary event awaiting attachments: (event name, header JSON).
             let mut pending_binary: Option<(String, Value)> = None;
             while let Some(msg_res) = read.next().await {
@@ -100,11 +106,18 @@ impl SignalingClient {
                     Ok(Message::Text(txt)) => {
                         // Engine.IO 报文处理
                         if txt.starts_with('0') {
+                            if let Ok(open)=serde_json::from_str::<Value>(&txt[1..]) {
+                                log::info!("Signaling heartbeat config: generation={} ping_interval_ms={:?} ping_timeout_ms={:?}",generation,open.get("pingInterval").and_then(Value::as_u64),open.get("pingTimeout").and_then(Value::as_u64));
+                            }
                             // Open packet -> 发送 Socket.IO connect
                             let _ = tx_out_clone.send("40".into()).await;
                         } else if txt == "2" {
                             // Ping -> 回复 Pong
-                            let _ = tx_out_clone.send("3".into()).await;
+                            let gap=last_ping.elapsed().as_secs();last_ping=std::time::Instant::now();pings+=1;
+                            if tx_out_clone.send("3".into()).await.is_ok() { pong_queued+=1; }
+                            if pings==1 || pings%12==0 {
+                                log::info!("Signaling heartbeat progress: generation={} age_s={} pings={} pong_queued={} gap_s={}",generation,started.elapsed().as_secs(),pings,pong_queued,gap);
+                            }
                         } else if txt.starts_with("40") {
                             // Socket.IO connected -> 发送 room_info 请求
                             req_counter += 1;
@@ -170,14 +183,16 @@ impl SignalingClient {
                                             }
                                         }
                                         "released" => {
+                                            log::info!("Cloud peer event: generation={} event=released age_s={} pings={} last_ping_gap_s={} ice_id_present={}",generation,started.elapsed().as_secs(),pings,last_ping.elapsed().as_secs(),data.get("ice_id").is_some());
                                             let _ = event_sender
                                                 .send(SignalingEvent::Released(data.clone()))
                                                 .await;
                                         }
                                         "left" | "leave" => {
+                                            log::info!("Cloud peer event: generation={} event={} age_s={} pings={} last_ping_gap_s={} ice_id_present={}",generation,event_name,started.elapsed().as_secs(),pings,last_ping.elapsed().as_secs(),data.get("ice_id").is_some());
                                             let ice_id = data.get("ice_id").and_then(|v| v.as_str()).unwrap_or("");
                                             if ice_id.is_empty() {
-                                                log::warn!("Room expired from NetEase cloud (leave event). Triggering room renewal...");
+                                                log::warn!("Cloud room leave without peer identifier; renewing signaling (expiry cause unknown)");
                                                 let _ = event_sender.send(SignalingEvent::Disconnected).await;
                                             } else {
                                                 let _ = event_sender
@@ -212,7 +227,13 @@ impl SignalingClient {
                             }
                         }
                     }
-                    Ok(Message::Close(_)) | Err(_) => {
+                    Ok(Message::Close(frame)) => {
+                        log::warn!("Signaling socket closed: generation={} age_s={} close_code={:?} pings={} last_ping_gap_s={}",generation,started.elapsed().as_secs(),frame.map(|f|u16::from(f.code)),pings,last_ping.elapsed().as_secs());
+                        let _ = event_sender.send(SignalingEvent::Disconnected).await;
+                        break;
+                    }
+                    Err(_) => {
+                        log::warn!("Signaling socket receive failed: generation={} age_s={} pings={} last_ping_gap_s={}",generation,started.elapsed().as_secs(),pings,last_ping.elapsed().as_secs());
                         let _ = event_sender.send(SignalingEvent::Disconnected).await;
                         break;
                     }
