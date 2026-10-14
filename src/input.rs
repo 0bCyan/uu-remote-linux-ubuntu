@@ -33,11 +33,11 @@ struct PendingPointer {
 unsafe fn x11_pointer_state(_: *mut libc::c_int,_:*mut libc::c_int,_:*mut libc::c_uint)->libc::c_int {-1}
 #[derive(Default)]
 struct HeldInput { buttons: std::collections::BTreeSet<i32>, keys: std::collections::BTreeSet<u64> }
-pub struct InputInjector { portal_failures: std::sync::atomic::AtomicUsize, portal_outcomes: std::sync::atomic::AtomicUsize, portal:std::sync::Mutex<Option<std::sync::Arc<crate::portal::PortalSession>>>, backend: crate::desktop_backend::DesktopBackend, pending: std::sync::Mutex<PendingPointer>, held: std::sync::Mutex<HeldInput> }
+pub struct InputInjector { portal_failures: std::sync::atomic::AtomicUsize, portal_outcomes: [std::sync::atomic::AtomicUsize; 3], portal:std::sync::Mutex<Option<std::sync::Arc<crate::portal::PortalSession>>>, backend: crate::desktop_backend::DesktopBackend, pending: std::sync::Mutex<PendingPointer>, held: std::sync::Mutex<HeldInput> }
 
 impl InputInjector {
     pub fn new() -> Self {
-        Self { portal_failures: std::sync::atomic::AtomicUsize::new(0), portal_outcomes: std::sync::atomic::AtomicUsize::new(0), portal:std::sync::Mutex::new(None), backend:crate::desktop_backend::detect().unwrap_or(crate::desktop_backend::DesktopBackend::X11), pending: std::sync::Mutex::new(PendingPointer::default()), held:std::sync::Mutex::new(HeldInput::default()) }
+        Self { portal_failures: std::sync::atomic::AtomicUsize::new(0), portal_outcomes: std::array::from_fn(|_| std::sync::atomic::AtomicUsize::new(0)), portal:std::sync::Mutex::new(None), backend:crate::desktop_backend::detect().unwrap_or(crate::desktop_backend::DesktopBackend::X11), pending: std::sync::Mutex::new(PendingPointer::default()), held:std::sync::Mutex::new(HeldInput::default()) }
     }
 
     pub fn bind_portal(&self,session:Option<std::sync::Arc<crate::portal::PortalSession>>) {
@@ -95,6 +95,12 @@ impl InputInjector {
     }
     pub fn wire_mouse_button(&self, button: i32, is_press: bool) {
         if let Some(mapped) = crate::input_mapping::mouse_button_to_x11(button) { self.mouse_button(mapped,is_press); }
+        else {
+            static UNKNOWN: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+            if UNKNOWN.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 16 {
+                log::warn!("Unsupported desktop wire mouse button: {}", button);
+            }
+        }
     }
     pub fn mouse_button(&self, button: i32, is_press: bool) {
         self.flush_pointer();
@@ -136,7 +142,8 @@ impl InputInjector {
     // and D-Bus errors. Never include keys, coordinates, text or portal tokens.
     fn portal_result(&self, operation: &str, result: Result<(), String>) -> i32 {
         use std::sync::atomic::Ordering::Relaxed;
-        if self.portal_outcomes.fetch_add(1, Relaxed) < 16 {
+        let slot = match operation { "motion" => 0, "button" => 1, _ => 2 };
+        if self.portal_outcomes[slot].fetch_add(1, Relaxed) < 16 {
             log::info!("Portal input outcome: operation={} success={}", operation, result.is_ok());
         }
         match result {

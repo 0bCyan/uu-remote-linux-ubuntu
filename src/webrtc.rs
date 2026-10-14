@@ -714,6 +714,16 @@ impl WebRtcSession {
                                     match crate::control_protocol::decode_control(&msg.data) {
                                         Ok(crate::control_protocol::ControlMessage::Input(event)) => {
                                             use crate::control_protocol::ControlInput;
+                                            // Separate receipt budgets keep motion floods from hiding clicks.
+                                            static RECEIPTS: [std::sync::atomic::AtomicUsize; 3] = [const { std::sync::atomic::AtomicUsize::new(0) }; 3];
+                                            let (slot, kind) = match &event {
+                                                ControlInput::MouseButton {..} | ControlInput::MouseClick {..} => (0, "button"),
+                                                ControlInput::Keyboard {..} | ControlInput::KeyboardClick {..} => (1, "keyboard"),
+                                                _ => (2, "motion"),
+                                            };
+                                            if RECEIPTS[slot].fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 16 {
+                                                log::info!("CONTROL input received: kind={}", kind);
+                                            }
                                             match &event {
                                                 ControlInput::MouseAbsolute {x,y} => input_worker.mouse_absolute_normalized(*x,*y,input_size),
                                                 ControlInput::MouseRelative {dx,dy} => input_worker.mouse_relative(*dx,*dy),
