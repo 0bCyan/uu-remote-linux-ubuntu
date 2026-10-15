@@ -167,7 +167,7 @@ X11 默认继续用 XTest，因为它能正确处理网络延迟下按住不放�
 **虚拟桌面**：需要完整的远程桌面时，用 Xvfb 创建一块虚拟屏幕，再在上面跑一个桌面环境（推荐 Xfce）：
 
 ```sh
-sudo apt install xvfb dbus-x11 xfce4      # 或其他桌面环境，用 UU_VIRTUAL_SESSION 指定
+sudo apt install xvfb xauth x11-utils dbus-x11 dbus-user-session xfce4      # 或其他桌面环境，用 UU_VIRTUAL_SESSION 指定
 install -Dm755 contrib/virtual-desktop/uu-virtual-desktop ~/.local/bin/uu-virtual-desktop
 install -Dm644 contrib/virtual-desktop/uu-virtual-desktop.service ~/.config/systemd/user/uu-virtual-desktop.service
 install -Dm644 contrib/virtual-desktop/virtual-display.conf ~/.config/systemd/user/uuremote-native.service.d/virtual-display.conf
@@ -266,3 +266,9 @@ PulseAudio and PipeWire-pulse use the same `pactl` interface (install `pulseaudi
 `libpulse` on Arch). When routing is unavailable, the existing mute/monitor path remains.
 Changing the switch restarts only the scoped audio encoder; normal non-muted capture is unchanged.
 `virtual-audio-probe` temporarily routes output for five seconds and restores it (local diagnostic).
+
+### Virtual desktop user bus
+
+The supervisor imports DISPLAY and XAUTHORITY into the linger user bus, waits for authenticated
+X11 readiness, and keeps its cleanup trap alive. The sample drop-in uses `%t/uu-virtual-99.Xauthority`.
+Use a dedicated headless account. See the [setup and official Mac acceptance checklist](contrib/virtual-desktop/ACCEPTANCE.md).

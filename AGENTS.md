@@ -246,3 +246,9 @@ PulseAudio and PipeWire-pulse use the same `pactl` interface (install `pulseaudi
 `libpulse` on Arch). When routing is unavailable, the existing mute/monitor path remains.
 Changing the switch restarts only the scoped audio encoder; normal non-muted capture is unchanged.
 `virtual-audio-probe` temporarily routes output for five seconds and restores it (local diagnostic).
+
+### Virtual desktop user bus
+
+The supervisor imports DISPLAY and XAUTHORITY into the linger user bus, waits for authenticated
+X11 readiness, and keeps its cleanup trap alive. The sample drop-in uses `%t/uu-virtual-99.Xauthority`.
+Use a dedicated headless account. See the [setup and official Mac acceptance checklist](contrib/virtual-desktop/ACCEPTANCE.md).

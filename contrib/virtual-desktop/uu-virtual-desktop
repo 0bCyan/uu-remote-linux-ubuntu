@@ -1,5 +1,5 @@
 #!/bin/sh
-# Virtual desktop for a monitorless Linux host: Xvfb + a desktop session on its own D-Bus session bus.
+# Virtual desktop for a monitorless Linux host: Xvfb + a desktop session on the user bus (or an isolated private bus).
 # uuremote-server then serves it with DISPLAY=$UU_VIRTUAL_DISPLAY (see README in this folder).
 #   UU_VIRTUAL_DISPLAY  X display number (default :99)
 #   UU_VIRTUAL_SIZE     screen size (default 1920x1080)
@@ -18,23 +18,64 @@ if [ -z "$session" ]; then
 fi
 [ -n "$session" ] || { echo "no desktop session found; set UU_VIRTUAL_SESSION" >&2; exit 1; }
 command -v Xvfb >/dev/null || { echo "Xvfb not installed (apt install xvfb)" >&2; exit 1; }
-command -v dbus-run-session >/dev/null || { echo "dbus-run-session not installed (apt install dbus)" >&2; exit 1; }
+bus="${UU_VIRTUAL_BUS:-user}"
+case "$bus" in user|private) ;; *) echo "UU_VIRTUAL_BUS must be user or private" >&2; exit 1 ;; esac
+command -v xauth >/dev/null || { echo "xauth not installed" >&2; exit 1; }
+command -v xdpyinfo >/dev/null || { echo "xdpyinfo not installed" >&2; exit 1; }
+case "$display" in :[0-9]*) ;; *) echo "UU_VIRTUAL_DISPLAY must be a local display number" >&2; exit 1 ;; esac
+number="${display#:}"
+case "$number" in *[!0-9]*|'') echo "invalid display number" >&2; exit 1 ;; esac
+socket="/tmp/.X11-unix/X$number"
+[ ! -e "$socket" ] || { echo "display already in use" >&2; exit 1; }
+umask 077
+export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+authority="$XDG_RUNTIME_DIR/uu-virtual-$number.Xauthority"
+# The display socket was checked above; replace a stale authority after a service crash.
+[ ! -L "$authority" ] || { echo "refusing a symlink authority" >&2; exit 1; }
+temporary=$(mktemp "$XDG_RUNTIME_DIR/uu-virtual-xauth.XXXXXX")
+xvfb=
+child=
+cleanup() {
+    trap - EXIT INT TERM
+    [ -z "$child" ] || kill "$child" 2>/dev/null || :
+    [ -z "$xvfb" ] || kill "$xvfb" 2>/dev/null || :
+    [ -z "$xvfb" ] || wait "$xvfb" 2>/dev/null || :
+    rm -f "$authority" "$temporary"
+}
+trap cleanup EXIT
+trap 'exit 143' TERM
+trap 'exit 130' INT
+cookie=$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')
+xauth -f "$temporary" add "$display" MIT-MAGIC-COOKIE-1 "$cookie"
+unset cookie
+mv "$temporary" "$authority"
+export XAUTHORITY="$authority"
 
-Xvfb "$display" -screen 0 "${size}x24" -nolisten tcp -noreset &
+Xvfb "$display" -screen 0 "${size}x24" -auth "$authority" -nolisten tcp -noreset &
 xvfb=$!
-trap 'kill "$xvfb" 2>/dev/null' EXIT INT TERM
-socket="/tmp/.X11-unix/X${display#:}"
-for _ in $(seq 50); do [ -S "$socket" ] && break; sleep 0.1; done
-[ -S "$socket" ] || { echo "Xvfb did not start on $display" >&2; exit 1; }
-
 export DISPLAY="$display"
-unset WAYLAND_DISPLAY XAUTHORITY
+unset WAYLAND_DISPLAY SESSION_MANAGER
 export XDG_SESSION_TYPE=x11
-if [ "${UU_VIRTUAL_BUS:-user}" = user ]; then
-    # Activated services inherit the user manager's environment, not this process's: export DISPLAY there.
-    dbus-update-activation-environment --systemd DISPLAY XDG_SESSION_TYPE
-    exec sh -c "$session"
+ready=false
+for _ in $(seq 50); do
+    kill -0 "$xvfb" 2>/dev/null || break
+    if xdpyinfo >/dev/null 2>&1; then ready=true; break; fi
+    sleep 0.1
+done
+[ "$ready" = true ] || { echo "Xvfb did not become ready" >&2; exit 1; }
+if [ "$bus" = user ]; then
+    # Linger creates the user manager and its bus without a graphical login.
+    : "${XDG_RUNTIME_DIR:=/run/user/$(id -u)}"
+    export XDG_RUNTIME_DIR
+    export DBUS_SESSION_BUS_ADDRESS="unix:path=$XDG_RUNTIME_DIR/bus"
+    [ -S "$XDG_RUNTIME_DIR/bus" ] || { echo "user bus unavailable; enable loginctl enable-linger" >&2; exit 1; }
+    systemctl --user unset-environment WAYLAND_DISPLAY
+    dbus-update-activation-environment --systemd DISPLAY XAUTHORITY XDG_SESSION_TYPE
+    # Keep the supervising shell alive: exec would discard the Xvfb cleanup trap.
+    sh -c "$session" &
 else
-    # Private bus: independent of the user manager; activation through systemd may still escape to the user bus.
-    dbus-run-session -- sh -c "$session"
+    dbus-run-session -- sh -c "$session" &
 fi
+child=$!
+if [ -n "${NOTIFY_SOCKET:-}" ]; then systemd-notify --ready; fi
+wait "$child"

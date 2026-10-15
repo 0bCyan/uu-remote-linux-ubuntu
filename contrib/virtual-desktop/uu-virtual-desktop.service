@@ -3,6 +3,11 @@ Description=Virtual X desktop for uu-remote-linux (Xvfb + session bus)
 After=dbus.socket
 
 [Service]
+Type=notify
+NotifyAccess=all
+TimeoutStartSec=30
+TimeoutStopSec=10
+KillMode=control-group
 # Environment=UU_VIRTUAL_SESSION=startxfce4
 # Environment=UU_VIRTUAL_SIZE=1920x1080
 # Environment=UU_VIRTUAL_BUS=private
