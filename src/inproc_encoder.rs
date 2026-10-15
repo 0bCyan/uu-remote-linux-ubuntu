@@ -1,4 +1,4 @@
-//! In-process X11 capture and H.264 encoding through libavdevice/libavcodec.
+//! In-process X11 capture and H.264/HEVC encoding through libavdevice/libavcodec.
 //! It replaces the `ffmpeg` child process with the same codec options, so the viewer
 //! still receives the same Annex-B access units (AUD, SPS/PPS, IDR, P).
 use std::ffi::CString;
@@ -25,6 +25,7 @@ pub struct Config {
     pub max_bps: i64,
     pub buffer_bits: i64,
     pub encoder: crate::video::Encoder,
+    pub codec: crate::capture_setting::VideoCodec,
     /// Capture on XDamage changes (XShm) instead of x11grab; `UU_CAPTURE=grab` turns it off.
     pub damage: bool,
 }
@@ -71,11 +72,11 @@ fn drain(encoder: &mut encoder::Video, packet: &mut Packet, units: &mpsc::Sender
     }
 }
 
-/// Opens the H.264 encoder for `config`. Returns the encoder, its input pixel format and output size.
+/// Opens the selected video encoder for `config`. Returns the encoder, its input pixel format and output size.
 fn open_encoder(config: &Config) -> Result<(encoder::Video, Pixel, u32, u32), String> {
     let (width, height) = config.output.unwrap_or(config.input);
-    let codec = encoder::find_by_name(config.encoder.name())
-        .ok_or("H.264 encoder is not available in this FFmpeg build")?;
+    let codec = encoder::find_by_name(config.encoder.name_for(config.codec))
+        .ok_or_else(|| format!("{} is not available in this FFmpeg build", config.encoder.name_for(config.codec)))?;
     // Allocate for this codec so FFmpeg fills its defaults; libx264 rejects a context allocated without one.
     let mut context = unsafe { codec::context::Context::wrap(ff::sys::avcodec_alloc_context3(codec.as_ptr()), None) }.encoder().video().map_err(text)?;
     context.set_width(width);
@@ -99,15 +100,22 @@ fn open_encoder(config: &Config) -> Result<(encoder::Video, Pixel, u32, u32), St
     let cq = config.cq.to_string();
     let gop = config.gop.to_string();
     let mut options = Dictionary::new();
+    let hevc = config.codec == crate::capture_setting::VideoCodec::H265;
     if config.encoder == crate::video::Encoder::Vaapi {
-        for (key,value) in [("profile", "constrained_baseline"), ("rc_mode", "VBR"), ("async_depth", "1"), ("aud", "1")] { options.set(key,value); }
+        for (key,value) in [("profile", if hevc { "main" } else { "constrained_baseline" }), ("rc_mode", "VBR"), ("async_depth", "1"), ("aud", "1")] { options.set(key,value); }
         options.set("qmin", &cq);
     } else if config.encoder == crate::video::Encoder::Nvenc {
-        for (key, value) in [("preset", "p4"), ("tune", "ull"), ("profile", "baseline"), ("rc", "vbr"),
+        for (key, value) in [("preset", "p4"), ("tune", "ull"), ("profile", if hevc { "main" } else { "baseline" }), ("rc", "vbr"),
             ("rc-lookahead", "0"), ("zerolatency", "1"), ("delay", "0"), ("aud", "1"), ("forced-idr", "1")] {
             options.set(key, value);
         }
         options.set("cq", &cq);
+    } else if hevc {
+        for (key, value) in [("preset", "superfast"), ("tune", "zerolatency"), ("profile", "main"), ("threads", "4"), ("forced-idr", "1")] {
+            options.set(key, value);
+        }
+        options.set("crf", &cq);
+        options.set("x265-params", &crate::video::x265_params(&gop));
     } else {
         let x264 = format!("aud=1:repeat-headers=1:scenecut=0:keyint={gop}:min-keyint={gop}");
         for (key, value) in [("preset", "superfast"), ("tune", "zerolatency"), ("profile", "baseline"), ("threads", "4")] {

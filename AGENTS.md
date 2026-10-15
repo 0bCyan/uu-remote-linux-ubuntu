@@ -110,6 +110,7 @@ viewer does not reconnect them automatically.
 | `UU_TERMINAL_SHORTCUTS=0` | disable Ctrl+V → Ctrl+Shift+V in focused X11 terminals (Mac Cmd and Ctrl both arrive as VK_LCONTROL) |
 | `contrib/virtual-desktop/` | Xvfb + session (`UU_VIRTUAL_SESSION`, `UU_VIRTUAL_BUS=user|private`) for monitorless hosts; serve it with `DISPLAY=:99` |
 | `UU_VIDEO_ENCODER` | `cpu`: libx264; `vaapi`: explicit Intel/AMD; `nvenc`: force; unset: NVENC→CPU only if `/proc/driver/nvidia/version` or `/dev/nvidia0` exists, else CPU (#10) |
+| `UU_VIDEO_CODEC=h264` | force H.264 even when the viewer negotiated H.265 (default: H.265 when both sides support it) |
 | `UU_FFMPEG_ROOT` | FFmpeg prefix (`bin/ffmpeg`, libs in `lib/x86_64-linux-gnu`) |
 | `UU_AUDIO=0`, `UU_AUDIO_SOURCE` | disable sound / choose the Pulse source (default `@DEFAULT_MONITOR@`) |
 | `UU_LOGIN_WINDOW=0` | don't auto-open the login window |
@@ -126,7 +127,7 @@ every 60 s.
 | `src/signaling.rs` | Engine.IO v4 / Socket.IO client; `be-controlled` binary attachment = ConnectOptions (field 1 capture_type) |
 | `src/auth.rs`, `src/config.rs`, `src/login.rs`, `src/login_ui.rs` | signed REST client, config, device init + QR login, GTK window |
 | `src/webrtc.rs` | peer connection, data channels, CONTROL dispatch, initialization messages |
-| `src/video.rs`, `src/capture_setting.rs` | FFmpeg H.264 pipeline; viewer quality/fps/resolution settings |
+| `src/video.rs`, `src/capture_setting.rs`, `src/video_track.rs`, `src/hevc.rs` | FFmpeg H.264/H.265 pipeline, one video track for both codecs (RFC 7798 HEVC payloader); viewer quality/fps/resolution/chroma settings |
 | `src/audio.rs` | Pulse/PipeWire monitor → Opus audio track |
 | `src/input.rs`, `src/input_mapping.rs`, `src/uinput.rs` | input injection (X11 XTest / Wayland / portal / uinput), Windows VK → keysym → evdev |
 | `src/cursor.rs` | pointer shape mirroring (X11) |
@@ -171,6 +172,10 @@ started a second full host server instead, so check that a subcommand exists in 
   (field 3 = the chroma actually encoded).
 - ConnectOptions field 4 `decoder_cap_list` = DecoderCap {1 fps, 2 codec_type (1 H264, 2 H265), 3 width, 4 height,
   5 chroma_format}. The Mac viewer lists H.264 and H.265, each 4:2:0 and 4:4:4, up to 3840x2160@120.
+- Codec choice is the host's (official negotiateCodec): the Mac viewer offers H265 before H264 in SDP and
+  CaptureSettingRequest field 13 only reports its current codec. The host sends CONTROL Message 18
+  CodecNegotiation {1 EncoderCap {1 capture_mode=1, 2 fps, 3 codec_type, 4 width, 5 height}} at CONTROL open and
+  selects H.265 when both m-line codecs are bound (`UU_VIDEO_CODEC=h264` forces H.264).
 - SystemMetrics (Message 13): GeneralMetric `2 system_sound_support` is an enum, **2 = supported** (1 = not
   supported); SettingMetric 1 keep_mute, 2 mute_permanent, 3 auto_lock, 5 file_transfer_save_location,
   8/9/10 permission states (2 = allow).

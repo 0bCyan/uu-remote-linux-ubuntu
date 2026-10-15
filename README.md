@@ -275,6 +275,14 @@ flowchart LR
 - [webrtc-rs](https://github.com/webrtc-rs/webrtc)、FFmpeg、GTK 等开源项目。
 - 本项目的大部分代码在 Claude 和 Codex 的协助下完成。
 
+### H.265 / HEVC
+
+控制端和主机都支持 H.265 时，主机自动使用 H.265（与官方主机一致，由主机按双方能力选择；官方 Mac 客户端在 SDP
+中优先列出 H.265）。首次桌面连接会用合成帧探测实际编码能力，并通过 CodecNegotiation 告知客户端。支持 `hevc_nvenc`、
+`libx265`、显式 `UU_VIDEO_ENCODER=vaapi` 的 `hevc_vaapi`；硬件失败先回落软件 HEVC，再回落 H.264。
+`UU_VIDEO_CODEC=h264` 强制使用 H.264。8-bit；真彩 4:4:4 使用 hevc_nvenc `rext` / libx265 `main444-8`。
+已用官方 Mac 客户端在 RTX 3090（hevc_nvenc，含 4:4:4）实机验收；libx265、hevc_vaapi 及其他客户端尚未实机验证。
+
 ### VAAPI 硬件编码（显式启用）
 
 设置 `UU_VIDEO_ENCODER=vaapi` 使用 Intel/AMD H.264 VAAPI；`UU_VAAPI_DEVICE` 默认

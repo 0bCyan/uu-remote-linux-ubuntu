@@ -53,6 +53,9 @@ impl WebRtcSession {
         m.register_default_codecs()
             .map_err(|e| format!("Register standard codecs failed: {}", e))?;
 
+        let hevc = desktop && crate::video::hevc_available().await;
+        if hevc { crate::video_track::register_hevc(&mut m).map_err(|e| format!("Register HEVC failed: {e}"))?; }
+
         m.register_header_extension(
             webrtc::rtp_transceiver::rtp_codec::RTCRtpHeaderExtensionCapability { uri: crate::rtp_metadata::CAPTURE_INDEX_URI.into() },
             webrtc::rtp_transceiver::rtp_codec::RTPCodecType::Video, None,
@@ -162,7 +165,7 @@ impl WebRtcSession {
                     tokio::spawn(async move {
                     let ctx = ctx.lock().await.clone();
                     if let (Some(client), Some(ice)) = (&ctx.client_id, ctx.ice_id.as_ref().and_then(|v| v.as_str())) {
-                        let payload = crate::capability::h264_device_capability(client, ice, 0, crate::video::FPS as i32, 5);
+                        let payload = crate::capability::device_capability(client, ice, 0, crate::video::FPS as i32, 5, hevc);
                         if let Err(e) = sig.emit_event(crate::capability::FORWARD_SETTING_EVENT, payload).await {
                             log::error!("Device capability notification failed: {}", e);
                         }
@@ -179,14 +182,7 @@ impl WebRtcSession {
         }));
 
         // 注册视频轨
-        let video_track = Arc::new(TrackLocalStaticSample::new(
-            RTCRtpCodecCapability {
-                mime_type: "video/H264".to_owned(),
-                ..Default::default()
-            },
-            "video_0".to_owned(),
-            "video_0".to_owned(),
-        ));
+        let video_track = Arc::new(crate::video_track::VideoTrack::new());
 
         // Set by PLI/FIR; the desktop encoder answers with an IDR on its next frame.
         let idr_request = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -274,9 +270,11 @@ impl WebRtcSession {
         }
         let portal=capture.portal.clone();
         // File/terminal/port-mapping connections carry no desktop video.
+        let control_video_track = video_track.clone();
+        let stream_settings = video_settings.clone();
         if desktop {
             tokio::spawn(async move {
-                if let Err(e) = crate::video::stream_desktop(streaming_pc, video_track, capture_size, capture_display, portal, video_settings_rx, idr_request).await {
+                if let Err(e) = crate::video::stream_desktop(streaming_pc, video_track, capture_size, capture_display, portal, video_settings_rx, stream_settings, idr_request).await {
                     log::error!("Live desktop stream stopped: {}", e);
                 }
             });
@@ -338,6 +336,7 @@ impl WebRtcSession {
             let peer_files = peer_files.clone();
             let peer_port_mapping = port_mapping.clone();
             let peer_video_settings = video_settings.clone();
+            let peer_video_track = control_video_track.clone();
             let peer_actions = peer_actions.clone();
             if label == "FILE_DATA_CHANNEL" { *file_channel.lock().unwrap() = Some(d.clone()); }
 
@@ -389,9 +388,11 @@ impl WebRtcSession {
                     let rich_outgoing=rich_state.clone();
                     let open_actions = channel_actions.clone();
                     let open_video = channel_video_settings.clone();
+                    let open_track = peer_video_track.clone();
                     d.on_open(Box::new(move || {
                         let init_actions = open_actions.clone();
                         let init_video = open_video.clone();
+                        let init_track = open_track.clone();
                         let channel = channel.clone();
                         let sequence = initial_sequence.clone();
                         let screen = screen.clone();
@@ -462,9 +463,18 @@ impl WebRtcSession {
                                 (13, Ok(crate::initialization::envelope(next_seq(), timestamp, 13, &init_actions.metrics_payload(desktop_sound, desktop_permission)))),
                                 (26, Ok(crate::initialization::envelope(next_seq(), timestamp, 26,
                                     &crate::system_metrics::remote_download_path(&home)))),
+                                (18, Ok(crate::initialization::envelope(next_seq(), timestamp, 18,
+                                    &crate::capture_setting::codec_negotiation(screen_size, crate::video::FPS as u32, init_track.supports(crate::capture_setting::VideoCodec::H265))))),
                                 (7, crate::capture_setting::screen_sources(next_seq(), timestamp, screen_size, init_video.borrow().output, "Linux desktop")),
                             ];
+                            if desktop && screen.init_error.is_none() {
+                                let codec = crate::capture_setting::preferred_codec(init_track.supports(crate::capture_setting::VideoCodec::H264),
+                                    init_track.supports(crate::capture_setting::VideoCodec::H265));
+                                init_video.send_if_modified(|current| if current.codec != codec {
+                                    log::info!("Desktop codec selected: {:?}", codec); current.codec = codec; true } else { false });
+                            }
                             for (field, message) in messages {
+                                if (!desktop || screen.init_error.is_some()) && field == 18 { continue; }
                                 if desktop && screen.init_error.is_some() && matches!(field,7|8) { continue; }
                                 let message = match message {
                                     Ok(message) => message,
@@ -522,6 +532,7 @@ impl WebRtcSession {
                     let file_worker = file_session.clone();
                     let mapping = peer_port_mapping.clone();
                     let video_settings = channel_video_settings.clone();
+                    let negotiated_track = peer_video_track.clone();
                     let actions = channel_actions.clone();
 
                     Box::pin(async move {
@@ -532,8 +543,17 @@ impl WebRtcSession {
                             use crate::protocol::WireValue;
                             let rpc = fields.iter().find_map(|f| match (f.number, &f.value) { (21, WireValue::Bytes(b)) => Some(*b), _ => None });
                             let rpc_fields = rpc.and_then(|r| crate::protocol::decode_wire(r).ok());
-                            let output_before = video_settings.borrow().output;
-                            if let Some(response) = rpc_fields.as_deref().and_then(|r| crate::capture_setting::handle_rpc(r, &video_settings, input_size)) {
+                            let before = *video_settings.borrow();
+                            let output_before = before.output;
+                            let revision = negotiated_track.revision();
+                            if let Some(response) = rpc_fields.as_deref().and_then(|r| crate::capture_setting::handle_rpc_with_codecs(r, &video_settings, input_size, negotiated_track.supports(crate::capture_setting::VideoCodec::H264), negotiated_track.supports(crate::capture_setting::VideoCodec::H265))) {
+                                let codec_changed = video_settings.borrow().codec != before.codec;
+                                if codec_changed && !negotiated_track.wait_for_applied(revision, &video_settings).await {
+                                    // Official host replies after startVideoCaptureAndSendRpcResponse.
+                                    // Do not fabricate a codec error number or acknowledge an encoder that never started.
+                                    log::warn!("Codec switch did not produce a transmitted frame; success reply withheld");
+                                    return;
+                                }
                                 let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
                                 let next = || out_sequence.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                                 let _ = rpc_out.send(crate::initialization::envelope(next(), ts, 22, &response));
@@ -865,6 +885,10 @@ impl WebRtcSession {
         };
         log::info!("Offer x-uuremote-quic: {}", quic_summary);
         log::info!("Offer includes UU capture-index extension: {}", sdp_str.lines().any(|l| l.starts_with("a=extmap:") && l.contains(crate::rtp_metadata::CAPTURE_INDEX_URI)));
+        let mut codecs: Vec<&str> = sdp_str.lines().filter_map(|l| l.strip_prefix("a=rtpmap:")).filter_map(|l| l.split_whitespace().nth(1))
+            .filter_map(|c| c.split('/').next()).collect();
+        codecs.dedup();
+        log::info!("Offer codecs: {:?}", codecs);
         let offer = RTCSessionDescription::offer(sdp_str)
             .map_err(|e| format!("Invalid offer: {}", e))?;
 

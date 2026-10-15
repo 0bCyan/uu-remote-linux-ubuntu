@@ -24,6 +24,8 @@ mod signaling;
 mod terminal;
 mod webrtc;
 mod video;
+mod video_track;
+mod hevc;
 #[cfg(feature = "inproc-av")]
 mod damage_capture;
 #[cfg(feature = "inproc-av")]

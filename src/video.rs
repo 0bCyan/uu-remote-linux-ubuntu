@@ -7,8 +7,7 @@ use tokio::sync::mpsc;
 use webrtc::media::Sample;
 use webrtc::peer_connection::peer_connection_state::RTCPeerConnectionState;
 use webrtc::peer_connection::RTCPeerConnection;
-use webrtc::track::track_local::track_local_static_sample::TrackLocalStaticSample;
-use crate::capture_setting::VideoSettings;
+use crate::capture_setting::{VideoCodec, VideoSettings};
 
 /// Default frame rate; the viewer's 帧率 setting overrides it per connection.
 pub const FPS: u64 = 60;
@@ -28,24 +27,42 @@ fn gop_frames(fps: u32, in_process: bool) -> u64 {
 }
 const MAX_ACCESS_UNIT: usize = 8 * 1024 * 1024;
 
-fn nal_offsets(bytes: &[u8], kind: u8) -> Vec<usize> {
+fn nal_offsets_for(bytes: &[u8], kind: u8, codec: VideoCodec) -> Vec<usize> {
     let mut result = Vec::new();
     let mut i = 0;
     while i + 3 < bytes.len() {
         let prefix = if bytes[i..].starts_with(&[0, 0, 0, 1]) { 4 }
             else if bytes[i..].starts_with(&[0, 0, 1]) { 3 } else { i += 1; continue };
-        if i + prefix < bytes.len() && bytes[i + prefix] & 31 == kind { result.push(i); }
+        let header = i + prefix;
+        let matches = match codec {
+            VideoCodec::H264 => header < bytes.len() && bytes[header] & 31 == kind,
+            // HEVC has a two-byte header: forbidden_zero_bit=0, temporal_id_plus1 != 0.
+            VideoCodec::H265 => header + 1 < bytes.len() && bytes[header] & 128 == 0
+                && bytes[header + 1] & 7 != 0 && (bytes[header] >> 1) & 63 == kind,
+        };
+        if matches { result.push(i); }
         i += prefix;
     }
     result
 }
-fn aud_offsets(bytes: &[u8]) -> Vec<usize> { nal_offsets(bytes, 9) }
-fn is_independent_frame(bytes: &[u8]) -> bool {
-    !nal_offsets(bytes, 5).is_empty() && nal_offsets(bytes, 1).is_empty()
+fn aud_offsets_for(bytes: &[u8], codec: VideoCodec) -> Vec<usize> {
+    nal_offsets_for(bytes, if codec == VideoCodec::H265 { 35 } else { 9 }, codec)
 }
+fn is_independent_frame_for(bytes: &[u8], codec: VideoCodec) -> bool {
+    match codec {
+        VideoCodec::H264 => !nal_offsets_for(bytes, 5, codec).is_empty() && nal_offsets_for(bytes, 1, codec).is_empty(),
+        // BLA/IDR/CRA are IRAP (RFC 7798 §4.1); no leading pictures with our no-B-frame encoder.
+        VideoCodec::H265 => (16..=21).any(|kind| !nal_offsets_for(bytes, kind, codec).is_empty())
+            && !(0..16).any(|kind| !nal_offsets_for(bytes, kind, codec).is_empty()),
+    }
+}
+#[cfg(test)]
+fn aud_offsets(bytes: &[u8]) -> Vec<usize> { aud_offsets_for(bytes, VideoCodec::H264) }
+fn is_independent_frame(bytes: &[u8]) -> bool { is_independent_frame_for(bytes, VideoCodec::H264) }
 
 #[derive(Debug)]
 struct CompleteFrame {
+    codec: VideoCodec,
     sequence: u64,
     completed_at: Instant,
     data: Vec<u8>,
@@ -63,7 +80,13 @@ impl Encoder {
         match value { Some("cpu") => Self::Cpu, Some("vaapi") => Self::Vaapi, Some("nvenc") => Self::Nvenc,
             _ => if nvidia { Self::Nvenc } else { Self::Cpu } }
     }
-    pub(crate) fn name(self) -> &'static str { match self { Self::Cpu => "libx264", Self::Nvenc => "h264_nvenc", Self::Vaapi => "h264_vaapi" } }
+    pub(crate) fn name_for(self, codec: VideoCodec) -> &'static str {
+        match (self, codec) {
+            (Self::Cpu, VideoCodec::H264) => "libx264", (Self::Cpu, VideoCodec::H265) => "libx265",
+            (Self::Nvenc, VideoCodec::H264) => "h264_nvenc", (Self::Nvenc, VideoCodec::H265) => "hevc_nvenc",
+            (Self::Vaapi, VideoCodec::H264) => "h264_vaapi", (Self::Vaapi, VideoCodec::H265) => "hevc_vaapi",
+        }
+    }
 }
 fn nvidia_present() -> bool {
     std::path::Path::new("/proc/driver/nvidia/version").exists() || std::path::Path::new("/dev/nvidia0").exists()
@@ -76,12 +99,14 @@ pub fn full_chroma_available() -> bool {
     Encoder::requested() != Encoder::Vaapi
 }
 
-/// (-profile:v, -pix_fmt) for NVENC / libx264: 4:4:4 needs a High 4:4:4 profile.
+/// (-profile:v, -pix_fmt) for NVENC / libx264 / libx265: 4:4:4 (真彩) needs a 4:4:4 profile.
 fn chroma_args(settings: &VideoSettings, encoder: Encoder) -> (&'static str, &'static str) {
-    match (settings.chroma == crate::capture_setting::CHROMA_444, encoder) {
-        (true, Encoder::Nvenc) => ("high444p", "yuv444p"),
-        (true, _) => ("high444", "yuv444p"),
-        (false, _) => ("baseline", "yuv420p"),
+    if settings.chroma != crate::capture_setting::CHROMA_444 { return (profile_for(settings.codec, false), "yuv420p"); }
+    match (settings.codec, encoder) {
+        (VideoCodec::H264, Encoder::Nvenc) => ("high444p", "yuv444p"),
+        (VideoCodec::H264, _) => ("high444", "yuv444p"),
+        (VideoCodec::H265, Encoder::Nvenc) => ("rext", "yuv444p"),
+        (VideoCodec::H265, _) => ("main444-8", "yuv444p"),
     }
 }
 pub(crate) fn vaapi_device() -> String { std::env::var("UU_VAAPI_DEVICE").unwrap_or_else(|_| "/dev/dri/renderD128".into()) }
@@ -95,10 +120,84 @@ fn vaapi_options(settings: &VideoSettings, gop: &str) -> Vec<String> {
     let (maxrate, buffer) = rate_args(settings, Encoder::Vaapi);
     // QVBR is not uniformly available on Intel/AMD drivers. VBR + qmin sets a quality
     // floor while retaining the viewer's bitrate cap; unsupported drivers fall back to CPU.
-    ["-c:v", "h264_vaapi", "-profile:v", "constrained_baseline", "-g", gop, "-bf", "0",
+    ["-c:v", Encoder::Vaapi.name_for(settings.codec), "-profile:v", profile_for(settings.codec, true), "-g", gop, "-bf", "0",
         "-rc_mode", "VBR", "-b:v", &settings.max_kbps().map_or("16M".into(), |k| format!("{}k",k*3/4)),
         "-maxrate", &maxrate, "-bufsize", &buffer, "-qmin", &settings.cq().to_string(), "-async_depth", "1", "-aud", "1"]
         .into_iter().map(str::to_owned).collect()
+}
+
+fn profile_for(codec: VideoCodec, vaapi: bool) -> &'static str {
+    match codec { VideoCodec::H265 => "main", VideoCodec::H264 => if vaapi { "constrained_baseline" } else { "baseline" } }
+}
+pub(crate) fn x265_params(gop: &str) -> String {
+    // Explicit no-B/no-lookahead avoids delayed frames; repeat parameter sets at each IRAP.
+    format!("aud=1:repeat-headers=1:scenecut=0:keyint={gop}:min-keyint={gop}:open-gop=0:bframes=0:rc-lookahead=0:frame-threads=1:pools=4")
+}
+fn cpu_hevc_options(settings: &VideoSettings, gop: &str) -> Vec<String> {
+    let (maxrate, buffer) = rate_args(settings, Encoder::Cpu);
+    let (profile, pix_fmt) = chroma_args(settings, Encoder::Cpu);
+    ["-c:v", "libx265", "-preset", "superfast", "-tune", "zerolatency", "-profile:v", profile,
+        "-pix_fmt", pix_fmt, "-g", gop, "-bf", "0", "-threads", "4", "-crf", &settings.cq().to_string(),
+        "-maxrate", &maxrate, "-bufsize", &buffer, "-x265-params", &x265_params(gop)]
+        .into_iter().map(str::to_owned).collect()
+}
+
+fn encoder_options(settings: &VideoSettings, encoder: Encoder, gop: &str) -> Vec<String> {
+    let (maxrate, bufsize) = rate_args(settings, encoder);
+    let cq = settings.cq().to_string();
+    let target = settings.max_kbps().map_or("16M".to_string(), |k| format!("{}k", k * 3 / 4));
+    if encoder == Encoder::Vaapi { return vaapi_options(settings, gop); }
+    let (profile, pix_fmt) = chroma_args(settings, encoder);
+    if encoder == Encoder::Nvenc {
+        return ["-c:v", encoder.name_for(settings.codec), "-preset", "p4", "-tune", "ull",
+            "-profile:v", profile, "-pix_fmt", pix_fmt, "-g", gop, "-bf", "0",
+            "-rc", "vbr", "-cq", &cq, "-b:v", &target, "-maxrate", &maxrate, "-bufsize", &bufsize,
+            "-rc-lookahead", "0", "-zerolatency", "1", "-delay", "0", "-aud", "1"]
+            .into_iter().map(str::to_owned).collect();
+    }
+    if settings.codec == VideoCodec::H265 { return cpu_hevc_options(settings, gop); }
+    let params = format!("aud=1:repeat-headers=1:scenecut=0:keyint={gop}:min-keyint={gop}");
+    ["-c:v", "libx264", "-preset", "superfast", "-tune", "zerolatency",
+        "-profile:v", profile, "-pix_fmt", pix_fmt, "-g", gop, "-threads", "4",
+        "-crf", &cq, "-maxrate", &maxrate, "-bufsize", &bufsize, "-x264-params", &params]
+        .into_iter().map(str::to_owned).collect()
+}
+
+fn ffmpeg_command() -> Command {
+    match crate::config::ffmpeg_root() {
+        Some(root) => { let mut command = Command::new(root.join("bin/ffmpeg"));
+            command.env("LD_LIBRARY_PATH", root.join("lib/x86_64-linux-gnu")); command }
+        None => Command::new("ffmpeg"),
+    }
+}
+
+/// A compiled-in encoder name does not prove that its driver can initialize.
+/// Probe one synthetic 4:2:0 frame once per process before advertising HEVC.
+pub async fn hevc_available() -> bool {
+    static AVAILABLE: tokio::sync::OnceCell<bool> = tokio::sync::OnceCell::const_new();
+    *AVAILABLE.get_or_init(|| async {
+        let requested = Encoder::requested();
+        let mut candidates = vec![requested];
+        if requested != Encoder::Cpu { candidates.push(Encoder::Cpu); }
+        for encoder in candidates {
+            let settings = VideoSettings { codec: VideoCodec::H265, ..Default::default() };
+            let mut command = ffmpeg_command();
+            command.args(["-hide_banner", "-loglevel", "error", "-nostdin"]);
+            if encoder == Encoder::Vaapi { command.args(["-vaapi_device", &vaapi_device()]); }
+            command.args(["-f", "lavfi", "-i", "color=black:size=256x256:rate=1", "-frames:v", "1", "-an"]);
+            if encoder == Encoder::Vaapi { command.args(["-vf", &vaapi_filter(None)]); }
+            command.args(encoder_options(&settings, encoder, "30"));
+            command.args(["-f", "hevc", "pipe:1"]).kill_on_drop(true).stderr(std::process::Stdio::null());
+            if let Ok(Ok(output)) = tokio::time::timeout(Duration::from_secs(5), command.output()).await {
+                if output.status.success() && is_independent_frame_for(&output.stdout, VideoCodec::H265) {
+                    log::info!("HEVC encoder probe: {} ok", encoder.name_for(VideoCodec::H265));
+                    return true;
+                }
+            }
+        }
+        log::info!("HEVC encoder probe: unavailable");
+        false
+    }).await
 }
 
 /// Round UP (+1ns float guard) so webrtc's floor(duration*90000) yields exactly `ticks`.
@@ -131,7 +230,7 @@ struct DependencyGate {needs_idr:bool}
 impl Default for DependencyGate {fn default()->Self{Self{needs_idr:true}}}
 impl DependencyGate{
     fn submit(&mut self,tx:&mpsc::Sender<Arc<CompleteFrame>>,frame:Arc<CompleteFrame>){
-        if self.needs_idr&&!is_independent_frame(&frame.data){return;}
+        if self.needs_idr&&!is_independent_frame_for(&frame.data, frame.codec){return;}
         match tx.try_send(frame){
             Ok(())=>self.needs_idr=false,
             Err(mpsc::error::TrySendError::Full(_))=>self.needs_idr=true,
@@ -169,7 +268,7 @@ async fn read_encoder(
     match read_encoder_with(size,display.clone(),portal.clone(),latest.clone(),encoder,sequence.clone(),settings,idr.clone()).await {
         Ok(())=>Ok(()),
         Err(error) if !latest.is_closed()=>{
-            log::warn!("{} stream unavailable; switching scoped encoder to CPU: {}",encoder.name(),error);
+            log::warn!("{} stream unavailable; switching scoped encoder to CPU: {}",encoder.name_for(settings.codec),error);
             read_encoder_with(size,display,portal,latest,Encoder::Cpu,sequence,settings,idr).await
         },
         Err(error)=>Err(error),
@@ -182,6 +281,7 @@ async fn read_inprocess(
     config: crate::inproc_encoder::Config, latest: mpsc::Sender<Arc<CompleteFrame>>,
     sequence: Arc<std::sync::atomic::AtomicU64>, idr: Arc<AtomicBool>,
 ) -> Result<(), String> {
+    let codec = config.codec;
     let (units_tx, mut units) = mpsc::channel::<Vec<u8>>(4);
     let stop = Arc::new(AtomicBool::new(false));
     // If this future is dropped (reader task aborted), the blocking encoder stops at its next packet.
@@ -193,7 +293,7 @@ async fn read_inprocess(
     let mut gate = DependencyGate::default();
     while let Some(data) = units.recv().await {
         let sequence = sequence.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
-        gate.submit(&latest, Arc::new(CompleteFrame { sequence, completed_at: Instant::now(), data }));
+        gate.submit(&latest, Arc::new(CompleteFrame { codec, sequence, completed_at: Instant::now(), data }));
         if latest.is_closed() { break; }
     }
     // Dropping the receiver also unblocks the encoder if it is waiting to send.
@@ -211,9 +311,15 @@ fn buffer_kbits(max_kbps: u32, encoder: Encoder) -> u32 {
     if encoder == Encoder::Cpu { max_kbps.clamp(500, 8000) } else { (max_kbps / 8).clamp(100, 500) }
 }
 
+fn buffer_for(settings: &VideoSettings, encoder: Encoder) -> u32 {
+    if settings.codec == VideoCodec::H265 && encoder == Encoder::Cpu {
+        settings.max_kbps().unwrap_or(30_000) // one second of HEVC bitrate, including high presets
+    } else { buffer_kbits(settings.max_kbps().unwrap_or(30_000), encoder) }
+}
+
 fn rate_args(settings: &VideoSettings, encoder: Encoder) -> (String, String) {
     let max_kbps = settings.max_kbps().unwrap_or(30_000);
-    (format!("{max_kbps}k"), format!("{}k", buffer_kbits(max_kbps, encoder)))
+    (format!("{max_kbps}k"), format!("{}k", buffer_for(settings, encoder)))
 }
 
 async fn read_encoder_with(
@@ -234,27 +340,22 @@ async fn read_encoder_with(
             display: display.clone(), input: size, output: settings.output, fps: u32::from(settings.fps),
             gop: gop_frames(settings.fps, true) as u32, cq: settings.cq() as u32,
             target_bps: settings.max_kbps().map_or(16_000, |k| i64::from(k) * 3 / 4) * 1000,
-            max_bps: max_kbps * 1000, buffer_bits: i64::from(buffer_kbits(max_kbps as u32, encoder)) * 1000, encoder,
+            max_bps: max_kbps * 1000, buffer_bits: i64::from(buffer_for(&settings, encoder)) * 1000, encoder, codec: settings.codec,
             damage: crate::inproc_encoder::damage_enabled(),
         };
         log::info!("Desktop encoder: display={} source={}x{} output={:?} fps={} cq={} maxrate={}k encoder={} pipeline=in-process",
-            display,size.0,size.1,settings.output,settings.fps,config.cq,max_kbps,encoder.name());
+            display,size.0,size.1,settings.output,settings.fps,config.cq,max_kbps,encoder.name_for(settings.codec));
         return read_inprocess(config, latest, sequence, idr).await;
     }
     let size = format!("{}x{}", size.0, size.1);
     let fps = settings.fps.to_string();
     // Keep the IDR interval at 2 s whatever the frame rate.
     let gop = gop_frames(settings.fps, false).to_string();
-    let (maxrate, bufsize) = rate_args(&settings, encoder);
+    let (maxrate, _) = rate_args(&settings, encoder);
     let cq = settings.cq().to_string();
-    let target = settings.max_kbps().map_or("16M".to_string(), |k| format!("{}k", k * 3 / 4));
-    let (profile, pix_fmt) = chroma_args(&settings, encoder);
-    log::info!("Desktop encoder: display={} source={} output={:?} fps={} cq={} maxrate={} encoder={} pix_fmt={} low_latency=true",display,size,settings.output,settings.fps,cq,maxrate,encoder.name(),if encoder == Encoder::Vaapi { "nv12" } else { pix_fmt });
+    log::info!("Desktop encoder: display={} source={} output={:?} fps={} cq={} maxrate={} encoder={} pix_fmt={} low_latency=true",display,size,settings.output,settings.fps,cq,maxrate,encoder.name_for(settings.codec),if encoder == Encoder::Vaapi { "nv12" } else { chroma_args(&settings, encoder).1 });
     // A bundled FFmpeg prefix (config ffmpeg_root / UU_FFMPEG_ROOT) or `ffmpeg` on PATH.
-    let mut command=match crate::config::ffmpeg_root() {
-        Some(root) => { let mut c=Command::new(root.join("bin/ffmpeg")); c.env("LD_LIBRARY_PATH",root.join("lib/x86_64-linux-gnu")); c }
-        None => Command::new("ffmpeg"),
-    };
+    let mut command = ffmpeg_command();
     command.args(["-hide_banner","-loglevel","error","-nostdin"]);
     if encoder == Encoder::Vaapi { command.args(["-vaapi_device", &vaapi_device()]); }
     if wayland {
@@ -271,27 +372,13 @@ async fn read_encoder_with(
     } else if let Some((width, height)) = settings.output {
         command.args(["-vf", &format!("scale={width}:{height}:flags=bilinear")]);
     }
-    if encoder == Encoder::Vaapi {
-        command.args(vaapi_options(&settings, &gop));
-    } else if encoder == Encoder::Nvenc {
-        command.args(["-c:v","h264_nvenc","-preset","p4","-tune","ull",
-            "-profile:v",profile,"-pix_fmt",pix_fmt,"-g",&gop,"-bf","0",
-            "-rc","vbr","-cq",&cq,"-b:v",&target,"-maxrate",&maxrate,"-bufsize",&bufsize,
-            "-rc-lookahead","0","-zerolatency","1","-delay","0","-aud","1"]);
-    }else{
-        let x264 = format!("aud=1:repeat-headers=1:scenecut=0:keyint={gop}:min-keyint={gop}");
-        command.args([
-            "-c:v", "libx264", "-preset", "superfast", "-tune", "zerolatency",
-            "-profile:v", profile, "-pix_fmt", pix_fmt, "-g", &gop, "-threads", "4",
-            "-crf", &cq, "-maxrate", &maxrate, "-bufsize", &bufsize,
-            "-x264-params", &x264]);
-    }
+    command.args(encoder_options(&settings, encoder, &gop));
     // x11grab paces against an absolute schedule; after a capture stall it grabs
     // back-to-back to "catch up" (measured 69 frames in 200ms). vfr on a 1/FPS
     // timebase drops those same-slot frames instead of encoding a burst.
     let time_base = format!("1/{fps}");
     if wayland { command.stdin(std::process::Stdio::piped()); }
-    let mut child=command.args(["-fps_mode","vfr","-enc_time_base",&time_base,"-f","h264","pipe:1"])
+    let mut child=command.args(["-fps_mode","vfr","-enc_time_base",&time_base,"-f",if settings.codec == VideoCodec::H265 { "hevc" } else { "h264" },"pipe:1"])
         .kill_on_drop(true)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::inherit())
@@ -359,14 +446,14 @@ async fn read_encoder_with(
         pending.extend_from_slice(&chunk[..count]);
         // A chunk can include the next AUD, so split before enforcing the bound.
         loop {
-            let aud = aud_offsets(&pending);
+            let aud = aud_offsets_for(&pending, settings.codec);
             if aud.len() < 2 { break; }
             let next = aud[1];
             if next > MAX_ACCESS_UNIT { return Err("Encoder access unit exceeds limit".into()); }
             let frame: Vec<u8> = pending.drain(..next).collect();
             let sequence = sequence.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
             gate.submit(&latest, Arc::new(CompleteFrame {
-                sequence, completed_at: Instant::now(), data: frame,
+                codec: settings.codec, sequence, completed_at: Instant::now(), data: frame,
             }));
             if latest.is_closed() { return Ok(()); }
         }
@@ -414,8 +501,8 @@ pub async fn probe(size:(u32,u32),display:String,portal:Option<Arc<crate::portal
     Ok(())
 }
 
-pub async fn stream_desktop(pc: Arc<RTCPeerConnection>, track: Arc<TrackLocalStaticSample>, size: (u32, u32), display: String, portal:Option<Arc<crate::portal::PortalSession>>,
-    mut settings: tokio::sync::watch::Receiver<VideoSettings>, idr: Arc<AtomicBool>) -> Result<(), String> {
+pub async fn stream_desktop(pc: Arc<RTCPeerConnection>, track: Arc<crate::video_track::VideoTrack>, size: (u32, u32), display: String, portal:Option<Arc<crate::portal::PortalSession>>,
+    mut settings: tokio::sync::watch::Receiver<VideoSettings>, applied: Arc<tokio::sync::watch::Sender<VideoSettings>>, idr: Arc<AtomicBool>) -> Result<(), String> {
     loop {
         if transport_closed(&pc) { return Ok(()); }
         if pc.connection_state() == RTCPeerConnectionState::Connected
@@ -425,7 +512,12 @@ pub async fn stream_desktop(pc: Arc<RTCPeerConnection>, track: Arc<TrackLocalSta
     crate::capture::keep_display_awake()?;
     let (latest, mut receiver) = mpsc::channel(4);
     let sequence = Arc::new(std::sync::atomic::AtomicU64::new(0));
-    let current = *settings.borrow_and_update();
+    let mut current = *settings.borrow_and_update();
+    if !track.supports(current.codec) && track.supports(VideoCodec::H265) {
+        current.codec = VideoCodec::H265; // H265-only remote video offer.
+        applied.send_replace(current);
+        settings.borrow_and_update();
+    }
     let mut reader = EncoderTask(tokio::spawn(read_encoder(size, display.clone(), portal.clone(), latest.clone(), current, sequence.clone(), idr.clone())));
     let mut previous = None;
     let mut timeline = RtpTimeline { fps: u64::from(current.fps), ..Default::default() };
@@ -439,19 +531,42 @@ pub async fn stream_desktop(pc: Arc<RTCPeerConnection>, track: Arc<TrackLocalSta
     let mut stats = Instant::now();
     loop {
         tokio::select! {
-            result = &mut reader.0 => return result.map_err(|e| format!("Encoder reader task: {e}"))?,
+            result = &mut reader.0 => {
+                let result = result.map_err(|e| format!("Encoder reader task: {e}"))?;
+                if result.is_err() && current.codec == VideoCodec::H265 && track.supports(VideoCodec::H264) {
+                    log::warn!("HEVC unavailable; falling back to negotiated H264");
+                    current.codec = VideoCodec::H264;
+                    applied.send_modify(|value| value.codec = VideoCodec::H264);
+                    current = *settings.borrow_and_update();
+                    while receiver.try_recv().is_ok() {}
+                    reader.0 = tokio::spawn(read_encoder(size, display.clone(), portal.clone(), latest.clone(), current, sequence.clone(), idr.clone()));
+                    continue;
+                }
+                return result;
+            },
             _ = health.tick() => { if transport_closed(&pc) { return Ok(()); } },
             changed = settings.changed(), if settings_open => {
                 if changed.is_err() { settings_open = false; continue; }
                 // Restart the encoder with the viewer's new 帧率/画质; it begins with an IDR, and frames
                 // still queued from the old encoder remain a valid chain before it.
                 let next = *settings.borrow_and_update();
+                let codec_changed = next.codec != current.codec;
+                current = next;
                 timeline.fps = u64::from(next.fps);
-                reader.restart(read_encoder(size, display.clone(), portal.clone(), latest.clone(), next, sequence.clone(), idr.clone())).await;
+                if codec_changed {
+                    reader.0.abort();
+                    let _ = (&mut reader.0).await;
+                    // Drain only after the old producer is gone, before the new IDR can enter.
+                    while receiver.try_recv().is_ok() {}
+                    reader.0 = tokio::spawn(read_encoder(size, display.clone(), portal.clone(), latest.clone(), next, sequence.clone(), idr.clone()));
+                } else {
+                    reader.restart(read_encoder(size, display.clone(), portal.clone(), latest.clone(), next, sequence.clone(), idr.clone())).await;
+                }
             },
             frame = receiver.recv() => {
                 // A closed queue means the reader ended; its JoinHandle carries the reason.
                 let Some(frame) = frame else { return (&mut reader.0).await.map_err(|e| format!("Encoder reader task: {e}"))?; };
+                if frame.codec != current.codec { continue; }
                 let duration = timeline.duration_after(frame.completed_at);
                 if let Some(last) = previous { skipped += frame.sequence.saturating_sub(last + 1); }
                 max_age_ms = max_age_ms.max(frame.completed_at.elapsed().as_millis());
@@ -460,7 +575,7 @@ pub async fn stream_desktop(pc: Arc<RTCPeerConnection>, track: Arc<TrackLocalSta
                     data: frame.data.clone().into(), duration, ..Default::default()
                 };
                 let extensions = [crate::rtp_metadata::capture_index(0), crate::rtp_metadata::new_frame()];
-                let send = track.write_sample_with_extensions(&sample, &extensions);
+                let send = track.write_sample_with_extensions(frame.codec, &sample, &extensions);
                 let send_started=Instant::now();
                 tokio::pin!(send);
                 loop {
@@ -533,7 +648,7 @@ mod tests {
         let old_tx = tx.clone();
         let (started_tx, started_rx) = tokio::sync::oneshot::channel();
         let frame = |sequence, idr| Arc::new(CompleteFrame {
-            sequence, completed_at: Instant::now(),
+            sequence, codec: VideoCodec::H264, completed_at: Instant::now(),
             data: vec![0, 0, 1, 9, 240, 0, 0, 1, if idr { 5 } else { 1 }, 42],
         });
         let mut reader = EncoderTask(tokio::spawn(async move {
@@ -627,7 +742,7 @@ mod tests {
     async fn bounded_queue_never_sends_broken_prediction_chain_after_overload(){
         let(tx,mut rx)=mpsc::channel(1);
         let mut gate=DependencyGate::default();
-        let frame=|sequence,idr|Arc::new(CompleteFrame{sequence,completed_at:Instant::now(),data:vec![0,0,1,9,240,0,0,1,if idr{5}else{1},42]});
+        let frame=|sequence,idr|Arc::new(CompleteFrame{sequence,codec:VideoCodec::H264,completed_at:Instant::now(),data:vec![0,0,1,9,240,0,0,1,if idr{5}else{1},42]});
         gate.submit(&tx,frame(1,false));assert!(rx.try_recv().is_err()); // no IDR yet
         gate.submit(&tx,frame(2,true));
         gate.submit(&tx,frame(3,false)); // queue full: P3 lost
@@ -636,6 +751,60 @@ mod tests {
         assert!(rx.try_recv().is_err());
         gate.submit(&tx,frame(31,true));assert_eq!(rx.recv().await.unwrap().sequence,31);
         gate.submit(&tx,frame(32,false));assert_eq!(rx.recv().await.unwrap().sequence,32);
+    }
+    #[tokio::test]
+    #[ignore = "requires installed FFmpeg with a working HEVC encoder"]
+    async fn hevc_capability_probe_initializes_real_encoder() {
+        assert!(hevc_available().await);
+    }
+    #[test]
+    fn hevc_annex_b_boundaries_and_irap_use_two_byte_headers() {
+        let bytes = [0,0,0,1,70,1,80,0,0,1,64,1,42,0,0,1,38,1,42,0,0,1,70,1,80];
+        assert_eq!(aud_offsets_for(&bytes, VideoCodec::H265), vec![0,19]);
+        assert!(is_independent_frame_for(&bytes[..19], VideoCodec::H265));
+        for kind in 16..=21 {
+            assert!(is_independent_frame_for(&[0,0,1,kind << 1,1,42], VideoCodec::H265));
+        }
+        assert!(!is_independent_frame_for(&[0,0,1,2,1,42], VideoCodec::H265));
+        assert!(!is_independent_frame_for(&[0,0,1,38], VideoCodec::H265));
+        assert!(!is_independent_frame_for(&[0,0,1,38,0,42], VideoCodec::H265));
+        assert!(!is_independent_frame_for(&[0,0,1,166,1,42], VideoCodec::H265));
+        assert!(!is_independent_frame_for(&[0,0,1,38,1,42,0,0,1,2,1,42], VideoCodec::H265));
+    }
+    #[tokio::test]
+    async fn hevc_dependency_gate_recovers_only_at_irap_after_overflow() {
+        let (tx, mut rx) = mpsc::channel(1);
+        let mut gate = DependencyGate::default();
+        let frame = |sequence, irap| Arc::new(CompleteFrame { codec: VideoCodec::H265,
+            sequence, completed_at: Instant::now(), data: vec![0,0,1,if irap { 38 } else { 2 },1,42] });
+        gate.submit(&tx, frame(1, false));
+        assert!(rx.try_recv().is_err());
+        gate.submit(&tx, frame(2, true));
+        gate.submit(&tx, frame(3, false));
+        assert_eq!(rx.recv().await.unwrap().sequence, 2);
+        gate.submit(&tx, frame(4, false));
+        assert!(rx.try_recv().is_err());
+        gate.submit(&tx, frame(5, true));
+        assert_eq!(rx.recv().await.unwrap().sequence, 5);
+    }
+    #[test]
+    fn hevc_options_keep_420_low_latency_and_existing_rate_policy() {
+        let settings = VideoSettings { codec: VideoCodec::H265, ..Default::default() };
+        let cpu = cpu_hevc_options(&settings, "30");
+        for pair in [["-c:v", "libx265"], ["-profile:v", "main"], ["-pix_fmt", "yuv420p"],
+            ["-bf", "0"], ["-bufsize", "30000k"]] {
+            assert!(cpu.windows(2).any(|window| window == pair));
+        }
+        let params = x265_params("30");
+        for option in ["aud=1", "repeat-headers=1", "bframes=0", "rc-lookahead=0", "keyint=30", "min-keyint=30"] {
+            assert!(params.split(':').any(|value| value == option));
+        }
+        let vaapi = vaapi_options(&settings, "30");
+        for pair in [["-c:v", "hevc_vaapi"], ["-profile:v", "main"], ["-bf", "0"], ["-bufsize", "500k"]] {
+            assert!(vaapi.windows(2).any(|window| window == pair));
+        }
+        assert_eq!(Encoder::Nvenc.name_for(VideoCodec::H265), "hevc_nvenc");
+        assert_eq!(Encoder::Cpu.name_for(VideoCodec::H264), "libx264");
     }
     #[test]
     fn nvenc_idr_with_parameter_sets_is_independent(){

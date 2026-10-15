@@ -2649,8 +2649,9 @@ checksum = "06abde3611657adf66d383f00b093d7faecc7fa57071cce2578660c9f1010821"
 
 [[package]]
 name = "uu-remote-linux"
-version = "0.1.15"
+version = "0.1.16"
 dependencies = [
+ "async-trait",
  "base64 0.22.1",
  "bytes",
  "cc",
@@ -2664,6 +2665,7 @@ dependencies = [
  "log",
  "nix 0.29.0",
  "qrcode",
+ "rand 0.8.8",
  "reqwest",
  "serde",
  "serde_json",

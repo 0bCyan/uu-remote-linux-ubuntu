@@ -311,6 +311,16 @@ Released under the [GPL-3.0](LICENSE): you may use, modify and redistribute it, 
 - [webrtc-rs](https://github.com/webrtc-rs/webrtc), FFmpeg, GTK and the other open-source projects this builds on.
 - Most of the code was written with the help of Claude and Codex.
 
+### H.265 / HEVC
+
+When both sides support H.265 the host uses it (as the official host does: the host picks the codec from both
+capability lists; the official Mac viewer lists H265 first in its SDP). The first desktop connection probes a
+synthetic frame and announces encoder support with CodecNegotiation. `hevc_nvenc`, `libx265` and explicit
+`UU_VIDEO_ENCODER=vaapi` (`hevc_vaapi`); hardware failure falls back to software HEVC, then to H.264.
+`UU_VIDEO_CODEC=h264` forces H.264. 8-bit; true color 4:4:4 uses hevc_nvenc `rext` / libx265 `main444-8`.
+Verified with the official Mac viewer on an RTX 3090 (hevc_nvenc, including 4:4:4); libx265, hevc_vaapi and
+other viewers are not hardware-verified.
+
 ### VAAPI (opt-in / 显式启用)
 
 `UU_VIDEO_ENCODER=vaapi` selects Intel/AMD H.264 VAAPI; `UU_VAAPI_DEVICE` defaults to

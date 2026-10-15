@@ -1,4 +1,4 @@
-//! Opt-in guest assistance. Protocol sources: docs/validation/remote-assist-evidence.md.
+//! Opt-in guest assistance. Protocol sources: AGENTS.md "Remote assistance".
 //! Secret values never implement Display/Debug or enter diagnostics.
 use crate::auth::{Credentials, RoomData, UUAuthClient};
 use serde_json::{json, Value};

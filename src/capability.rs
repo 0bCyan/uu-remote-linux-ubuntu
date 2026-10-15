@@ -27,17 +27,20 @@ pub fn h264_device_capability(
     fps: i32,
     codec_impl: i32,
 ) -> Value {
+    device_capability(client_id, ice_id, display_id, fps, codec_impl, false)
+}
+
+pub fn device_capability(client_id: &str, ice_id: &str, display_id: i32, fps: i32, codec_impl: i32, hevc: bool) -> Value {
+    let mut codecs = vec![json!({"video_codec": VIDEO_CODEC_H264, "chroma_sampling": 1,
+        "codec_impl": codec_impl, "bit_depth": 8})];
+    // Official VideoCodecCapability::SerializeJson uses the same fields for CodecType H265=2.
+    if hevc { codecs.push(json!({"video_codec": 2, "chroma_sampling": 1, "codec_impl": codec_impl, "bit_depth": 8})); }
     json!({
         "client_id": client_id,
         "type": "device_capability",
         "data": {
             "display_info": [{"id": display_id, "fps": fps, "type": 0, "hdr": 0}],
-            "video_codec_capability": [{
-                "video_codec": VIDEO_CODEC_H264,
-                "chroma_sampling": 1,
-                "codec_impl": codec_impl,
-                "bit_depth": 8
-            }],
+            "video_codec_capability": codecs,
             "ice_id": ice_id
         }
     })
@@ -46,6 +49,15 @@ pub fn h264_device_capability(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hevc_capability_uses_official_codec_enum_and_420_only() {
+        let payload = device_capability("client-example", "ice-example", 0, 60, 5, true);
+        assert_eq!(payload["data"]["video_codec_capability"], json!([
+            {"video_codec":1,"chroma_sampling":1,"codec_impl":5,"bit_depth":8},
+            {"video_codec":2,"chroma_sampling":1,"codec_impl":5,"bit_depth":8}]));
+        assert_eq!(device_capability("c", "i", 0, 60, 5, false)["data"]["video_codec_capability"].as_array().unwrap().len(), 1);
+    }
 
     #[test]
     fn ice_finished_keeps_string_identifiers_and_exact_fields() {
