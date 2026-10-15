@@ -191,6 +191,9 @@ connect from 开始协助 (remote assistance) in UU Remote.
 - **Signed in**: the host is in your device list and remote assistance keeps working (same device ID). A background
   service keeps the window hidden; open it with `uuremote-server show` or the "UU Remote Linux Host" launcher.
   Closing the window only hides it.
+- **Tray icon**: a background host shows a tray icon with Open main window, the allow switch and Quit. GNOME needs
+  the AppIndicator extension (bundled on Ubuntu); Xfce / Cinnamon / KDE work as is. Quit stops `uuremote-native.service`;
+  the launcher starts it again.
 - **Settings** (as in the official client): allow switch (off by default); verification by temporary code, custom code
   (8–16 letters and digits) or either; temporary code rotation after each session / hourly / 12 h / 24 h / never;
   copy buttons for the ID and the code. Stored in the 0600 config.

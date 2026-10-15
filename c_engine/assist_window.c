@@ -7,6 +7,7 @@
 #include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
+#include <dlfcn.h>
 
 static const char *CSS =
     "window { background-color: #f5f6f8; }\n"
@@ -27,7 +28,7 @@ static const char *CSS =
     ".status.ok { color: #16a34a; }\n"
     ".status.error { color: #dc2626; }\n";
 
-enum { CMD_NONE = 0, CMD_ALLOW = 1, CMD_DENY = 2, CMD_RESET = 3, CMD_STOP = 4, CMD_VERIFY = 5, CMD_REFRESH = 6, CMD_CUSTOM = 7, CMD_LOGOUT = 8 };
+enum { CMD_NONE = 0, CMD_ALLOW = 1, CMD_DENY = 2, CMD_RESET = 3, CMD_STOP = 4, CMD_VERIFY = 5, CMD_REFRESH = 6, CMD_CUSTOM = 7, CMD_LOGOUT = 8, CMD_QUIT = 9 };
 enum { VERIFY_TEMPORARY = 0, VERIFY_CUSTOM = 1, VERIFY_BOTH = 2 };
 
 typedef struct { char *id; char *code; int allowed, verify, refresh, has_custom; } State;
@@ -47,6 +48,9 @@ static GtkWidget *refresh_items[5], *footer_label;
 // Account card: QR login before sign-in, user info (+ logout) after.
 static GtkWidget *assist_card, *account_card, *account_stack, *qr_stack, *qr_image, *login_status, *user_label;
 static int show_assist = 1, show_account;
+// Tray (host service only): AppIndicator via dlopen (no build dependency), else GtkStatusIcon.
+static GtkWidget *tray_menu, *tray_allow;
+static int suppress_tray;
 static int cur_verify, cur_refresh, cur_has_custom;
 static char current_id[64], current_code[64];
 static int code_visible = 1, suppress_switch, start_hidden, close_hides;
@@ -274,6 +278,68 @@ static GtkWidget *build_account_card(void) {
     return card;
 }
 
+static void present_window(void) { if (window) { gtk_widget_show(window); gtk_window_present(GTK_WINDOW(window)); } }
+static void on_tray_open(GtkMenuItem *i, gpointer d) { (void)i; (void)d; present_window(); }
+static void on_tray_allow(GtkCheckMenuItem *i, gpointer d) {
+    (void)d;
+    if (!suppress_tray) post(gtk_check_menu_item_get_active(i) ? CMD_ALLOW : CMD_DENY);
+}
+static void on_tray_quit(GtkMenuItem *i, gpointer d) {
+    (void)i; (void)d;
+    GtkWidget *dlg = gtk_message_dialog_new(NULL, GTK_DIALOG_MODAL, GTK_MESSAGE_QUESTION, GTK_BUTTONS_OK_CANCEL,
+                                            "退出后本机将下线：设备列表和远程协助都无法连接，直到再次启动。确定退出吗？");
+    gtk_window_set_title(GTK_WINDOW(dlg), "UU 远程 Linux 主机");
+    if (gtk_dialog_run(GTK_DIALOG(dlg)) == GTK_RESPONSE_OK) post(CMD_QUIT);
+    gtk_widget_destroy(dlg);
+}
+static void on_status_activate(GtkStatusIcon *i, gpointer d) { (void)i; (void)d; present_window(); }
+static void on_status_menu(GtkStatusIcon *i, guint button, guint time, gpointer d) {
+    (void)i; (void)button; (void)time; (void)d;
+    gtk_menu_popup_at_pointer(GTK_MENU(tray_menu), NULL);
+}
+static void build_tray(void) {
+    tray_menu = gtk_menu_new();
+    GtkWidget *open = gtk_menu_item_new_with_label("打开主窗口");
+    g_signal_connect(open, "activate", G_CALLBACK(on_tray_open), NULL);
+    tray_allow = gtk_check_menu_item_new_with_label("允许他人远程协助");
+    g_signal_connect(tray_allow, "toggled", G_CALLBACK(on_tray_allow), NULL);
+    GtkWidget *quit = gtk_menu_item_new_with_label("退出");
+    g_signal_connect(quit, "activate", G_CALLBACK(on_tray_quit), NULL);
+    gtk_menu_shell_append(GTK_MENU_SHELL(tray_menu), open);
+    gtk_menu_shell_append(GTK_MENU_SHELL(tray_menu), tray_allow);
+    gtk_menu_shell_append(GTK_MENU_SHELL(tray_menu), gtk_separator_menu_item_new());
+    gtk_menu_shell_append(GTK_MENU_SHELL(tray_menu), quit);
+    gtk_widget_show_all(tray_menu);
+    const char *icon = gtk_icon_theme_has_icon(gtk_icon_theme_get_default(), "uu-remote-linux") ? "uu-remote-linux" : "computer";
+
+    // StatusNotifierItem (GNOME AppIndicator extension, KDE): libayatana-appindicator3 / libappindicator3.
+    const char *libs[] = { "libayatana-appindicator3.so.1", "libappindicator3.so.1" };
+    for (int i = 0; i < 2; i++) {
+        void *h = dlopen(libs[i], RTLD_LAZY | RTLD_LOCAL);
+        if (!h) continue;
+        void *(*ind_new)(const char *, const char *, int) = (void *(*)(const char *, const char *, int))dlsym(h, "app_indicator_new");
+        void (*set_status)(void *, int) = (void (*)(void *, int))dlsym(h, "app_indicator_set_status");
+        void (*set_menu)(void *, GtkMenu *) = (void (*)(void *, GtkMenu *))dlsym(h, "app_indicator_set_menu");
+        void (*set_title)(void *, const char *) = (void (*)(void *, const char *))dlsym(h, "app_indicator_set_title");
+        if (ind_new && set_status && set_menu) {
+            void *ind = ind_new("uu-remote-linux", icon, 0 /* APPLICATION_STATUS */);
+            if (set_title) set_title(ind, "UU 远程 Linux 主机");
+            set_menu(ind, GTK_MENU(tray_menu));
+            set_status(ind, 1 /* ACTIVE */);
+            return; // keep the library loaded for the indicator's lifetime
+        }
+        dlclose(h);
+    }
+    // XEmbed system tray (Xfce, Cinnamon, MATE...).
+    G_GNUC_BEGIN_IGNORE_DEPRECATIONS
+    GtkStatusIcon *status = gtk_status_icon_new_from_icon_name(icon);
+    gtk_status_icon_set_tooltip_text(status, "UU 远程 Linux 主机");
+    gtk_status_icon_set_title(status, "UU 远程 Linux 主机");
+    g_signal_connect(status, "activate", G_CALLBACK(on_status_activate), NULL);
+    g_signal_connect(status, "popup-menu", G_CALLBACK(on_status_menu), NULL);
+    G_GNUC_END_IGNORE_DEPRECATIONS
+}
+
 static void build_window(void) {
     GtkCssProvider *css = gtk_css_provider_new();
     gtk_css_provider_load_from_data(css, CSS, -1, NULL);
@@ -398,6 +464,7 @@ static void build_window(void) {
     gtk_box_pack_end(GTK_BOX(root), footer_label, FALSE, FALSE, 0);
     if (close_hides) gtk_label_set_text(GTK_LABEL(footer_label), "开源 Linux 被控端 · 非网易官方客户端 · 关闭窗口后远程协助仍在后台运行");
     render_code();
+    if (close_hides) build_tray();
     gtk_widget_show_all(gtk_bin_get_child(GTK_BIN(window)));
     gtk_widget_set_visible(assist_card, show_assist);
     gtk_widget_set_visible(hint_label, show_assist);
@@ -465,6 +532,7 @@ static gboolean apply_state(gpointer data) {
         suppress_switch = 1;
         gtk_switch_set_active(GTK_SWITCH(allow_switch), s->allowed);
         suppress_switch = 0;
+        if (tray_allow) { suppress_tray = 1; gtk_check_menu_item_set_active(GTK_CHECK_MENU_ITEM(tray_allow), s->allowed); suppress_tray = 0; }
         cur_verify = s->verify; cur_refresh = s->refresh; cur_has_custom = s->has_custom;
         suppress_combo = 1; gtk_combo_box_set_active(GTK_COMBO_BOX(verify_combo), s->verify); suppress_combo = 0;
         if (s->refresh >= 0 && s->refresh < 5) {

@@ -63,14 +63,19 @@ fn restart_host() -> ! {
     eprintln!("restart failed: {error}");
     std::process::exit(1);
 }
+/// systemd user unit running this process (from /proc/self/cgroup), e.g. "uuremote-native.service".
+fn systemd_unit() -> Option<String> {
+    std::env::var_os("INVOCATION_ID")?;
+    let cgroup = std::fs::read_to_string("/proc/self/cgroup").ok()?;
+    cgroup.lines().find_map(|l| l.rsplit('/').next().filter(|u| u.ends_with(".service")).map(str::to_owned))
+}
 fn display_present() -> bool { std::env::var_os("DISPLAY").is_some() || std::env::var_os("WAYLAND_DISPLAY").is_some() }
 /// SIGUSR1 (`uuremote-server show`) opens the host window.
 fn present_on_usr1(ui: std::sync::Arc<assist::LocalUi>) {
+    // Install the handler before publishing the pid: SIGUSR1's default action terminates the process.
+    let Ok(mut usr1) = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::user_defined1()) else { return };
     write_host_pid();
-    tokio::spawn(async move {
-        let Ok(mut usr1) = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::user_defined1()) else { return };
-        while usr1.recv().await.is_some() { ui.present(); }
-    });
+    tokio::spawn(async move { while usr1.recv().await.is_some() { ui.present(); } });
 }
 
 fn host_pid_path() -> std::path::PathBuf { config::path().with_file_name("host.pid") }
@@ -93,6 +98,24 @@ fn show_running_host() -> Result<(), Box<dyn std::error::Error>> {
         });
     if let Some(pid) = running {
         if unsafe { libc::kill(pid, libc::SIGUSR1) } == 0 { return Ok(()); }
+    }
+    // Stopped from the tray but installed as a user service: start the service (not a second,
+    // unmanaged host), wait for it to publish its pid, then ask it to show the window.
+    let unit = std::env::var("UU_SERVICE_UNIT").unwrap_or_else(|_| "uuremote-native.service".into());
+    let installed = std::process::Command::new("systemctl").args(["--user", "cat", &unit])
+        .stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).status().is_ok_and(|s| s.success());
+    if installed && std::process::Command::new("systemctl").args(["--user", "start", &unit]).status().is_ok_and(|s| s.success()) {
+        let before = std::fs::metadata(host_pid_path()).and_then(|m| m.modified()).ok();
+        for _ in 0..60 {
+            std::thread::sleep(std::time::Duration::from_millis(500));
+            let fresh = std::fs::metadata(host_pid_path()).and_then(|m| m.modified()).ok().is_some_and(|t| Some(t) != before);
+            let pid = std::fs::read_to_string(host_pid_path()).ok().and_then(|s| s.trim().parse::<i32>().ok());
+            if let (true, Some(pid)) = (fresh, pid) {
+                std::thread::sleep(std::time::Duration::from_millis(500)); // signal handler installed right after the pid
+                if unsafe { libc::kill(pid, libc::SIGUSR1) } == 0 { return Ok(()); }
+            }
+        }
+        return Err("the UU remote host service started but did not open its window".into());
     }
     use std::os::unix::process::CommandExt;
     Err(Box::new(std::process::Command::new("/proc/self/exe").env("UU_SHOW_WINDOW", "1").exec()))
@@ -524,6 +547,14 @@ async fn serve(mut capture: Arc<ScreenCapture>, input: Arc<InputInjector>, shutd
                 SignalingEvent::AssistCommand(assist::Command::Verify(v)) => { if let Some(s) = assist.as_mut() { s.set_verify(v)?; } }
                 SignalingEvent::AssistCommand(assist::Command::Refresh(r)) => { if let Some(s) = assist.as_mut() { s.set_refresh(r)?; } }
                 SignalingEvent::AssistCommand(assist::Command::Custom(c)) => { if let Some(s) = assist.as_mut() { s.set_custom(c)?; } }
+                SignalingEvent::AssistCommand(assist::Command::Quit) => {
+                    // Tray 退出: under systemd (Restart=always) stop the unit itself, else just exit.
+                    log::info!("Quit requested from the tray");
+                    if let Some(unit) = systemd_unit() {
+                        let _ = std::process::Command::new("systemctl").args(["--user", "stop", "--no-block", &unit]).status();
+                    }
+                    return Ok(());
+                }
                 SignalingEvent::AssistCommand(assist::Command::Logout) => {
                     if let Some(s) = assist.as_mut().filter(|s| s.is_account()) {
                         s.logout().await;

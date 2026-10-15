@@ -68,7 +68,7 @@ fn valid_custom(code: &str) -> bool {
         && code.bytes().any(|b| b.is_ascii_alphabetic()) && code.bytes().any(|b| b.is_ascii_digit())
 }
 
-pub enum Command { Allow, Deny, Reset, Stop, Verify(Verify), Refresh(Refresh), Custom(String), Logout }
+pub enum Command { Allow, Deny, Reset, Stop, Verify(Verify), Refresh(Refresh), Custom(String), Logout, Quit }
 
 #[cfg(uu_gtk)]
 extern "C" {
@@ -156,6 +156,7 @@ impl LocalUi {
                     6 => if let Some(r) = Refresh::from_index(index) { return Command::Refresh(r) },
                     7 => return Command::Custom(text),
                     8 => return Command::Logout,
+                    9 => return Command::Quit,
                     _ => tokio::time::sleep(std::time::Duration::from_millis(150)).await,
                 }
             },
