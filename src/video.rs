@@ -76,7 +76,7 @@ fn vaapi_filter(output: Option<(u32, u32)>) -> String {
     format!("{scale}format=nv12,hwupload")
 }
 fn vaapi_options(settings: &VideoSettings, gop: &str) -> Vec<String> {
-    let (maxrate, buffer) = rate_args(settings);
+    let (maxrate, buffer) = rate_args(settings, Encoder::Vaapi);
     // QVBR is not uniformly available on Intel/AMD drivers. VBR + qmin sets a quality
     // floor while retaining the viewer's bitrate cap; unsupported drivers fall back to CPU.
     ["-c:v", "h264_vaapi", "-profile:v", "constrained_baseline", "-g", gop, "-bf", "0",
@@ -188,10 +188,16 @@ async fn read_inprocess(
 
 /// Rate-control arguments: constant quality capped at 30M (自动), or capped at the viewer's
 /// chosen bitrate. The VBV buffer stays at most 500k so a cap never adds queueing latency.
-fn rate_args(settings: &VideoSettings) -> (String, String) {
+/// VBV buffer in kbit. NVENC ull and VAAPI keep the small low-latency buffer; libx264 needs room for a
+/// whole IDR frame, otherwise large desktops get near-grey keyframes that sharpen over the GOP (#8).
+/// Half a second of bitrate still starved repeated 0.5 s-GOP keyframes at 3296x2036/2M; one second did not.
+fn buffer_kbits(max_kbps: u32, encoder: Encoder) -> u32 {
+    if encoder == Encoder::Cpu { max_kbps.clamp(500, 8000) } else { (max_kbps / 8).clamp(100, 500) }
+}
+
+fn rate_args(settings: &VideoSettings, encoder: Encoder) -> (String, String) {
     let max_kbps = settings.max_kbps().unwrap_or(30_000);
-    let buffer_kbits = (max_kbps / 8).clamp(100, 500);
-    (format!("{max_kbps}k"), format!("{buffer_kbits}k"))
+    (format!("{max_kbps}k"), format!("{}k", buffer_kbits(max_kbps, encoder)))
 }
 
 async fn read_encoder_with(
@@ -212,7 +218,7 @@ async fn read_encoder_with(
             display: display.clone(), input: size, output: settings.output, fps: u32::from(settings.fps),
             gop: gop_frames(settings.fps, true) as u32, cq: settings.cq() as u32,
             target_bps: settings.max_kbps().map_or(16_000, |k| i64::from(k) * 3 / 4) * 1000,
-            max_bps: max_kbps * 1000, buffer_bits: (max_kbps / 8).clamp(100, 500) * 1000, encoder,
+            max_bps: max_kbps * 1000, buffer_bits: i64::from(buffer_kbits(max_kbps as u32, encoder)) * 1000, encoder,
             damage: crate::inproc_encoder::damage_enabled(),
         };
         log::info!("Desktop encoder: display={} source={}x{} output={:?} fps={} cq={} maxrate={}k encoder={} pipeline=in-process",
@@ -225,7 +231,7 @@ async fn read_encoder_with(
     let fps = settings.fps.to_string();
     // Keep the IDR interval at 2 s whatever the frame rate.
     let gop = gop_frames(settings.fps, false).to_string();
-    let (maxrate, bufsize) = rate_args(&settings);
+    let (maxrate, bufsize) = rate_args(&settings, encoder);
     let cq = settings.cq().to_string();
     let target = settings.max_kbps().map_or("16M".to_string(), |k| format!("{}k", k * 3 / 4));
     log::info!("Desktop encoder: display={} source={} output={:?} fps={} cq={} maxrate={} encoder={} low_latency=true",display,size,settings.output,settings.fps,cq,maxrate,encoder.name());
@@ -458,6 +464,15 @@ pub async fn stream_desktop(pc: Arc<RTCPeerConnection>, track: Arc<TrackLocalSta
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn x264_buffer_fits_keyframes() {
+        assert_eq!(buffer_kbits(2000, Encoder::Nvenc), 250);
+        assert_eq!(buffer_kbits(2000, Encoder::Vaapi), 250);
+        assert_eq!(buffer_kbits(2000, Encoder::Cpu), 2000);
+        assert_eq!(buffer_kbits(300, Encoder::Cpu), 500);
+        assert_eq!(buffer_kbits(30_000, Encoder::Cpu), 8000);
+    }
+
     #[test]
     fn vaapi_is_explicit_and_upload_follows_scale() {
         assert_eq!(Encoder::from_setting(None, true), Encoder::Nvenc);
