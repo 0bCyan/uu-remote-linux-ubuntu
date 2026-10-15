@@ -136,10 +136,16 @@ pub(crate) fn x265_params(gop: &str) -> String {
 fn cpu_hevc_options(settings: &VideoSettings, gop: &str) -> Vec<String> {
     let (maxrate, buffer) = rate_args(settings, Encoder::Cpu);
     let (profile, pix_fmt) = chroma_args(settings, Encoder::Cpu);
-    ["-c:v", "libx265", "-preset", "superfast", "-tune", "zerolatency", "-profile:v", profile,
-        "-pix_fmt", pix_fmt, "-g", gop, "-bf", "0", "-threads", "4", "-crf", &settings.cq().to_string(),
+    let mut options = ["-c:v", "libx265", "-preset", "superfast", "-tune", "zerolatency", "-profile:v", profile,
+        "-pix_fmt", pix_fmt, "-g", gop, "-bf", "0", "-threads", "4",
         "-maxrate", &maxrate, "-bufsize", &buffer, "-x265-params", &x265_params(gop)]
-        .into_iter().map(str::to_owned).collect()
+        .into_iter().map(str::to_owned).collect::<Vec<_>>();
+    // Same as libx264: capped CRF starves repeated keyframes, so bitrate presets use ABR.
+    match settings.max_kbps() {
+        Some(k) => options.extend(["-b:v".into(), format!("{}k", k * 3 / 4)]),
+        None => options.extend(["-crf".into(), settings.cq().to_string()]),
+    }
+    options
 }
 
 fn encoder_options(settings: &VideoSettings, encoder: Encoder, gop: &str) -> Vec<String> {

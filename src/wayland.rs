@@ -26,7 +26,7 @@ pub fn init() -> Result<(u32,u32),String> {
         return Ok((w as u32,h as u32));
     }
     #[cfg(not(all(target_os="linux", feature="wayland")))]
-    Err("Wayland backend requires Linux and a build with --features wayland".into())
+    Err("this build was compiled without the wayland feature; rebuild with --features wayland".into())
 }
 pub fn capture(buffer:&mut [u8]) -> Result<(),String> {
     #[cfg(all(target_os="linux", feature="wayland"))]

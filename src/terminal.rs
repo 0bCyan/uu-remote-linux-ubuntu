@@ -71,6 +71,7 @@ struct Session {
     pid: i32,
     sink: Mutex<Option<UnboundedSender<Vec<u8>>>>,
     scrollback: Mutex<VecDeque<u8>>,
+    size: Mutex<(u16, u16)>,
 }
 
 impl Session {
@@ -83,8 +84,25 @@ impl Session {
         false
     }
     fn resize(&self, cols: u16, rows: u16) {
+        *self.size.lock().unwrap() = (cols, rows);
+        self.set_winsize(cols, rows);
+    }
+    fn set_winsize(&self, cols: u16, rows: u16) {
         let win = libc::winsize { ws_row: rows, ws_col: cols, ws_xpixel: 0, ws_ypixel: 0 };
         unsafe { libc::ioctl(self.master.as_raw_fd(), libc::TIOCSWINSZ as _, &win); }
+    }
+    /// Full-screen programs repaint only on SIGWINCH, which an unchanged size never raises:
+    /// shrink by one row, then restore the latest requested size after a pause.
+    fn force_redraw(self: &Arc<Self>) {
+        let (cols, rows) = *self.size.lock().unwrap();
+        if rows <= 1 { return; }
+        self.set_winsize(cols, rows - 1);
+        let s = self.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(150));
+            let (cols, rows) = *s.size.lock().unwrap();
+            s.set_winsize(cols, rows);
+        });
     }
     fn write(&self, data: &[u8]) {
         let mut off = 0;
@@ -137,7 +155,7 @@ fn spawn(requested_id: u32, cols: u16, rows: u16, shell: Option<&str>) -> Result
         }
     };
     let session = Arc::new(Session { id, shell: shell.clone(), created_ms: now_ms(), pid: child.id() as i32,
-        master: pty.master, sink: Mutex::new(None), scrollback: Mutex::new(VecDeque::new()) });
+        master: pty.master, sink: Mutex::new(None), scrollback: Mutex::new(VecDeque::new()), size: Mutex::new((cols, rows)) });
     let mut reader = std::fs::File::from(session.master.try_clone().map_err(|e| format!("pty dup failed: {e}"))?);
     let worker = session.clone();
     std::thread::Builder::new().name(format!("uu-term-{id}")).spawn(move || {
@@ -212,6 +230,7 @@ impl TerminalConn {
             OPEN => {
                 let v = json(&frame.payload);
                 let (cols, rows) = dims(&v);
+                let reattach = existing.is_some();
                 let session = match existing {
                     Some(s) => { s.resize(cols, rows); Ok(s) }
                     None => spawn(frame.session, cols, rows, v.get("shell").and_then(|s| s.as_str())),
@@ -225,6 +244,9 @@ impl TerminalConn {
                         let replay: Vec<u8> = s.scrollback.lock().unwrap().iter().copied().collect();
                         // A full scrollback exceeds SCTP's 64 KiB outbound message limit.
                         for chunk in replay.chunks(OUTPUT_CHUNK) { self.send(STDOUT, s.id, chunk); }
+                        drop(sink);
+                        // The replay tail starts mid-redraw for full-screen programs.
+                        if reattach { s.force_redraw(); }
                     }
                     Err(e) => { log::warn!("Terminal open failed: {}", e); self.send(OPEN_RESP, frame.session, &reply(1, &e)); }
                 }
@@ -291,13 +313,31 @@ mod tests {
         }
     }
     #[test]
+    fn force_redraw_shrinks_then_restores_latest_size() {
+        let pty = nix::pty::openpty(None, None).unwrap();
+        let session = Arc::new(Session { id: u32::MAX - 2, shell: "/bin/sh".into(), created_ms: now_ms(),
+            master: pty.master, pid: 0, sink: Mutex::new(None),
+            scrollback: Mutex::new(VecDeque::new()), size: Mutex::new((80, 24)) });
+        let rows = |s: &Session| {
+            let mut win = libc::winsize { ws_row: 0, ws_col: 0, ws_xpixel: 0, ws_ypixel: 0 };
+            unsafe { libc::ioctl(s.master.as_raw_fd(), libc::TIOCGWINSZ as _, &mut win); }
+            (win.ws_col, win.ws_row)
+        };
+        session.resize(100, 30);
+        session.force_redraw();
+        assert_eq!(rows(&session), (100, 29));
+        session.resize(120, 40);
+        std::thread::sleep(std::time::Duration::from_millis(400));
+        assert_eq!(rows(&session), (120, 40), "restore must use the latest requested size");
+    }
+    #[test]
     fn reconnect_replays_large_history_in_bounded_frames() {
         let pty = nix::pty::openpty(None, None).unwrap();
         let id = u32::MAX - 1;
         let history: Vec<u8> = (0..SCROLLBACK).map(|n| (n % 251) as u8).collect();
         let session = Arc::new(Session { id, shell: "/bin/sh".into(), created_ms: now_ms(),
             master: pty.master, pid: 0, sink: Mutex::new(None),
-            scrollback: Mutex::new(history.iter().copied().collect()) });
+            scrollback: Mutex::new(history.iter().copied().collect()), size: Mutex::new((80, 24)) });
         registry().lock().unwrap().insert(id, session.clone());
         struct Cleanup(u32);
         impl Drop for Cleanup { fn drop(&mut self) { registry().lock().unwrap().remove(&self.0); } }

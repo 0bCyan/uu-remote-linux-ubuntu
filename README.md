@@ -323,9 +323,26 @@ cargo build --release --features wayland
 
 Omarchy 使用 Hyprland：在其用户会话中运行，设置 `UU_DESKTOP_BACKEND=wayland`，保留
 `WAYLAND_DISPLAY` 和 `XDG_RUNTIME_DIR`。其他合成器可能需要 `--features wayland,portal`。
-uinput 需加载内核模块并应用上文 uaccess 规则；无人登录账号需要专用组的受限授权。
+uinput 需加载内核模块（开机自动加载：`echo uinput | sudo tee /etc/modules-load.d/uinput.conf`）并应用上文 uaccess 规则；无人登录账号需要专用组的受限授权。
 该权限能向整个 seat（包括锁屏/登录界面）注入输入。设置 `UU_INPUT_BACKEND=uinput` 后，
 仍须确认启动日志实际选择了 uinput。
+
+Hyprland / uwsm 等会话中，`default.target` 可能早于合成器导出 `WAYLAND_DISPLAY`。systemd 单元可改为随图形会话启动
+（社区在 Omarchy 上验证过开机自启）：
+
+```ini
+[Unit]
+After=graphical-session.target
+PartOf=graphical-session.target
+ConditionEnvironment=WAYLAND_DISPLAY
+
+[Service]
+Environment=UU_DESKTOP_BACKEND=wayland
+# 其余同上文 X11 示例，去掉 DISPLAY
+
+[Install]
+WantedBy=graphical-session.target
+```
 
 VAAPI 可选包：Intel 新显卡用 `intel-media-driver`，AMD 用 `libva-mesa-driver`，`libva-utils` 提供
 `vainfo`。KMS 依赖 `libdrm`。虚拟 Xfce 依赖 `xorg-server-xvfb xorg-xauth xorg-xdpyinfo

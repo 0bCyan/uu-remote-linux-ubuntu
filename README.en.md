@@ -368,10 +368,14 @@ cargo build --release --features wayland
 Omarchy uses Hyprland: run in its user session, select `UU_DESKTOP_BACKEND=wayland`,
 and retain `WAYLAND_DISPLAY` / `XDG_RUNTIME_DIR`. This requires wlr-screencopy and the
 virtual input protocols supported by Hyprland; other compositors may need `--features wayland,portal`.
-For uinput, load `uinput` and apply the uaccess rule above; seat ACLs require an active login.
+For uinput, load `uinput` (at boot: `echo uinput | sudo tee /etc/modules-load.d/uinput.conf`) and apply the uaccess rule above; seat ACLs require an active login.
 For unattended accounts, explicitly restrict `/dev/uinput` access to a dedicated group.
 This permission can inject into the whole seat, including lock/greeter screens.
 `UU_INPUT_BACKEND=uinput` requests kernel devices; verify startup actually reports uinput.
+In Hyprland / uwsm sessions `default.target` may start before the compositor exports `WAYLAND_DISPLAY`;
+tie the unit to the graphical session instead (community-verified autostart on Omarchy):
+`After=` and `PartOf=graphical-session.target`, `ConditionEnvironment=WAYLAND_DISPLAY`,
+`Environment=UU_DESKTOP_BACKEND=wayland` (no `DISPLAY`), and `WantedBy=graphical-session.target`.
 Optional VAAPI: `intel-media-driver` (modern Intel) or `libva-mesa-driver` (AMD), `libva-utils`
 for `vainfo`. Optional KMS: `libdrm`. Virtual Xfce: `xorg-server-xvfb xorg-xauth xorg-xdpyinfo
 xfce4-session xfce4-panel xfdesktop xfwm4 gnome-terminal`.
