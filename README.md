@@ -10,7 +10,7 @@
 > 这是个人兴趣项目，**与网易无关，也不是官方客户端**。如果网易认为本项目侵权或有不妥，
 > 请在推特私信我 **[@ai_fengshou](https://x.com/ai_fengshou)**，我会第一时间自行下架。
 
-<p align="center"><img src="docs/images/login-window.png" width="560" alt="Linux 主机扫码登录窗口"></p>
+<p align="center"><img src="docs/images/main-window.png" width="620" alt="Linux 主机主窗口：远程协助与账号"></p>
 <p align="center"><sub>首次运行时弹出的扫码登录窗口（二维码已打码）</sub></p>
 
 <!-- 截图占位：在官方客户端里远控 Linux 桌面的效果图。请自行截图并去掉账号、设备名等信息后放到

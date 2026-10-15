@@ -12,7 +12,7 @@
 > If NetEase considers this project infringing or inappropriate, please DM me on X
 > **[@ai_fengshou](https://x.com/ai_fengshou)** and I will take it down right away.
 
-<p align="center"><img src="docs/images/login-window.png" width="560" alt="QR login window on the Linux host"></p>
+<p align="center"><img src="docs/images/main-window.png" width="620" alt="Host main window: remote assistance and account"></p>
 <p align="center"><sub>The QR login window shown on first run (QR code blurred). The UI is in Chinese, like the official app.</sub></p>
 
 <!-- Screenshot placeholder: the Linux desktop controlled from the official client. Take your own
