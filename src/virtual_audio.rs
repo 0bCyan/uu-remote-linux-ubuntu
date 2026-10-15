@@ -49,7 +49,11 @@ fn persist(route: &Route) -> Result<(), ()> {
 }
 fn recover(route: &Route) -> Result<(), ()> {
     // Do not overwrite a default explicitly changed by the user during remote control.
-    if pactl(&["get-default-sink"])? == SINK { pactl(&["set-default-sink",&route.previous])?; }
+    // The previous output may be gone (unplugged USB card): still unload our sink so the server
+    // picks another default instead of leaving every stream on a null sink.
+    if pactl(&["get-default-sink"]).is_ok_and(|s| s == SINK) && pactl(&["set-default-sink",&route.previous]).is_err() {
+        log::warn!("Previous default audio output unavailable; the sound server will choose a new default");
+    }
     move_inputs(SINK,&route.previous);
     let modules=owned_modules(&pactl(&["list","short","modules"])?);
     for id in modules { pactl(&["unload-module",&id.to_string()])?; }

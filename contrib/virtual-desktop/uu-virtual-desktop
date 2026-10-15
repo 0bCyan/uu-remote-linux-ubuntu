@@ -26,7 +26,15 @@ case "$display" in :[0-9]*) ;; *) echo "UU_VIRTUAL_DISPLAY must be a local displ
 number="${display#:}"
 case "$number" in *[!0-9]*|'') echo "invalid display number" >&2; exit 1 ;; esac
 socket="/tmp/.X11-unix/X$number"
-[ ! -e "$socket" ] || { echo "display already in use" >&2; exit 1; }
+# A live server owns the display; a dead one's leftovers (killed Xvfb) are cleaned up by Xvfb itself.
+lock="/tmp/.X$number-lock"
+if [ -e "$socket" ] || [ -e "$lock" ]; then
+    owner=$(tr -d ' \n' < "$lock" 2>/dev/null || :)
+    case "$owner" in ''|*[!0-9]*) owner= ;; esac
+    if [ -z "$owner" ] || kill -0 "$owner" 2>/dev/null; then echo "display already in use" >&2; exit 1; fi
+    echo "removing stale display $display left by dead process $owner" >&2
+    rm -f "$lock" "$socket" 2>/dev/null || { echo "cannot remove stale display files" >&2; exit 1; }
+fi
 umask 077
 export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
 authority="$XDG_RUNTIME_DIR/uu-virtual-$number.Xauthority"
