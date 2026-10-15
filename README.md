@@ -251,7 +251,7 @@ flowchart LR
 `/dev/dri/renderD128`，运行用户需要 render 节点权限。不会自动选择 VAAPI；设备或驱动初始化
 失败会明确警告并回退 libx264。外部 FFmpeg 和 `--features inproc-av` 均先转 NV12 再上传硬件帧。
 VBR 使用控制端码率预设及 CQ 对应的最小 QP，无 B 帧、async depth=1，并保留现有 GOP/VFR 规则。
-Intel/AMD 硬编**未实机验证**，不能把 virtio 的 CPU 回退测试当作硬编验收。
+Intel 核显（UHD 770，iHD 驱动）已实机验收：默认的外部 FFmpeg 管线用官方 Mac 控制端测试了各档画质、帧率、缩放和重连，全程硬件编码、无回退，CPU 占用比 libx264 低约 40%。**AMD 显卡和 `--features inproc-av` 管线的 VAAPI 尚未实机验证。**
 
 ### 静音运行与虚拟声卡
 

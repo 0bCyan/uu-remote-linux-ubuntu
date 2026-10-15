@@ -270,7 +270,9 @@ Released under the [GPL-3.0](LICENSE): you may use, modify and redistribute it, 
 Both FFmpeg process and `--features inproc-av` upload NV12 frames to a VAAPI frame pool.
 VBR uses the viewer bitrate preset and CQ-derived minimum QP, no B-frames, async depth 1,
 AUD and the existing GOP/VFR timing. Unsupported device/driver/initialization falls back to libx264
-with a warning. Intel/AMD hardware acceptance is still required (未实机验证).
+with a warning. Accepted on Intel UHD 770 (iHD) with the default FFmpeg process pipeline and the official Mac
+viewer (presets, fps, scaling, reconnect; no fallback, ~40% less CPU than libx264). AMD and the `inproc-av`
+VAAPI path are not hardware-verified.
 
 ### Virtual audio / 虚拟声卡
 
