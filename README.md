@@ -255,11 +255,12 @@ Intel/AMD 硬编**未实机验证**，不能把 virtio 的 CPU 回退测试当�
 
 ### 静音运行与虚拟声卡
 
-控制端开启「静音运行」后，程序用 `pactl module-null-sink` 创建 `uu-remote-sink`，保存原默认输出，
+控制端开启「静音运行」后，程序创建虚拟输出 `uu-remote-sink`，保存原默认输出，
 迁移其播放流并采集 `uu-remote-sink.monitor`。新播放也走虚拟输出；其他输出上的流不迁移。
 最后一个桌面连接结束后恢复原默认输出并卸载模块；`mute_permanent` 仍保留原物理静音策略。
 恢复记录保存在配置旁，权限 0600；进程锁避免重复实例抢占，异常退出后下次启动会恢复遗留路由。
-PulseAudio 和 PipeWire-pulse 都使用该接口（Debian 安装 `pulseaudio-utils`，Arch 安装 `libpulse`）。
+有 `pactl` 时用它（PulseAudio / PipeWire-pulse）；没有 `pactl` 的纯 PipeWire 系统（如默认的 Ubuntu 桌面）
+自动改用 `pw-cli`/`wpctl` 创建同名虚拟输出，正在播放的声音由 WirePlumber 自动迁移。已在 Ubuntu 24.04 实机上用官方 Mac 控制端验收。
 路由失败时保留原静音/monitor 方案。开关变化仅重启当前音频编码器，未开启时采集方式保持不变。
 本地诊断命令 `virtual-audio-probe` 会临时切换输出五秒并恢复。
 

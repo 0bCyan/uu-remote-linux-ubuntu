@@ -236,14 +236,15 @@ with a warning. Intel/AMD hardware acceptance is still required (未实机验证
 
 ### Virtual audio / 虚拟声卡
 
-The viewer's 静音运行 switch creates `uu-remote-sink` with `pactl module-null-sink`,
+The viewer's 静音运行 switch creates the null sink `uu-remote-sink`,
 moves streams from the original default output and captures `uu-remote-sink.monitor`.
 New output goes to this sink; streams explicitly pinned to other outputs are untouched.
 The last desktop session restores the previous default output and unloads the module.
 `mute_permanent` retains the physical mute policy, but still releases the virtual sink.
 A private recovery record beside the config and a process lock recover crash leftovers on startup.
-PulseAudio and PipeWire-pulse use the same `pactl` interface (install `pulseaudio-utils` on Debian,
-`libpulse` on Arch). When routing is unavailable, the existing mute/monitor path remains.
+`pactl` is used when installed (PulseAudio / PipeWire-pulse); plain PipeWire systems without it (default
+Ubuntu desktop) use `pw-cli`/`wpctl` for the same sink and WirePlumber moves playing streams. Accepted on
+Ubuntu 24.04 with the official Mac viewer. When routing is unavailable, the existing mute/monitor path remains.
 Changing the switch restarts only the scoped audio encoder; normal non-muted capture is unchanged.
 `virtual-audio-probe` temporarily routes output for five seconds and restores it (local diagnostic).
 

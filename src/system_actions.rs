@@ -147,20 +147,20 @@ impl PeerActions {
                 let on = toggle_value(value, args);
                 state.settings.keep_mute = on;
                 if on { mute_for_session(&mut state); } else { restore_mute(&mut state); }
-                log::info!("System action mute (action {}): on={} muted={:?}", action, on, host_muted());
+                log::info!("System action mute (action {}): on={} virtual_sink={} default_muted={:?}", action, on, crate::virtual_audio::active(), host_muted());
             }
             // Keep the host muted after the session (远程结束后，恢复被控端声音设置 unchecked).
             MUTE_PERMANENT => {
                 let on = toggle_value(value, args);
                 state.settings.mute_permanent = on;
                 if on { state.settings.keep_mute = true; mute_for_session(&mut state); }
-                log::info!("System action mute_permanent: on={} muted={:?}", on, host_muted());
+                log::info!("System action mute_permanent: on={} virtual_sink={} default_muted={:?}", on, crate::virtual_audio::active(), host_muted());
             }
             MUTE_RESTORE => {
                 state.settings.keep_mute = false;
                 state.settings.mute_permanent = false;
                 restore_mute(&mut state);
-                log::info!("System action mute_restore: muted={:?}", host_muted());
+                log::info!("System action mute_restore: virtual_sink={} default_muted={:?}", crate::virtual_audio::active(), host_muted());
             }
             SET_AUTO_LOCK => {
                 // Observed: enabling 远程结束后自动锁屏 sends value 2 and disabling value 1.
