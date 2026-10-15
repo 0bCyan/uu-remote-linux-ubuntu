@@ -68,6 +68,22 @@ impl Encoder {
 fn nvidia_present() -> bool {
     std::path::Path::new("/proc/driver/nvidia/version").exists() || std::path::Path::new("/dev/nvidia0").exists()
 }
+/// 真彩 (4:4:4) needs the FFmpeg process pipeline with NVENC or libx264 (h264_vaapi and the
+/// in-process encoder are 4:2:0 only).
+pub fn full_chroma_available() -> bool {
+    #[cfg(feature = "inproc-av")]
+    if crate::inproc_encoder::selected() { return false; }
+    Encoder::requested() != Encoder::Vaapi
+}
+
+/// (-profile:v, -pix_fmt) for NVENC / libx264: 4:4:4 needs a High 4:4:4 profile.
+fn chroma_args(settings: &VideoSettings, encoder: Encoder) -> (&'static str, &'static str) {
+    match (settings.chroma == crate::capture_setting::CHROMA_444, encoder) {
+        (true, Encoder::Nvenc) => ("high444p", "yuv444p"),
+        (true, _) => ("high444", "yuv444p"),
+        (false, _) => ("baseline", "yuv420p"),
+    }
+}
 pub(crate) fn vaapi_device() -> String { std::env::var("UU_VAAPI_DEVICE").unwrap_or_else(|_| "/dev/dri/renderD128".into()) }
 
 /// NV12 conversion must precede upload; scaling runs on software frames, before hwupload.
@@ -232,7 +248,8 @@ async fn read_encoder_with(
     let (maxrate, bufsize) = rate_args(&settings, encoder);
     let cq = settings.cq().to_string();
     let target = settings.max_kbps().map_or("16M".to_string(), |k| format!("{}k", k * 3 / 4));
-    log::info!("Desktop encoder: display={} source={} output={:?} fps={} cq={} maxrate={} encoder={} low_latency=true",display,size,settings.output,settings.fps,cq,maxrate,encoder.name());
+    let (profile, pix_fmt) = chroma_args(&settings, encoder);
+    log::info!("Desktop encoder: display={} source={} output={:?} fps={} cq={} maxrate={} encoder={} pix_fmt={} low_latency=true",display,size,settings.output,settings.fps,cq,maxrate,encoder.name(),if encoder == Encoder::Vaapi { "nv12" } else { pix_fmt });
     // A bundled FFmpeg prefix (config ffmpeg_root / UU_FFMPEG_ROOT) or `ffmpeg` on PATH.
     let mut command=match crate::config::ffmpeg_root() {
         Some(root) => { let mut c=Command::new(root.join("bin/ffmpeg")); c.env("LD_LIBRARY_PATH",root.join("lib/x86_64-linux-gnu")); c }
@@ -258,14 +275,14 @@ async fn read_encoder_with(
         command.args(vaapi_options(&settings, &gop));
     } else if encoder == Encoder::Nvenc {
         command.args(["-c:v","h264_nvenc","-preset","p4","-tune","ull",
-            "-profile:v","baseline","-pix_fmt","yuv420p","-g",&gop,"-bf","0",
+            "-profile:v",profile,"-pix_fmt",pix_fmt,"-g",&gop,"-bf","0",
             "-rc","vbr","-cq",&cq,"-b:v",&target,"-maxrate",&maxrate,"-bufsize",&bufsize,
             "-rc-lookahead","0","-zerolatency","1","-delay","0","-aud","1"]);
     }else{
         let x264 = format!("aud=1:repeat-headers=1:scenecut=0:keyint={gop}:min-keyint={gop}");
         command.args([
             "-c:v", "libx264", "-preset", "superfast", "-tune", "zerolatency",
-            "-profile:v", "baseline", "-pix_fmt", "yuv420p", "-g", &gop, "-threads", "4",
+            "-profile:v", profile, "-pix_fmt", pix_fmt, "-g", &gop, "-threads", "4",
             "-crf", &cq, "-maxrate", &maxrate, "-bufsize", &bufsize,
             "-x264-params", &x264]);
     }

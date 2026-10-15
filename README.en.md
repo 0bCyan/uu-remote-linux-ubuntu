@@ -88,7 +88,7 @@ mapping and hardware acceleration remain unverified. This is not zero-copy VAAPI
 | Feature | Status |
 |---|---|
 | Switching between multiple monitors | In progress |
-| True color (4:4:4) | Not implemented; not declared in the handshake, so the client does not enable it |
+| True color (4:4:4) | Supported (v0.1.15): the default FFmpeg pipeline with NVENC / libx264 encodes H.264 High 4:4:4; VAAPI and `inproc-av` stay 4:2:0 and report that to the client |
 | HDR | Not implemented |
 | Super screen / virtual display | Not implemented |
 | Privacy screen on the host | Not implemented |

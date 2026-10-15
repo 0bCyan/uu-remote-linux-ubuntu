@@ -164,7 +164,13 @@ started a second full host server instead, so check that a subcommand exists in 
 - CaptureSettingRequest: field 1 is an **fps option index** (1=30, 2=60, 3=90); the real frame rate is
   field 18 `fpsCount`. Field 2 quality: 1 Fast, 2 General (高清 2M), 3 HD (超清 8M), 4 Bluray (原画 20M),
   5 Auto, 6 Custom. Resolution: 16/17 pixel size or 5/6, 10 resolution_type (3 = follow remote).
-  Reply `RpcResponse{2 CaptureSettingResponse{}}` (no errors = applied) and send Message 25 CaptureSettingSync.
+  Field 7 `chorma_format` (ChromaFormat 1 = 4:2:0, 3 = 4:4:4) is sent when 真彩 is toggled; ff_capture_setting versions
+  are cumulative (3 CHROMA_SAMPLING, 4 CUSTOM_BITRATE, 5 DPI_SCALE, 6 HDR). 4:4:4 = NVENC `high444p` / x264 `high444`
+  with `yuv444p`; VAAPI and inproc stay 4:2:0.
+  Reply `RpcResponse{2 CaptureSettingResponse{}}` (no errors = applied) and send Message 25 CaptureSettingSync
+  (field 3 = the chroma actually encoded).
+- ConnectOptions field 4 `decoder_cap_list` = DecoderCap {1 fps, 2 codec_type (1 H264, 2 H265), 3 width, 4 height,
+  5 chroma_format}. The Mac viewer lists H.264 and H.265, each 4:2:0 and 4:4:4, up to 3840x2160@120.
 - SystemMetrics (Message 13): GeneralMetric `2 system_sound_support` is an enum, **2 = supported** (1 = not
   supported); SettingMetric 1 keep_mute, 2 mute_permanent, 3 auto_lock, 5 file_transfer_save_location,
   8/9/10 permission states (2 = allow).

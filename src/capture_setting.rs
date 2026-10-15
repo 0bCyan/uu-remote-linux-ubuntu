@@ -19,8 +19,13 @@ pub const QUALITY_AUTO: u64 = 5;
 pub const QUALITY_CUSTOM: u64 = 6;
 
 /// FeatureFlag.ff_capture_setting we declare: fps, preset quality and custom bitrate.
-/// (Chroma 4:4:4, DPI scaling and HDR are higher versions and are not implemented.)
+/// Versions are cumulative (official FF_CaptureSetting enum: 3 CHROMA_SAMPLING, 4 CUSTOM_BITRATE,
+/// 5 DPI_SCALE, 6 HDR), so 4 also tells the viewer we accept a chroma format (真彩).
 pub const FEATURE_VERSION: u64 = 4;
+
+/// Official GvPb_ChromaFormat values (CaptureSettingRequest field 7, CaptureSettingSync field 3).
+pub const CHROMA_420: u64 = 1;
+pub const CHROMA_444: u64 = 3;
 
 const MIN_FPS: u32 = 5;
 const MAX_FPS: u32 = 144;
@@ -33,10 +38,12 @@ pub struct VideoSettings {
     pub custom_mbps: u32,
     /// Scaled stream size (其他分辨率); None streams the native desktop size.
     pub output: Option<(u32, u32)>,
+    /// CHROMA_420 or CHROMA_444 (真彩); 4:4:4 only when the encoder pipeline supports it.
+    pub chroma: u64,
 }
 
 impl Default for VideoSettings {
-    fn default() -> Self { Self { fps: 60, quality: QUALITY_AUTO, custom_mbps: 0, output: None } }
+    fn default() -> Self { Self { fps: 60, quality: QUALITY_AUTO, custom_mbps: 0, output: None, chroma: CHROMA_420 } }
 }
 
 /// Selectable smaller stream sizes with the desktop's aspect ratio (even dimensions).
@@ -95,6 +102,10 @@ fn fps_from_option(value: u64) -> Option<u64> {
 /// Applies a capture-setting RPC to `settings` and returns the RpcResponse payload (Message 22),
 /// or None when the RPC is not a capture/fps/quality setting.
 pub fn handle_rpc(rpc: &[WireField], settings: &watch::Sender<VideoSettings>, native: (u32, u32)) -> Option<Vec<u8>> {
+    apply_rpc(rpc, settings, native, crate::video::full_chroma_available())
+}
+
+fn apply_rpc(rpc: &[WireField], settings: &watch::Sender<VideoSettings>, native: (u32, u32), full_chroma: bool) -> Option<Vec<u8>> {
     let header = message(rpc, 1).unwrap_or(&[]);
     let mut next = *settings.borrow();
     if let Some(request) = message(rpc, 2) {
@@ -106,6 +117,13 @@ pub fn handle_rpc(rpc: &[WireField], settings: &watch::Sender<VideoSettings>, na
         if let Some(fps) = number(&fields, 18).filter(|v| *v > 0).or_else(|| number(&fields, 1).and_then(fps_from_option)) { next.fps = fps as u32; }
         if let Some(quality) = number(&fields, 2).filter(|v| *v > 0) { next.quality = quality; }
         if let Some(bitrate) = number(&fields, 8).filter(|v| *v > 0) { next.custom_mbps = bitrate as u32; }
+        // Field 7 chorma_format (sic): 3 = 4:4:4 when 真彩 is on, 1 = 4:2:0. The Sync reports what is encoded.
+        match number(&fields, 7) {
+            Some(CHROMA_444) if full_chroma => next.chroma = CHROMA_444,
+            Some(CHROMA_444) => { log::info!("Chroma 4:4:4 requested; this encoder pipeline only supports 4:2:0"); next.chroma = CHROMA_420; }
+            Some(CHROMA_420) => next.chroma = CHROMA_420,
+            _ => {}
+        }
         // ChooseResolutionType 3 = follow remote (native); otherwise pixel size, else logical size.
         if number(&fields, 10) == Some(3) { next.output = None; }
         else if let Some((w, h)) = number(&fields, 16).zip(number(&fields, 17)).or_else(|| number(&fields, 5).zip(number(&fields, 6))) {
@@ -129,7 +147,7 @@ pub fn handle_rpc(rpc: &[WireField], settings: &watch::Sender<VideoSettings>, na
     }
     next.fps = next.fps.clamp(MIN_FPS, MAX_FPS);
     settings.send_if_modified(|current| if *current != next {
-        log::info!("Desktop video settings: fps={} quality={} max_kbps={:?} output={:?}", next.fps, next.quality, next.max_kbps(), next.output);
+        log::info!("Desktop video settings: fps={} quality={} max_kbps={:?} output={:?} chroma={}", next.fps, next.quality, next.max_kbps(), next.output, next.chroma);
         *current = next; true
     } else { false });
     let mut out = Vec::new();
@@ -156,7 +174,7 @@ pub fn sync_payload(settings: &VideoSettings, native: (u32, u32)) -> Vec<u8> {
     let mut out = Vec::new();
     put_varint(1, u64::from(settings.fps), &mut out);
     put_varint(2, settings.quality, &mut out);
-    put_varint(3, 1, &mut out); // ChromaFormat_420
+    put_varint(3, settings.chroma, &mut out);
     if settings.custom_mbps > 0 { put_varint(4, u64::from(settings.custom_mbps), &mut out); }
     put_varint(5, u64::from(size.0), &mut out);
     put_varint(6, u64::from(size.1), &mut out);
@@ -187,7 +205,7 @@ mod tests {
         put_varint(18, 30, &mut body);
         let request = rpc(77, 2, &body);
         let response = handle_rpc(&decode_wire(&request).unwrap(), &tx, (1920, 1080)).unwrap();
-        assert_eq!(*rx.borrow(), VideoSettings { fps: 30, quality: QUALITY_GENERAL, custom_mbps: 0, output: None });
+        assert_eq!(*rx.borrow(), VideoSettings { fps: 30, quality: QUALITY_GENERAL, custom_mbps: 0, output: None, chroma: CHROMA_420 });
         assert_eq!(rx.borrow().max_kbps(), Some(2_000));
         let fields = decode_wire(&response).unwrap();
         assert_eq!(message(&fields, 1), Some(&[8u8, 77][..]));
@@ -206,6 +224,20 @@ mod tests {
         handle_rpc(&decode_wire(&rpc(2, 4, &[8, QUALITY_BLURAY as u8])).unwrap(), &tx, (1920, 1080)).unwrap();
         assert_eq!(rx.borrow().max_kbps(), Some(20_000));
         assert!(handle_rpc(&decode_wire(&rpc(3, 9, &[])).unwrap(), &tx, (1920, 1080)).is_none());
+    }
+
+    #[test]
+    fn true_color_request_selects_444_only_when_the_encoder_supports_it() {
+        let (tx, rx) = watch::channel(VideoSettings::default());
+        // Observed Mac viewer request with 真彩 on: field 7 = 3.
+        let request = rpc(5, 2, &[8, 2, 16, 4, 56, 3, 144, 1, 60]);
+        apply_rpc(&decode_wire(&request).unwrap(), &tx, (1920, 1080), false).unwrap();
+        assert_eq!(rx.borrow().chroma, CHROMA_420);
+        apply_rpc(&decode_wire(&request).unwrap(), &tx, (1920, 1080), true).unwrap();
+        assert_eq!(rx.borrow().chroma, CHROMA_444);
+        assert_eq!(number(&decode_wire(&sync_payload(&rx.borrow(), (1920, 1080))).unwrap(), 3), Some(CHROMA_444));
+        apply_rpc(&decode_wire(&rpc(6, 2, &[56, 1])).unwrap(), &tx, (1920, 1080), true).unwrap();
+        assert_eq!(rx.borrow().chroma, CHROMA_420);
     }
 
     #[test]

@@ -317,6 +317,13 @@ impl SignalingClient {
                                 let ice_id = ["ice_id", "iceId"].iter().find_map(|k| header.get(*k).or_else(|| header.get("data").and_then(|d| d.get(*k))))
                                     .and_then(|v| v.as_str()).map(str::to_owned);
                                 log::info!("be-controlled connect request: capture_type={} header_keys={:?} ice_id_present={}", capture_type, keys, ice_id.is_some());
+                                // ConnectOptions 4 decoder_cap_list: DecoderCap {1 fps, 2 codec_type (1 H264, 2 H265),
+                                // 3 width, 4 height, 5 chroma_format (1 4:2:0, 3 4:4:4)}. Numbers only.
+                                let caps: Vec<Vec<(u32, u64)>> = fields.iter().flatten().filter(|f| f.number == 4).filter_map(|f| match f.value {
+                                    crate::protocol::WireValue::Bytes(b) => crate::protocol::decode_wire(b).ok().map(|cap| cap.iter().filter_map(|x| match x.value {
+                                        crate::protocol::WireValue::Varint(v) => Some((x.number, v)), _ => None }).collect()),
+                                    _ => None }).collect();
+                                if !caps.is_empty() { log::info!("Viewer decoder caps (fps,codec,w,h,chroma fields): {:?}", caps); }
                                 // Viewer platform (website enum: 1 windows, 2 android, 3 ios, 4 macos, 5 tv).
                                 let platform = header.get("controller_platform").or_else(|| header.get("data").and_then(|d| d.get("controller_platform")));
                                 let controller_mac = platform.is_some_and(|v| v.as_i64() == Some(4)
