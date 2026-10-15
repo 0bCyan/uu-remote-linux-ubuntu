@@ -43,8 +43,12 @@ struct HeldInput { buttons: std::collections::BTreeSet<i32>, keys: std::collecti
 /// Held modifier VKs (bit 0 Ctrl, 1 Shift, 2 Alt, 3 Win) and keys that got a synthetic Shift.
 #[derive(Default)]
 struct Shortcuts { modifiers: u8, shifted: std::collections::BTreeSet<i32> }
+/// Mac viewer with 「使用 macOS 快捷键」 off sends Cmd as VK_LWIN (verified: Cmd 0x5B, Option 0xA4,
+/// Ctrl 0xA2). Cmd is held back until we know whether it starts a Mac shortcut.
+#[derive(Default)]
+struct CmdState { held: bool, pending: bool, passthrough: bool, combos: std::collections::BTreeMap<i32, bool> }
 
-pub struct InputInjector { serial:std::sync::Mutex<()>, owner:std::sync::Mutex<DesktopOwner>, shortcuts: std::sync::Mutex<Shortcuts>, uinput: Option<crate::uinput::Devices>, screen: std::sync::Mutex<(u32,u32)>, portal_failures: std::sync::atomic::AtomicUsize, portal_outcomes: [std::sync::atomic::AtomicUsize; 3], portal:std::sync::Mutex<Option<std::sync::Arc<crate::portal::PortalSession>>>, backend: crate::desktop_backend::DesktopBackend, pending: std::sync::Mutex<PendingPointer>, held: std::sync::Mutex<HeldInput> }
+pub struct InputInjector { mac_controller: std::sync::atomic::AtomicBool, cmd: std::sync::Mutex<CmdState>, serial:std::sync::Mutex<()>, owner:std::sync::Mutex<DesktopOwner>, shortcuts: std::sync::Mutex<Shortcuts>, uinput: Option<crate::uinput::Devices>, screen: std::sync::Mutex<(u32,u32)>, portal_failures: std::sync::atomic::AtomicUsize, portal_outcomes: [std::sync::atomic::AtomicUsize; 3], portal:std::sync::Mutex<Option<std::sync::Arc<crate::portal::PortalSession>>>, backend: crate::desktop_backend::DesktopBackend, pending: std::sync::Mutex<PendingPointer>, held: std::sync::Mutex<HeldInput> }
 
 impl InputInjector {
     pub fn new() -> Self {
@@ -55,7 +59,7 @@ impl InputInjector {
                 Err(e) => { log::warn!("uinput unavailable ({}); using the desktop input path. See README for the udev rule.", e.kind()); None }
             }
         } else { None };
-        Self { serial:std::sync::Mutex::new(()), owner:std::sync::Mutex::new(DesktopOwner::default()), shortcuts: std::sync::Mutex::new(Shortcuts::default()), uinput, screen: std::sync::Mutex::new((0,0)), portal_failures: std::sync::atomic::AtomicUsize::new(0), portal_outcomes: std::array::from_fn(|_| std::sync::atomic::AtomicUsize::new(0)), portal:std::sync::Mutex::new(None), backend:crate::desktop_backend::detect().unwrap_or(crate::desktop_backend::DesktopBackend::X11), pending: std::sync::Mutex::new(PendingPointer::default()), held:std::sync::Mutex::new(HeldInput::default()) }
+        Self { mac_controller: std::sync::atomic::AtomicBool::new(false), cmd: std::sync::Mutex::new(CmdState::default()), serial:std::sync::Mutex::new(()), owner:std::sync::Mutex::new(DesktopOwner::default()), shortcuts: std::sync::Mutex::new(Shortcuts::default()), uinput, screen: std::sync::Mutex::new((0,0)), portal_failures: std::sync::atomic::AtomicUsize::new(0), portal_outcomes: std::array::from_fn(|_| std::sync::atomic::AtomicUsize::new(0)), portal:std::sync::Mutex::new(None), backend:crate::desktop_backend::detect().unwrap_or(crate::desktop_backend::DesktopBackend::X11), pending: std::sync::Mutex::new(PendingPointer::default()), held:std::sync::Mutex::new(HeldInput::default()) }
     }
 
     pub fn bind_portal(&self,session:Option<std::sync::Arc<crate::portal::PortalSession>>) {
@@ -167,8 +171,62 @@ impl InputInjector {
         shift
     }
 
+    /// The current desktop controller is the macOS viewer (connect header controller_platform).
+    pub fn set_mac_controller(&self, mac: bool) {
+        self.mac_controller.store(mac, std::sync::atomic::Ordering::Relaxed);
+        *self.cmd.lock().unwrap() = CmdState::default();
+    }
+
+    fn terminal_focused(&self) -> bool {
+        self.backend == crate::desktop_backend::DesktopBackend::X11 && std::env::var_os("DISPLAY").is_some()
+            && !std::env::var("UU_TERMINAL_SHORTCUTS").is_ok_and(|v| v == "0")
+            && unsafe { x11_terminal_shortcut_state() } & 1 != 0
+    }
+
+    /// Mac habits for a Mac viewer with 「使用 macOS 快捷键」 off: Cmd+C/V/A/F/X/Z (the keys that option
+    /// lists) become Ctrl+key, and in a focused terminal Cmd+C/V become Ctrl+Shift+C/V (copy/paste)
+    /// while Ctrl+C still interrupts. Other Cmd combos, and Cmd alone, stay Super. Returns true when handled.
+    fn mac_cmd(&self, key: i32, is_press: bool) -> bool {
+        const SUPER_L: u64 = 0xffeb; const CONTROL_L: u64 = 0xffe3; const SHIFT_L: u64 = 0xffe1;
+        let mut st = self.cmd.lock().unwrap();
+        if matches!(key, 0x5b | 0x5c) {
+            if is_press { st.held = true; st.pending = true; st.passthrough = false; }
+            else {
+                if st.passthrough { self.inject_key(SUPER_L, false); }
+                else if st.pending { self.inject_key(SUPER_L, true); self.inject_key(SUPER_L, false); }
+                st.held = false; st.pending = false; st.passthrough = false;
+            }
+            return true;
+        }
+        if !is_press {
+            let Some(shifted) = st.combos.remove(&key) else { return false };
+            self.key_symbol_event(key, false);
+            if shifted { self.inject_key(SHIFT_L, false); }
+            self.inject_key(CONTROL_L, false);
+            return true;
+        }
+        if !st.held { return false; }
+        // Shift/Option/Ctrl pressed with Cmd (e.g. Cmd+Shift+Z) must not decide the combo yet.
+        if matches!(key, 0x10..=0x12 | 0xa0..=0xa5) { return false; }
+        if st.combos.contains_key(&key) { self.key_symbol_event(key, true); return true; } // autorepeat
+        if matches!(key, 0x41 | 0x43 | 0x46 | 0x56 | 0x58 | 0x5a) && !st.passthrough {
+            st.pending = false;
+            let shifted = matches!(key, 0x43 | 0x56) && self.terminal_focused();
+            self.inject_key(CONTROL_L, true);
+            if shifted { self.inject_key(SHIFT_L, true); }
+            self.key_symbol_event(key, true);
+            st.combos.insert(key, shifted);
+            static NOTED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+            if NOTED.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 4 { log::info!("Mac shortcut: Cmd combo sent as Ctrl{}", if shifted { "+Shift (terminal)" } else { "" }); }
+            return true;
+        }
+        if st.pending { self.inject_key(SUPER_L, true); st.pending = false; st.passthrough = true; }
+        false
+    }
+
     pub fn windows_key_event(&self, key: i32, is_press: bool) {
         let _serial=self.serial.lock().unwrap();
+        if self.mac_controller.load(std::sync::atomic::Ordering::Relaxed) && self.mac_cmd(key, is_press) { return; }
         if self.terminal_shift(key, is_press) {
             const SHIFT_L: u64 = 0xffe1;
             if is_press {
@@ -221,6 +279,7 @@ impl InputInjector {
         }
         *held=HeldInput::default();
         *self.shortcuts.lock().unwrap()=Shortcuts::default();
+        *self.cmd.lock().unwrap()=CmdState::default();
     }
     // Per-injector budgets cover missing bindings, locked sessions, stale handles
     // and D-Bus errors. Never include keys, coordinates, text or portal tokens.

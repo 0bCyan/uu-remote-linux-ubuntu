@@ -426,6 +426,8 @@ async fn serve(mut capture: Arc<ScreenCapture>, input: Arc<InputInjector>, shutd
     // One peer per viewer connection (desktop, file transfer, terminal...), keyed by ice_id.
     let mut next_capture_type: Option<(u64,crate::session_ice::SessionIce)> = None;
     let mut capture_types: HashMap<String, (u64,crate::session_ice::SessionIce)> = HashMap::new();
+    let mut mac_by_ice: HashMap<String, bool> = HashMap::new();
+    let mut next_mac = false;
 
     loop {
         if *shutdown.borrow() {
@@ -579,7 +581,9 @@ async fn serve(mut capture: Arc<ScreenCapture>, input: Arc<InputInjector>, shutd
                             .and_then(|s| s.as_str())
                     );
                 }
-                SignalingEvent::ConnectRequest { capture_type, ice_id, transport } => {
+                SignalingEvent::ConnectRequest { capture_type, ice_id, transport, controller_mac } => {
+                    if mac_by_ice.len()>=32 { mac_by_ice.clear(); }
+                    match ice_id.clone() { Some(id) => { mac_by_ice.insert(id, controller_mac); } None => next_mac = controller_mac }
                     // Pending cloud credentials live only within this room; cap
                     // requests that never receive an offer rather than retain them.
                     if capture_types.len()>=32 { capture_types.clear(); }
@@ -610,6 +614,8 @@ async fn serve(mut capture: Arc<ScreenCapture>, input: Arc<InputInjector>, shutd
                         let (capture_type,transport) = capture_types.remove(&ice).or_else(|| next_capture_type.take()).unwrap_or((1,crate::session_ice::SessionIce::default()));
                         // CaptureType: 0 unknown, 1 desktop, 2 window; 5 file transfer, 8 terminal, 9 port mapping.
                         let desktop = capture_type <= 2;
+                        let controller_mac = mac_by_ice.remove(&ice).unwrap_or(next_mac);
+                        if desktop { input.set_mac_controller(controller_mac); }
                         log::info!("Offer for connection: capture_type={} desktop={} active_peers={}", capture_type, desktop, sessions.len());
                         if let Some(old) = sessions.remove(&ice) { let _ = old.pc.close().await; }
                         if desktop {

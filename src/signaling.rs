@@ -41,7 +41,7 @@ pub enum SignalingEvent {
     BeControlled(Value),
     /// be-controlled with its binary app_data (ConnectOptions): capture type and the
     /// ice_id it announces, when present.
-    ConnectRequest { capture_type: u64, ice_id: Option<String>, transport:crate::session_ice::SessionIce },
+    ConnectRequest { capture_type: u64, ice_id: Option<String>, transport:crate::session_ice::SessionIce, controller_mac: bool },
     Soac(SoacMessage),
     Released(Value),
     Left(Value),
@@ -317,7 +317,12 @@ impl SignalingClient {
                                 let ice_id = ["ice_id", "iceId"].iter().find_map(|k| header.get(*k).or_else(|| header.get("data").and_then(|d| d.get(*k))))
                                     .and_then(|v| v.as_str()).map(str::to_owned);
                                 log::info!("be-controlled connect request: capture_type={} header_keys={:?} ice_id_present={}", capture_type, keys, ice_id.is_some());
-                                let _ = event_sender.send(SignalingEvent::ConnectRequest { capture_type, ice_id, transport:crate::session_ice::SessionIce::from_header(&header) }).await;
+                                // Viewer platform (website enum: 1 windows, 2 android, 3 ios, 4 macos, 5 tv).
+                                let platform = header.get("controller_platform").or_else(|| header.get("data").and_then(|d| d.get("controller_platform")));
+                                let controller_mac = platform.is_some_and(|v| v.as_i64() == Some(4)
+                                    || v.as_str().is_some_and(|s| s == "4" || s.to_ascii_lowercase().contains("mac") || s.to_ascii_lowercase().contains("darwin")));
+                                log::info!("Controller platform: {} mac={}", platform.map(|v| v.to_string()).unwrap_or_default().chars().take(24).collect::<String>(), controller_mac);
+                                let _ = event_sender.send(SignalingEvent::ConnectRequest { capture_type, ice_id, transport:crate::session_ice::SessionIce::from_header(&header), controller_mac }).await;
                             }
                         }
                     }
