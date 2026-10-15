@@ -20,7 +20,7 @@ extern "C" {
 
 pub fn start(display: String) -> ClipboardBridge {
     if display == "wayland:native" { return start_wayland(); }
-    if display == "wayland:portal" {
+    if display == "wayland:portal" || display.starts_with("kms:") {
         let (incoming,_)=watch::channel(None);let (_,outgoing)=watch::channel(None);
         let (sender,ready)=tokio::sync::oneshot::channel();let _=sender.send(false);
         return ClipboardBridge {incoming,outgoing,ready};

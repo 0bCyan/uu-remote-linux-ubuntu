@@ -192,7 +192,13 @@ async fn read_encoder_with(
     size: (u32,u32),display:String,portal:Option<Arc<crate::portal::PortalSession>>,latest:mpsc::Sender<Arc<CompleteFrame>>,encoder:Encoder,sequence:Arc<std::sync::atomic::AtomicU64>,
     mut settings: VideoSettings, #[cfg_attr(not(feature = "inproc-av"), allow(unused_variables))] idr: Arc<AtomicBool>,
 )->Result<(),String>{
-    let wayland=display.starts_with("wayland:");
+    let kms=display.starts_with("kms:");
+    let wayland=kms || display.starts_with("wayland:");
+    let kms_capture=if kms {
+        let capture=tokio::task::spawn_blocking(crate::kms::Capture::open).await.map_err(|_|"KMS worker failed")??;
+        if (capture.width,capture.height)!=size { return Err("KMS mode changed; restart host to refresh desktop geometry".into()); }
+        Some(Arc::new(capture))
+    } else { None };
     #[cfg(feature = "inproc-av")]
     if !wayland && portal.is_none() && crate::inproc_encoder::selected() {
         let max_kbps = settings.max_kbps().unwrap_or(30_000) as i64;
@@ -264,7 +270,23 @@ async fn read_encoder_with(
         .stderr(std::process::Stdio::inherit())
         .spawn().map_err(|e| format!("Start scoped encoder: {e}"))?;
     // Scope capture to this encoder. Dropping either task kills its child.
-    let _capture=if let Some(session)=portal {
+    let _capture=if let Some(capture)=kms_capture {
+        let mut sink=child.stdin.take().ok_or("Encoder stdin missing")?;
+        Some(EncoderTask(tokio::spawn(async move {
+            use tokio::io::AsyncWriteExt;
+            let mut tick=tokio::time::interval(Duration::from_nanos(1_000_000_000/u64::from(settings.fps)));
+            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                tick.tick().await;
+                let capture=capture.clone();
+                let bytes=tokio::task::spawn_blocking(move || {
+                    let mut bytes=vec![0;capture.width as usize*capture.height as usize*4];
+                    capture.capture(&mut bytes)?; Ok::<_,String>(bytes)
+                }).await.map_err(|_|"KMS worker failed")??;
+                sink.write_all(&bytes).await.map_err(|_|"KMS encoder pipe failed")?;
+            }
+        })))
+    } else if let Some(session)=portal {
         let mut sink=child.stdin.take().ok_or("Encoder stdin missing")?;
         Some(EncoderTask(tokio::spawn(async move {
             use tokio::io::AsyncWriteExt;

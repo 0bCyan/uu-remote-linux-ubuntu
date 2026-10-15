@@ -12,6 +12,7 @@ mod login;
 mod login_ui;
 mod session_lock;
 mod capture;
+mod kms;
 mod file_trans;
 mod input;
 mod uinput;

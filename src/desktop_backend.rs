@@ -1,6 +1,6 @@
 //! Select the host desktop, not the presence of an XWayland DISPLAY socket.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum DesktopBackend { X11, Wayland, Portal }
+pub enum DesktopBackend { X11, Wayland, Portal, Kms }
 
 /// `UU_DESKTOP_BACKEND=none`: headless host — no display is opened; terminal, file transfer and
 /// port mapping stay available (servers without a monitor or logged-in session).
@@ -19,6 +19,7 @@ fn select(explicit: Option<&str>, session: Option<&str>, socket: Option<&str>) -
     match explicit {
         Some("x11") => Ok(DesktopBackend::X11),
         Some("wayland") => Ok(DesktopBackend::Wayland),
+        Some("kms") => Ok(DesktopBackend::Kms),
         Some("portal") => Ok(DesktopBackend::Portal),
         Some("none") => Ok(DesktopBackend::X11), // never opened, see headless()
         None | Some("auto") => {
@@ -26,7 +27,7 @@ fn select(explicit: Option<&str>, session: Option<&str>, socket: Option<&str>) -
                 Ok(DesktopBackend::Wayland)
             } else { Ok(DesktopBackend::X11) }
         },
-        Some(_) => Err("UU_DESKTOP_BACKEND must be auto, x11, wayland, portal or none".into()),
+        Some(_) => Err("UU_DESKTOP_BACKEND must be auto, x11, wayland, portal, kms or none".into()),
     }
 }
 
@@ -39,6 +40,7 @@ mod tests {
         assert_eq!(select(None,None,Some("wayland-1")),Ok(DesktopBackend::Wayland));
         assert_eq!(select(None,Some("x11"),None),Ok(DesktopBackend::X11));
         assert_eq!(select(Some("x11"),Some("wayland"),Some("wayland-0")),Ok(DesktopBackend::X11));
+        assert_eq!(select(Some("kms"),Some("wayland"),Some("wayland-0")),Ok(DesktopBackend::Kms));
         assert!(select(Some("typo"),None,None).is_err());
     }
 }

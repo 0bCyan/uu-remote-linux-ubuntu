@@ -46,6 +46,7 @@ pub struct ScreenCapture {
     pub init_error: Option<String>,
     pub portal: Option<std::sync::Arc<crate::portal::PortalSession>>,
     pub display: String,
+    kms: Option<crate::kms::Capture>,
     pub width: u32,
     pub height: u32,
     buffer: Mutex<Vec<u8>>,
@@ -54,15 +55,21 @@ pub struct ScreenCapture {
 impl ScreenCapture {
     pub fn new() -> Result<Self, String> {
         let backend=crate::desktop_backend::detect()?;
+        if backend == crate::desktop_backend::DesktopBackend::Kms {
+            let kms=crate::kms::Capture::open()?;
+            let (width,height)=(kms.width,kms.height);
+            return Ok(Self { backend,init_error:None,portal:None,display:"kms:linear".into(),width,height,
+                buffer:Mutex::new(vec![0;width as usize*height as usize*4]),kms:Some(kms) });
+        }
         if backend == crate::desktop_backend::DesktopBackend::Portal {
             let session=std::sync::Arc::new(crate::portal::PortalSession::open()?);
             let (width,height)=(session.width,session.height);
-            return Ok(Self { backend,init_error:None,portal:Some(session),display:"wayland:portal".into(),width,height,
+            return Ok(Self { backend,init_error:None,portal:Some(session),kms:None,display:"wayland:portal".into(),width,height,
                 buffer:Mutex::new(vec![0;(width as usize)*(height as usize)*4]) });
         }
         if backend == crate::desktop_backend::DesktopBackend::Wayland {
             let (width,height)=crate::wayland::init()?;
-            return Ok(Self { backend, init_error:None, portal:None, display:"wayland:native".into(), width,height,
+            return Ok(Self { backend, init_error:None, portal:None, kms:None, display:"wayland:native".into(), width,height,
                 buffer:Mutex::new(vec![0;(width as usize)*(height as usize)*4]) });
         }
         let ret = unsafe { x11_init(std::ptr::null()) };
@@ -90,6 +97,7 @@ impl ScreenCapture {
             backend,
             init_error:None,
             portal:None,
+            kms:None,
             display,
             width: w as u32,
             height: h as u32,
@@ -100,13 +108,14 @@ impl ScreenCapture {
     /// Metadata for non-desktop tools. Never advertise a usable fake screen.
     pub fn unavailable(error:String)->Self {
         Self { backend:crate::desktop_backend::detect().unwrap_or(crate::desktop_backend::DesktopBackend::X11),
-            init_error:Some(error), portal:None, display:String::new(), width:0,height:0,buffer:Mutex::new(Vec::new()) }
+            init_error:Some(error), portal:None, kms:None, display:String::new(), width:0,height:0,buffer:Mutex::new(Vec::new()) }
     }
 
     /// 截取一帧 BGRA 图像
     pub fn capture_frame(&self) -> Result<Vec<u8>, String> {
         if let Some(error)=&self.init_error { return Err(error.clone()); }
         let mut buf = self.buffer.lock().unwrap();
+        if let Some(kms)=&self.kms { kms.capture(&mut buf)?; return Ok(buf.clone()); }
         if let Some(session)=&self.portal { session.capture(&mut buf)?; return Ok(buf.clone()); }
         if self.backend == crate::desktop_backend::DesktopBackend::Wayland {
             crate::wayland::capture(&mut buf)?;
@@ -132,6 +141,7 @@ impl Drop for ScreenCapture {
 
 /// Keep the display visible only while a peer is streaming; never unlock it.
 pub fn keep_display_awake() -> Result<(), String> {
+    if crate::desktop_backend::detect()? == crate::desktop_backend::DesktopBackend::Kms { return Ok(()); }
     if crate::desktop_backend::detect()? == crate::desktop_backend::DesktopBackend::Portal { return Ok(()); }
     if crate::desktop_backend::detect()? == crate::desktop_backend::DesktopBackend::Wayland {
         return crate::wayland::wake();

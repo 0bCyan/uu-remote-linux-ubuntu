@@ -9,6 +9,16 @@ fn main() {
 
     let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
     if target_os == "linux" {
+        if std::env::var_os("CARGO_FEATURE_KMS").is_some() {
+            println!("cargo:rerun-if-changed=c_engine/kms_engine.c");
+            let output=std::process::Command::new("pkg-config").args(["--cflags","libdrm"]).output().expect("KMS requires pkg-config and libdrm development headers");
+            assert!(output.status.success(), "KMS requires libdrm development headers");
+            let mut build=cc::Build::new();
+            build.file("c_engine/kms_engine.c");
+            for flag in String::from_utf8_lossy(&output.stdout).split_whitespace() { build.flag(flag); }
+            build.compile("uu_kms_engine");
+            println!("cargo:rustc-link-lib=drm");
+        }
         cc::Build::new()
             .file("c_engine/x11_engine.c")
             .file("c_engine/clipboard.c")

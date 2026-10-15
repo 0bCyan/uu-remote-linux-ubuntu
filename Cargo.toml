@@ -16,6 +16,8 @@ path = "src/main.rs"
 [features]
 default = []
 wayland = []
+# Experimental direct linear framebuffer capture; never enabled in release builds.
+kms = []
 portal = []
 # In-process capture and encoding through FFmpeg 6 libraries (libavcodec/libavdevice dev packages).
 # Off by default so release binaries do not link the build machine's libav.
