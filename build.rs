@@ -72,7 +72,7 @@ fn main() {
             let mut build = cc::Build::new();
             build.flag_if_supported("-Wno-unused-parameter"); // protocol listener signatures
             build.file("c_engine/wayland_engine.c").include(&out);
-            for name in ["wlr-screencopy-unstable-v1", "wlr-virtual-pointer-unstable-v1", "virtual-keyboard-unstable-v1", "wlr-output-power-management-unstable-v1"] {
+            for name in ["wlr-screencopy-unstable-v1", "wlr-virtual-pointer-unstable-v1", "virtual-keyboard-unstable-v1", "wlr-output-power-management-unstable-v1", "linux-dmabuf-unstable-v1"] {
                 let xml = format!("c_engine/wayland-protocols/{name}.xml");
                 println!("cargo:rerun-if-changed={xml}");
                 for (mode, suffix) in [("client-header", "client-protocol.h"), ("private-code", "protocol.c")] {
@@ -90,4 +90,3 @@ fn main() {
         }
     }
 }
-

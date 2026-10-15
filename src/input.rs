@@ -8,6 +8,7 @@ extern "C" {
     fn x11_pointer_state(x:*mut libc::c_int,y:*mut libc::c_int,mask:*mut libc::c_uint)->libc::c_int;
     fn x11_key_symbol(symbol: libc::c_ulong, is_press: libc::c_int) -> libc::c_int;
     fn x11_key_event(keycode: libc::c_int, is_press: libc::c_int) -> libc::c_int;
+    fn x11_release_all() -> libc::c_int;
     fn x11_terminal_shortcut_state() -> libc::c_int;
 }
 #[cfg(not(target_os = "linux"))]
@@ -26,6 +27,9 @@ unsafe fn x11_key_symbol(_: libc::c_ulong, _: libc::c_int) -> libc::c_int { 0 }
 #[cfg(not(target_os = "linux"))]
 unsafe fn x11_mouse_relative(_: libc::c_int, _: libc::c_int) -> libc::c_int {0}
 
+#[cfg(not(target_os="linux"))]
+unsafe fn x11_release_all()->i32 {0}
+
 #[derive(Default)]
 struct PendingPointer {
     absolute: Option<(i32,i32)>,
@@ -40,7 +44,7 @@ struct HeldInput { buttons: std::collections::BTreeSet<i32>, keys: std::collecti
 #[derive(Default)]
 struct Shortcuts { modifiers: u8, shifted: std::collections::BTreeSet<i32> }
 
-pub struct InputInjector { shortcuts: std::sync::Mutex<Shortcuts>, uinput: Option<crate::uinput::Devices>, screen: std::sync::Mutex<(u32,u32)>, portal_failures: std::sync::atomic::AtomicUsize, portal_outcomes: [std::sync::atomic::AtomicUsize; 3], portal:std::sync::Mutex<Option<std::sync::Arc<crate::portal::PortalSession>>>, backend: crate::desktop_backend::DesktopBackend, pending: std::sync::Mutex<PendingPointer>, held: std::sync::Mutex<HeldInput> }
+pub struct InputInjector { serial:std::sync::Mutex<()>, owner:std::sync::Mutex<DesktopOwner>, shortcuts: std::sync::Mutex<Shortcuts>, uinput: Option<crate::uinput::Devices>, screen: std::sync::Mutex<(u32,u32)>, portal_failures: std::sync::atomic::AtomicUsize, portal_outcomes: [std::sync::atomic::AtomicUsize; 3], portal:std::sync::Mutex<Option<std::sync::Arc<crate::portal::PortalSession>>>, backend: crate::desktop_backend::DesktopBackend, pending: std::sync::Mutex<PendingPointer>, held: std::sync::Mutex<HeldInput> }
 
 impl InputInjector {
     pub fn new() -> Self {
@@ -51,7 +55,7 @@ impl InputInjector {
                 Err(e) => { log::warn!("uinput unavailable ({}); using the desktop input path. See README for the udev rule.", e.kind()); None }
             }
         } else { None };
-        Self { shortcuts: std::sync::Mutex::new(Shortcuts::default()), uinput, screen: std::sync::Mutex::new((0,0)), portal_failures: std::sync::atomic::AtomicUsize::new(0), portal_outcomes: std::array::from_fn(|_| std::sync::atomic::AtomicUsize::new(0)), portal:std::sync::Mutex::new(None), backend:crate::desktop_backend::detect().unwrap_or(crate::desktop_backend::DesktopBackend::X11), pending: std::sync::Mutex::new(PendingPointer::default()), held:std::sync::Mutex::new(HeldInput::default()) }
+        Self { serial:std::sync::Mutex::new(()), owner:std::sync::Mutex::new(DesktopOwner::default()), shortcuts: std::sync::Mutex::new(Shortcuts::default()), uinput, screen: std::sync::Mutex::new((0,0)), portal_failures: std::sync::atomic::AtomicUsize::new(0), portal_outcomes: std::array::from_fn(|_| std::sync::atomic::AtomicUsize::new(0)), portal:std::sync::Mutex::new(None), backend:crate::desktop_backend::detect().unwrap_or(crate::desktop_backend::DesktopBackend::X11), pending: std::sync::Mutex::new(PendingPointer::default()), held:std::sync::Mutex::new(HeldInput::default()) }
     }
 
     pub fn bind_portal(&self,session:Option<std::sync::Arc<crate::portal::PortalSession>>) {
@@ -59,6 +63,7 @@ impl InputInjector {
         *self.portal.lock().unwrap()=session;
     }
     pub fn mouse_move(&self, x: i32, y: i32) {
+        let _serial=self.serial.lock().unwrap();
         self.inject_move(x,y,false);
     }
 
@@ -93,6 +98,10 @@ impl InputInjector {
     }
     pub fn discard_pointer(&self) { *self.pending.lock().unwrap() = PendingPointer::default(); }
     pub fn flush_pointer(&self) {
+        let _serial=self.serial.lock().unwrap();
+        self.flush_pointer_locked();
+    }
+    fn flush_pointer_locked(&self) {
         // Hold the queue lock through injection so an older timer tick cannot
         // overwrite a newer position flushed before a button transition.
         let mut pending = self.pending.lock().unwrap();
@@ -118,7 +127,8 @@ impl InputInjector {
         }
     }
     pub fn mouse_button(&self, button: i32, is_press: bool) {
-        self.flush_pointer();
+        let _serial=self.serial.lock().unwrap();
+        self.flush_pointer_locked();
         let result = self.inject_button(button,is_press);
         if result == 0 {
             let mut held = self.held.lock().unwrap();
@@ -158,6 +168,7 @@ impl InputInjector {
     }
 
     pub fn windows_key_event(&self, key: i32, is_press: bool) {
+        let _serial=self.serial.lock().unwrap();
         if self.terminal_shift(key, is_press) {
             const SHIFT_L: u64 = 0xffe1;
             if is_press {
@@ -187,11 +198,29 @@ impl InputInjector {
     }
 
     pub fn release_held(&self) {
+        let _serial=self.serial.lock().unwrap();
         self.discard_pointer();
         let mut held=self.held.lock().unwrap();
-        for button in &held.buttons {self.inject_button(*button,false);}
-        for key in &held.keys {self.inject_key(*key,false);}
+        if let Some(uinput)=&self.uinput {
+            Self::uinput_result(uinput.release_all());
+        } else if self.backend==crate::desktop_backend::DesktopBackend::X11 {
+            unsafe {x11_release_all();}
+        } else if self.backend==crate::desktop_backend::DesktopBackend::Wayland && self.portal.lock().unwrap().is_none() {
+            crate::wayland::release_all();
+        } else {
+            // Portal/Wayland cannot query global state. Sweep every key/button
+            // that this host can emit through the currently bound session.
+            let keys:std::collections::BTreeSet<_>=(0..=255).filter_map(crate::input_mapping::windows_vk_to_keysym)
+                .chain(held.keys.iter().copied()).collect();
+            // A dead Portal bus can time out per call. Stop on the first
+            // failure rather than blocking teardown for hundreds of calls;
+            // the next connected session retries the complete sweep.
+            let buttons_ok=[1,2,3,8,9].into_iter().all(|button|self.inject_button(button,false)==0);
+            let keys_ok=buttons_ok && keys.into_iter().all(|key|self.inject_key(key,false)==0);
+            if !keys_ok {log::warn!("Desktop input reset incomplete: backend unavailable");}
+        }
         *held=HeldInput::default();
+        *self.shortcuts.lock().unwrap()=Shortcuts::default();
     }
     // Per-injector budgets cover missing bindings, locked sessions, stale handles
     // and D-Bus errors. Never include keys, coordinates, text or portal tokens.
@@ -260,6 +289,7 @@ impl InputInjector {
         else { unsafe { x11_key_symbol(symbol as libc::c_ulong,i32::from(pressed)) } }
     }
     pub fn key_event(&self, keycode: i32, is_press: bool) {
+        let _serial=self.serial.lock().unwrap();
         if self.backend!=crate::desktop_backend::DesktopBackend::X11 { return; }
         unsafe { x11_key_event(keycode, if is_press { 1 } else { 0 }) };
     }
@@ -331,5 +361,116 @@ mod scroll_tests {
         assert_eq!(input.pending.lock().unwrap().scroll,(0,0));
         input.mouse_scroll(-125,-125); input.flush_pointer();
         assert_eq!(input.pending.lock().unwrap().scroll,(-5,-5));
+    }
+}
+
+/// Only the newest desktop lease may inject or release input. Tool peers never
+/// obtain a lease; delayed callbacks from an old desktop cannot clear a new one.
+#[derive(Default)]
+struct DesktopOwner { next:u64, current:u64, active:bool, stopped:bool }
+impl DesktopOwner {
+    fn replace(&mut self)->u64 {self.next+=1;self.current=self.next;self.active=false;self.current}
+    fn owns(&self,id:u64)->bool {id!=0 && self.current==id}
+}
+pub struct DesktopInputSession {input:std::sync::Arc<InputInjector>,id:u64}
+impl InputInjector {
+    pub fn shutdown(&self) {
+        let mut owner=self.owner.lock().unwrap();
+        owner.current=0;owner.active=false;owner.stopped=true;
+        self.release_held();
+    }
+    pub fn desktop_session(self:&std::sync::Arc<Self>)->std::sync::Arc<DesktopInputSession> {
+        let mut owner=self.owner.lock().unwrap();
+        let id=if owner.stopped {0} else {self.release_held();owner.replace()};
+        std::sync::Arc::new(DesktopInputSession {input:self.clone(),id})
+    }
+}
+impl DesktopInputSession {
+    pub fn connected(&self) {
+        let mut owner=self.input.owner.lock().unwrap();
+        if owner.owns(self.id) && !owner.active {self.input.release_held();owner.active=true;}
+    }
+    pub fn disconnected(&self) {
+        let mut owner=self.input.owner.lock().unwrap();
+        if owner.owns(self.id) && owner.active {owner.active=false;self.input.release_held();}
+    }
+    pub fn with_input(&self, action:impl FnOnce()) {
+        let owner=self.input.owner.lock().unwrap();
+        if owner.owns(self.id) && owner.active {action();}
+    }
+}
+impl Drop for DesktopInputSession {fn drop(&mut self) {self.disconnected();}}
+
+#[cfg(test)]
+mod lifecycle_tests {
+    use super::*;
+    use std::sync::{Arc,atomic::{AtomicUsize,Ordering}};
+    #[test]
+    fn cleanup_discards_motion_shortcuts_and_untracked_input_ledger() {
+        let input=Arc::new(InputInjector::new());
+        input.held.lock().unwrap().keys.insert(0xffe1);
+        input.held.lock().unwrap().buttons.insert(1);
+        input.shortcuts.lock().unwrap().modifiers=2;
+        input.shortcuts.lock().unwrap().shifted.insert(0x56);
+        input.mouse_relative(32,0);
+        input.mouse_scroll(0,1);
+        input.release_held();
+        assert!(input.held.lock().unwrap().keys.is_empty());
+        assert!(input.held.lock().unwrap().buttons.is_empty());
+        assert_eq!(input.pending.lock().unwrap().relative,(0,0));
+        assert_eq!(input.pending.lock().unwrap().scroll,(0,0));
+        assert_eq!(input.shortcuts.lock().unwrap().modifiers,0);
+        assert!(input.shortcuts.lock().unwrap().shifted.is_empty());
+        input.release_held(); // idempotent even with an empty ledger
+    }
+    #[test]
+    fn disconnected_or_replaced_desktop_cannot_inject_or_clear_new_input() {
+        let input=Arc::new(InputInjector::new());
+        let count=AtomicUsize::new(0);
+        let old=input.desktop_session();
+        old.with_input(||{count.fetch_add(1,Ordering::Relaxed);});
+        assert_eq!(count.load(Ordering::Relaxed),0);
+        old.connected();
+        old.with_input(||{count.fetch_add(1,Ordering::Relaxed);});
+        old.disconnected();
+        old.with_input(||{count.fetch_add(1,Ordering::Relaxed);});
+        assert_eq!(count.load(Ordering::Relaxed),1);
+        input.held.lock().unwrap().buttons.insert(2);
+        old.disconnected(); // repeated close states must not release later local activity
+        assert!(input.held.lock().unwrap().buttons.contains(&2));
+        old.connected(); // same peer can reconnect
+        assert!(input.held.lock().unwrap().buttons.is_empty());
+        let new=input.desktop_session();
+        new.connected();
+        input.held.lock().unwrap().buttons.insert(1);
+        old.disconnected();old.connected();drop(old);
+        assert!(input.held.lock().unwrap().buttons.contains(&1));
+        new.with_input(||{count.fetch_add(1,Ordering::Relaxed);});
+        assert_eq!(count.load(Ordering::Relaxed),2);
+        drop(new);
+        assert!(input.held.lock().unwrap().buttons.is_empty());
+        let last=input.desktop_session();last.connected();
+        input.shutdown();last.connected();
+        last.with_input(||panic!("shutdown cannot be undone by a stale callback"));
+        let later=input.desktop_session();later.connected();
+        later.with_input(||panic!("shutdown must reject newly arriving offers too"));
+    }
+    #[test]
+    fn input_gate_serializes_disconnect_against_inflight_event() {
+        let input=Arc::new(InputInjector::new());
+        let session=input.desktop_session();session.connected();
+        let (started,ready)=std::sync::mpsc::channel();
+        let (finish,resume)=std::sync::mpsc::channel();
+        let worker=session.clone();
+        let event=std::thread::spawn(move ||worker.with_input(|| {
+            started.send(()).unwrap();resume.recv().unwrap();
+            worker.input.held.lock().unwrap().buttons.insert(1);
+        }));
+        ready.recv().unwrap();
+        let ending=session.clone();
+        let teardown=std::thread::spawn(move ||ending.disconnected());
+        finish.send(()).unwrap();event.join().unwrap();teardown.join().unwrap();
+        assert!(input.held.lock().unwrap().buttons.is_empty());
+        session.with_input(||panic!("late event after disconnect"));
     }
 }

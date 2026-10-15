@@ -121,6 +121,16 @@ mod imp {
         pub fn key(&self, code: u16, pressed: bool) -> std::io::Result<()> {
             self.keyboard.lock().unwrap().emit(&[(EV_KEY, code, i32::from(pressed))])
         }
+        pub fn release_all(&self) -> std::io::Result<()> {
+            // Release every supported code on our own devices, even if the
+            // userspace ledger missed a press. Never touch physical devices.
+            let keys:Vec<_>=(1..=248).map(|code|(EV_KEY,code,0))
+                .chain([BTN_LEFT,BTN_RIGHT,BTN_MIDDLE].into_iter().map(|code|(EV_KEY,code,0))).collect();
+            let buttons:Vec<_>=[BTN_LEFT,BTN_RIGHT,BTN_MIDDLE,BTN_SIDE,BTN_EXTRA].into_iter().map(|code|(EV_KEY,code,0)).collect();
+            let keyboard=self.keyboard.lock().unwrap().emit(&keys);
+            let pointer=self.pointer.lock().unwrap().emit(&buttons);
+            keyboard.and(pointer)
+        }
         pub fn move_absolute(&self, x: i32, y: i32) -> std::io::Result<()> {
             self.pointer.lock().unwrap().emit(&[(EV_ABS, ABS_X, x.clamp(0, ABS_MAX)), (EV_ABS, ABS_Y, y.clamp(0, ABS_MAX))])
         }
@@ -138,6 +148,40 @@ mod imp {
             self.pointer.lock().unwrap().emit(&events)
         }
     }
+
+    #[cfg(test)]
+    mod reset_acceptance {
+        use super::*;
+        fn snapshot(device:&Device)->[u8;96] {
+            let mut name=[0u8;80];
+            let request=0x8000_0000u64 | (80<<16) | (b'U' as u64)<<8 | 44;
+            assert!(unsafe {libc::ioctl(device.0.as_raw_fd(),request as libc::c_ulong,name.as_mut_ptr())}>=0);
+            let end=name.iter().position(|v|*v==0).unwrap();
+            let directory=std::path::Path::new("/sys/devices/virtual/input").join(std::str::from_utf8(&name[..end]).unwrap());
+            let event=std::fs::read_dir(directory).unwrap().filter_map(Result::ok)
+                .find(|e|e.file_name().to_string_lossy().starts_with("event")).unwrap();
+            let file=File::open(std::path::Path::new("/dev/input").join(event.file_name())).unwrap();
+            let mut state=[0u8;96];
+            let request=0x8000_0000u64 | (96<<16) | (b'E' as u64)<<8 | 0x18;
+            assert!(unsafe {libc::ioctl(file.as_raw_fd(),request as libc::c_ulong,state.as_mut_ptr())}>=0);
+            state
+        }
+        #[test]
+        #[ignore="requires isolated QEMU VM uinput and evdev permissions"]
+        fn kernel_devices_release_even_without_an_inputinjector_ledger() {
+            assert_eq!(std::fs::read_to_string("/proc/sys/kernel/hostname").unwrap().trim(),"uu-hyprland-test");
+            assert_eq!(std::process::Command::new("systemd-detect-virt").output().unwrap().stdout,b"qemu\n");
+            let devices=Devices::open().unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(500));
+            devices.key(42,true).unwrap();devices.key(30,true).unwrap();
+            devices.button(BTN_LEFT,true).unwrap();
+            assert!(snapshot(&devices.keyboard.lock().unwrap()).iter().any(|v|*v!=0));
+            assert!(snapshot(&devices.pointer.lock().unwrap()).iter().any(|v|*v!=0));
+            devices.release_all().unwrap();
+            assert!(snapshot(&devices.keyboard.lock().unwrap()).iter().all(|v|*v==0));
+            assert!(snapshot(&devices.pointer.lock().unwrap()).iter().all(|v|*v==0));
+        }
+    }
 }
 
 #[cfg(not(target_os = "linux"))]
@@ -151,6 +195,7 @@ mod imp {
     pub struct Devices;
     impl Devices {
         pub fn open() -> std::io::Result<Self> { Err(std::io::Error::new(std::io::ErrorKind::Unsupported, "uinput requires Linux")) }
+        pub fn release_all(&self) -> std::io::Result<()> { Ok(()) }
         pub fn key(&self, _: u16, _: bool) -> std::io::Result<()> { Ok(()) }
         pub fn move_absolute(&self, _: i32, _: i32) -> std::io::Result<()> { Ok(()) }
         pub fn move_relative(&self, _: i32, _: i32) -> std::io::Result<()> { Ok(()) }

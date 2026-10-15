@@ -1,3 +1,8 @@
 target/
 *.log
 .DS_Store
+
+# Internal QA records and handoffs stay private (kept under the parent project analysis/)
+/docs/validation/
+/docs/ACTIVE_HANDOFF.md
+/contrib/tests/

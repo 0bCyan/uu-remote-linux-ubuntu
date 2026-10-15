@@ -49,6 +49,12 @@
 | Reconnects | Every tool window has its own connection; they do not disturb each other |
 | Headless servers | Goes online without a monitor with terminal, file transfer and port mapping; an Xvfb virtual desktop gives a full remote desktop (see below) |
 
+Desktop connection boundaries and host startup clear stale input; delayed events
+from an old desktop cannot affect its replacement. X11 clears pressed state on
+the authenticated display (including physical keys whose origin it cannot
+distinguish); uinput clears only this host's virtual devices, and Portal only its
+authorized session. Independent file/terminal tool peers do not reset input.
+
 ## Supported Linux desktops
 
 | Desktop | Display protocol | Status | Build |
@@ -64,9 +70,17 @@ Apart from GNOME on X11, these desktops have been tested in virtual machines so 
 real hardware, please [open an issue](../../issues) with your distribution, desktop, GPU and the relevant lines from
 `journalctl --user -u uuremote-native.service`.
 
-Wayland limits: single screen, fixed resolution. The native Hyprland backend captures via shm screencopy, so the frame rate is bounded by the compositor (about 16–22 fps measured at 2560x1600) and the viewer fps option has no effect. The portal backend does not support screen wake or
+Wayland limits: single screen, fixed resolution. The native Hyprland backend now pipelines two shm screencopy buffers and passes the viewer's requested fps to both capture pacing and the encoder. Actual fps remains limited by the compositor, rendering and readback (the old serial path measured about 16–22 fps at 2560x1600; the pipeline is VM-measured only, not a hardware guarantee). The portal backend does not support screen wake or
 dynamic resolution yet; the clipboard syncs while the viewer's remote window has focus. On the first connection the desktop asks for "Remote Desktop / Screen Sharing"
 permission; the permission is remembered once granted.
+
+Native Wayland experiments: `UU_WAYLAND_PIPELINE=0` disables pipelining for comparison.
+`UU_WAYLAND_DMABUF=1` explicitly tries dma-buf → GBM CPU mapping (off by default;
+requires runtime libgbm; `UU_WAYLAND_DMABUF_DEVICE` overrides `/dev/dri/renderD128`).
+Only single-plane 8-bit RGB with an advertised linear modifier is supported;
+failure falls back to SHM. The virgl VM verified fallback only: successful import,
+mapping and hardware acceleration remain unverified. This is not zero-copy VAAPI;
+`UU_VIDEO_ENCODER=vaapi` still uploads CPU frames through FFmpeg.
 
 ## Not implemented / not supported
 
@@ -322,8 +336,7 @@ User-bus headless setup and the official Mac checklist: [virtual desktop accepta
 `--features kms` plus explicit `UU_DESKTOP_BACKEND=kms` enables a limited linear-framebuffer
 prototype; `UU_KMS_DEVICE=/dev/dri/card0`. Requires libdrm headers and deliberately granted
 `cap_sys_admin+ep`, plus card-node access. It is never automatically selected or granted privileges.
-Read the [KMS limitations, permission risk and revocation steps](docs/validation/kms.md) before use.
+This capability is broad: it applies to the whole network-facing process and can expose greeter/lock screens that portal consent would hide. Use it only on a disposable machine with a reviewed binary; inspect with `getcap`, revoke with `sudo setcap -r <path>`. A VM greeter capture was solid black, so lock/greeter screens are not supported.
 The VM GDM greeter capture was solid black (failed visual acceptance); lock/greeter support and Intel/AMD hardware remain unverified. Use uinput for input; clipboard
 is unavailable without a desktop session. No default release behavior changes.
-For headless desktop offers, [official error evidence remains incomplete](docs/validation/headless-error-evidence.md);
-the existing offer behavior is retained.
+No official "no desktop" error code was found for headless desktop offers, so the existing offer behavior is retained.

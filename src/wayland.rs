@@ -7,6 +7,13 @@ extern "C" {
     fn uu_wl_button(button: i32, pressed: i32) -> i32;
     fn uu_wl_key(symbol: u64, pressed: i32) -> i32;
     fn uu_wl_wake() -> i32;
+    fn uu_wl_release_all() -> i32;
+}
+pub fn release_all()->i32 {
+    #[cfg(all(target_os="linux",feature="wayland"))]
+    {return unsafe {uu_wl_release_all()};}
+    #[cfg(not(all(target_os="linux",feature="wayland")))]
+    -1
 }
 pub fn init() -> Result<(u32,u32),String> {
     #[cfg(all(target_os="linux", feature="wayland"))]
@@ -58,12 +65,31 @@ pub fn capture_stdout() -> Result<(),String> {
     let (w,h)=init()?;
     let mut frame=vec![0u8;(w as usize)*(h as usize)*4];
     let mut stdout=std::io::stdout().lock();
-    let interval=std::time::Duration::from_nanos(1_000_000_000/crate::video::FPS);
+    let fps=capture_fps(std::env::var("UU_WAYLAND_FPS").ok().as_deref())?;
+    let interval=std::time::Duration::from_nanos(1_000_000_000/u64::from(fps));
     loop {
         let start=std::time::Instant::now();
         capture(&mut frame)?;
         stdout.write_all(&frame).map_err(|e|format!("Capture pipe: {e}"))?;
         if let Some(left)=interval.checked_sub(start.elapsed()) { std::thread::sleep(left); }
+    }
+}
+
+pub(crate) fn capture_fps(value:Option<&str>)->Result<u32,String> {
+    match value {
+        None=>Ok(crate::video::FPS as u32),
+        Some(value)=>value.parse::<u32>().ok().filter(|fps|(5..=144).contains(fps))
+            .ok_or_else(||"UU_WAYLAND_FPS must be between 5 and 144".to_owned()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn capture_rate_accepts_viewer_range_and_rejects_invalid_values() {
+        assert_eq!(super::capture_fps(None),Ok(60));
+        for fps in [5,15,30,60,90,144] {assert_eq!(super::capture_fps(Some(&fps.to_string())),Ok(fps));}
+        for value in ["0","4","145","-1","NaN",""] {assert!(super::capture_fps(Some(value)).is_err());}
     }
 }
 

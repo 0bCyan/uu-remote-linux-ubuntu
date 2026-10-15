@@ -182,9 +182,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         input.mouse_button(1,true); input.mouse_button(1,false);
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        let measure=std::env::var("UU_INPUT_MEASURE").is_ok_and(|v|v=="1");
+        let cursor=|| -> Result<serde_json::Value,Box<dyn std::error::Error>> {
+            let output=std::process::Command::new("hyprctl").args(["-j","cursorpos"]).output()?;
+            if !output.status.success() { return Err("Cursor measurement unavailable".into()); }
+            Ok(serde_json::from_slice(&output.stdout)?)
+        };
+        let before=if measure {Some(cursor()?)} else {None};
         input.mouse_relative(32,0);
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        if let Some(before)=before {
+            println!("Relative pointer measurement: {}",serde_json::json!({"before":before,"after":cursor()?,"requested_delta":[32,0]}));
+        }
         for key in b"UUWAYLAND" { input.windows_key_event(i32::from(*key),true); input.windows_key_event(i32::from(*key),false); }
+        if std::env::var("UU_INPUT_SYMBOLS").is_ok_and(|v|v=="1") {
+            // Fixed synthetic symbols exercise the same VK+modifier path as CONTROL.
+            for (key,shift) in [(0xbd,true),(0xbb,true),(0xbd,false)] {
+                if shift {input.windows_key_event(0x10,true);}
+                input.windows_key_event(key,true); input.windows_key_event(key,false);
+                if shift {input.windows_key_event(0x10,false);}
+            }
+        }
         tokio::time::sleep(std::time::Duration::from_millis(300)).await;
         worker.abort(); input.release_held();
         println!("Desktop test events sent; verify the GTK acceptance report");
@@ -253,13 +271,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ScreenCapture::unavailable(error)
     }));
     let input = Arc::new(InputInjector::new());
+    input.bind_portal(capture.portal.clone());
+    input.release_held(); // recover stale input before accepting any peer
     let _pointer_worker = input.start_pointer_worker();
     #[cfg(target_os="linux")]
     {
         let shutdown_input=input.clone();
         tokio::spawn(async move {
             if let Ok(mut term)=tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
-                term.recv().await; virtual_audio::disable(); shutdown_input.release_held(); terminal::shutdown_all(); std::process::exit(0);
+                tokio::select! { _=term.recv()=>{}, _=tokio::signal::ctrl_c()=>{} }
+                shutdown_input.shutdown(); virtual_audio::disable(); terminal::shutdown_all(); std::process::exit(0);
             }
         });
     }

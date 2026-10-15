@@ -284,8 +284,7 @@ User-bus headless setup and the official Mac checklist: [virtual desktop accepta
 `--features kms` plus explicit `UU_DESKTOP_BACKEND=kms` enables a limited linear-framebuffer
 prototype; `UU_KMS_DEVICE=/dev/dri/card0`. Requires libdrm headers and deliberately granted
 `cap_sys_admin+ep`, plus card-node access. It is never automatically selected or granted privileges.
-Read the [KMS limitations, permission risk and revocation steps](docs/validation/kms.md) before use.
+This capability is broad: it applies to the whole network-facing process and can expose greeter/lock screens that portal consent would hide. Use it only on a disposable machine with a reviewed binary; inspect with `getcap`, revoke with `sudo setcap -r <path>`. A VM greeter capture was solid black, so lock/greeter screens are not supported.
 The VM GDM greeter capture was solid black (failed visual acceptance); lock/greeter support and Intel/AMD hardware remain unverified. Use uinput for input; clipboard
 is unavailable without a desktop session. No default release behavior changes.
-For headless desktop offers, [official error evidence remains incomplete](docs/validation/headless-error-evidence.md);
-the existing offer behavior is retained.
+No official "no desktop" error code was found for headless desktop offers, so the existing offer behavior is retained.

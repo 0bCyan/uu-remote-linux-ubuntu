@@ -86,6 +86,7 @@ impl WebRtcSession {
                 .map_err(|e| format!("Create PeerConnection failed: {}", e))?,
         );
 
+        let input_session=desktop.then(||input.desktop_session());
         let context = Arc::new(Mutex::new(SessionContext::default()));
         crate::network_diagnostics::start(Arc::downgrade(&pc));
 
@@ -143,7 +144,7 @@ impl WebRtcSession {
         }));
 
         let connected_context = context.clone();
-        let connection_input=input.clone();
+        let connection_input=input_session.clone();
         let connected_signal = signaling_client.clone();
         let notified = Arc::new(std::sync::atomic::AtomicBool::new(false));
         pc.on_peer_connection_state_change(Box::new(move |state| {
@@ -153,7 +154,10 @@ impl WebRtcSession {
             let notified = notified.clone();
             Box::pin(async move {
                 log::info!("PeerConnection State changed: {:?}", state);
-                if matches!(state,RTCPeerConnectionState::Closed|RTCPeerConnectionState::Failed|RTCPeerConnectionState::Disconnected) {input.release_held();}
+                if let Some(session)=input.as_ref() {
+                    if state==RTCPeerConnectionState::Connected {session.connected();}
+                    if matches!(state,RTCPeerConnectionState::Closed|RTCPeerConnectionState::Failed|RTCPeerConnectionState::Disconnected) {session.disconnected();}
+                }
                 if state == RTCPeerConnectionState::Connected && !notified.swap(true, std::sync::atomic::Ordering::AcqRel) {
                     tokio::spawn(async move {
                     let ctx = ctx.lock().await.clone();
@@ -327,6 +331,7 @@ impl WebRtcSession {
             log::info!("New DataChannel received: {}", label);
 
             let input_inst = input_clone.clone();
+            let channel_input_session=input_session.clone();
             let screen = control_capture.clone();
             let out_sequence = control_sequence.clone();
             let shared_clipboard_ready = text_clipboard_ready.clone();
@@ -348,6 +353,13 @@ impl WebRtcSession {
                 let clipboard_assembly = Arc::new(std::sync::Mutex::new(crate::clipboard_protocol::Assembly::default()));
                 let rich_state=Arc::new(std::sync::Mutex::new(crate::clipboard_rich::State::default()));
                 let clipboard_enabled = shared_clipboard_ready.clone();
+                if label=="CONTROL_DATA_CHANNEL" {
+                    let closing=channel_input_session.clone();
+                    d.on_close(Box::new(move || {
+                        let closing=closing.clone();
+                        Box::pin(async move {if let Some(session)=closing {session.disconnected();}})
+                    }));
+                }
                 // Ordered outbound queue for protocol replies produced outside this callback.
                 let (outbound, mut outbound_rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
                 {
@@ -498,6 +510,7 @@ impl WebRtcSession {
                 d.on_message(Box::new(move |msg: DataChannelMessage| {
                     let channel_name = lbl.clone();
                     let input_worker = inp.clone();
+                    let message_input_session=channel_input_session.clone();
                     let terminal_worker = terminal_conn.clone();
                     let rpc_out = outbound.clone();
                     let reply_chan = d_reply.clone();
@@ -760,6 +773,7 @@ impl WebRtcSession {
                                             if RECEIPTS[slot].fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 16 {
                                                 log::info!("CONTROL input received: kind={}", kind);
                                             }
+                                            if let Some(session)=message_input_session.as_ref() {session.with_input(|| {
                                             match &event {
                                                 ControlInput::MouseAbsolute {x,y} => input_worker.mouse_absolute_normalized(*x,*y,input_size),
                                                 ControlInput::MouseRelative {dx,dy} => input_worker.mouse_relative(*dx,*dy),
@@ -770,6 +784,7 @@ impl WebRtcSession {
                                                 ControlInput::MouseClick {button} => {input_worker.wire_mouse_button(*button,true);input_worker.wire_mouse_button(*button,false);},
                                                 _ => {}
                                             }
+                                            });}
 
                                         },
                                         _ => {}

@@ -202,7 +202,7 @@ fn rate_args(settings: &VideoSettings, encoder: Encoder) -> (String, String) {
 
 async fn read_encoder_with(
     size: (u32,u32),display:String,portal:Option<Arc<crate::portal::PortalSession>>,latest:mpsc::Sender<Arc<CompleteFrame>>,encoder:Encoder,sequence:Arc<std::sync::atomic::AtomicU64>,
-    mut settings: VideoSettings, #[cfg_attr(not(feature = "inproc-av"), allow(unused_variables))] idr: Arc<AtomicBool>,
+    settings: VideoSettings, #[cfg_attr(not(feature = "inproc-av"), allow(unused_variables))] idr: Arc<AtomicBool>,
 )->Result<(),String>{
     let kms=display.starts_with("kms:");
     let wayland=kms || display.starts_with("wayland:");
@@ -226,8 +226,6 @@ async fn read_encoder_with(
         return read_inprocess(config, latest, sequence, idr).await;
     }
     let size = format!("{}x{}", size.0, size.1);
-    // The separate wayland-capture process produces frames at its own fixed rate.
-    if wayland && portal.is_none() { settings.fps = FPS as u32; }
     let fps = settings.fps.to_string();
     // Keep the IDR interval at 2 s whatever the frame rate.
     let gop = gop_frames(settings.fps, false).to_string();
@@ -323,7 +321,7 @@ async fn read_encoder_with(
         let executable=std::path::PathBuf::from("/proc/self/exe");
         #[cfg(not(target_os="linux"))]
         let executable=std::env::current_exe().map_err(|e|format!("Capture executable: {e}"))?;
-        let mut capture=Command::new(executable).arg("wayland-capture")
+        let mut capture=wayland_capture_command(&executable,settings.fps)
             .kill_on_drop(true).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::inherit())
             .spawn().map_err(|e|format!("Start Wayland capture: {e}"))?;
         let mut source=capture.stdout.take().ok_or("Capture stdout missing")?;
@@ -359,6 +357,12 @@ async fn read_encoder_with(
     }
 }
 
+fn wayland_capture_command(executable:&std::path::Path,fps:u32)->Command {
+    let mut command=Command::new(executable);
+    command.arg("wayland-capture").env("UU_WAYLAND_FPS",fps.to_string());
+    command
+}
+
 fn transport_closed(pc: &RTCPeerConnection) -> bool {
     matches!(pc.connection_state(), RTCPeerConnectionState::Closed | RTCPeerConnectionState::Failed)
         || pc.sctp().state() == webrtc::sctp_transport::sctp_transport_state::RTCSctpTransportState::Closed
@@ -373,7 +377,9 @@ pub async fn probe(size:(u32,u32),display:String,portal:Option<Arc<crate::portal
     };
     let (tx,mut rx)=mpsc::channel(4);
     let sequence=Arc::new(std::sync::atomic::AtomicU64::new(0));
-    let _reader=EncoderTask(tokio::spawn(read_encoder(size,display,portal,tx,VideoSettings::default(),sequence,Arc::new(AtomicBool::new(false)))));
+    let fps=crate::wayland::capture_fps(std::env::var("UU_PROBE_FPS").ok().as_deref())?;
+    let settings=VideoSettings {fps,..VideoSettings::default()};
+    let _reader=EncoderTask(tokio::spawn(read_encoder(size,display,portal,tx,settings,sequence,Arc::new(AtomicBool::new(false)))));
     let mut count=0;
     let mut bytes=0;
     // UU_PROBE_FRAMES lengthens the sample for baseline measurements; default is 5 frames.
@@ -463,6 +469,14 @@ pub async fn stream_desktop(pc: Arc<RTCPeerConnection>, track: Arc<TrackLocalSta
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn native_wayland_child_uses_requested_capture_rate() {
+        for fps in [5,30,60,90,144] {
+            let command=super::wayland_capture_command(std::path::Path::new("uuremote-server"),fps);
+            let value=fps.to_string();
+            assert!(command.as_std().get_envs().any(|(k,v)|k=="UU_WAYLAND_FPS" && v==Some(std::ffi::OsStr::new(&value))));
+        }
+    }
     use super::*;
     #[test]
     fn x264_buffer_fits_keyframes() {

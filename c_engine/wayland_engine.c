@@ -11,6 +11,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
+#include <fcntl.h>
+#include <dlfcn.h>
+#include "linux-dmabuf-unstable-v1-client-protocol.h"
 #include "wlr-screencopy-unstable-v1-client-protocol.h"
 #include "wlr-virtual-pointer-unstable-v1-client-protocol.h"
 #include "virtual-keyboard-unstable-v1-client-protocol.h"
@@ -21,6 +24,28 @@ static struct wl_display *display;
 static struct wl_shm *shm;
 static struct wl_seat *seat;
 static struct zwlr_screencopy_manager_v1 *copy_manager;
+static struct zwp_linux_dmabuf_v1 *dmabuf;
+static int dmabuf_requested,dmabuf_disabled,dmabuf_reported;
+static unsigned dmabuf_linear_formats;
+/* GBM is loaded only for explicit opt-in; default builds need no GBM headers. */
+struct gbm_device;
+struct gbm_bo;
+static struct {
+    void *library;
+    int fd;
+    struct gbm_device *device;
+    struct gbm_device *(*create_device)(int);
+    void (*device_destroy)(struct gbm_device*);
+    struct gbm_bo *(*bo_create)(struct gbm_device*,uint32_t,uint32_t,uint32_t,uint32_t);
+    void (*bo_destroy)(struct gbm_bo*);
+    int (*bo_get_fd)(struct gbm_bo*);
+    int (*bo_get_plane_count)(struct gbm_bo*);
+    uint32_t (*bo_get_stride)(struct gbm_bo*);
+    uint32_t (*bo_get_offset)(struct gbm_bo*,int);
+    uint64_t (*bo_get_modifier)(struct gbm_bo*);
+    void *(*bo_map)(struct gbm_bo*,uint32_t,uint32_t,uint32_t,uint32_t,uint32_t,uint32_t*,void**);
+    void (*bo_unmap)(struct gbm_bo*,void*);
+} gbm={.fd=-1};
 static struct zwlr_virtual_pointer_manager_v1 *pointer_manager;
 static struct zwp_virtual_keyboard_manager_v1 *keyboard_manager;
 static struct zwlr_virtual_pointer_v1 *pointer;
@@ -35,11 +60,24 @@ static unsigned char held_keys[768];
 struct output { struct wl_output *handle; char name[128]; int transform,scale; uint32_t width,height; };
 static struct output outputs[32];
 static unsigned output_count, selected;
-static uint32_t width,height,stride,format,flags;
-static int done,failed,initialized;
-static struct wl_buffer *buffer;
-static void *pixels;
-static size_t pixel_length;
+static uint32_t width,height;
+static int initialized;
+/* Independent slots let the compositor fill the next frame during delivery. */
+struct frame {
+    struct zwlr_screencopy_frame_v1 *handle;
+    struct wl_buffer *buffer;
+    void *pixels;
+    size_t length;
+    uint32_t width,height,stride,format,flags;
+    int done,failed,submitted;
+    struct zwp_linux_buffer_params_v1 *params;
+    struct gbm_bo *bo;
+    int bo_fd,dmabuf_used;
+    void *map_data;
+    uint32_t dma_format,dma_width,dma_height;
+};
+static struct frame frames[2];
+static unsigned pending;
 
 static uint32_t timestamp(void) {
     struct timespec t; clock_gettime(CLOCK_MONOTONIC,&t);
@@ -82,6 +120,20 @@ static void output_scale(void*d,struct wl_output*o,int32_t scale) { if(scale>0 &
 static void output_name(void*d,struct wl_output*o,const char*name) { snprintf(((struct output*)d)->name,128,"%s",name); }
 static void output_description(void*d,struct wl_output*o,const char*desc) {}
 static const struct wl_output_listener output_listener={output_geometry,output_mode,output_done,output_scale,output_name,output_description};
+static unsigned dma_format_bit(uint32_t format) {
+    switch(format) {
+        case 0x34325258: return 1; /* DRM_FORMAT_XRGB8888 */
+        case 0x34325241: return 2; /* DRM_FORMAT_ARGB8888 */
+        case 0x34324258: return 4; /* DRM_FORMAT_XBGR8888 */
+        case 0x34324241: return 8; /* DRM_FORMAT_ABGR8888 */
+        default: return 0;
+    }
+}
+static void dma_format(void*d,struct zwp_linux_dmabuf_v1*b,uint32_t fmt) {}
+static void dma_modifier(void*d,struct zwp_linux_dmabuf_v1*b,uint32_t fmt,uint32_t hi,uint32_t lo) {
+    if(!hi && !lo) dmabuf_linear_formats|=dma_format_bit(fmt);
+}
+static const struct zwp_linux_dmabuf_v1_listener dma_listener={dma_format,dma_modifier};
 static void global(void*d,struct wl_registry*r,uint32_t id,const char*interface,uint32_t version) {
     if (!strcmp(interface,"wl_shm")) shm=wl_registry_bind(r,id,&wl_shm_interface,1);
     else if (!strcmp(interface,"wl_seat") && !seat) seat=wl_registry_bind(r,id,&wl_seat_interface,1);
@@ -90,6 +142,9 @@ static void global(void*d,struct wl_registry*r,uint32_t id,const char*interface,
         o->scale=1;
         o->handle=wl_registry_bind(r,id,&wl_output_interface,version<4?version:4);
         wl_output_add_listener(o->handle,&output_listener,o);
+    } else if (!strcmp(interface,"zwp_linux_dmabuf_v1") && dmabuf_requested && version>=3) {
+        dmabuf=wl_registry_bind(r,id,&zwp_linux_dmabuf_v1_interface,3);
+        zwp_linux_dmabuf_v1_add_listener(dmabuf,&dma_listener,NULL);
     } else if (!strcmp(interface,"zwlr_screencopy_manager_v1")) copy_manager=wl_registry_bind(r,id,&zwlr_screencopy_manager_v1_interface,version<3?version:3);
     else if (!strcmp(interface,"zwlr_virtual_pointer_manager_v1") && version>=2) pointer_manager=wl_registry_bind(r,id,&zwlr_virtual_pointer_manager_v1_interface,2);
     else if (!strcmp(interface,"zwp_virtual_keyboard_manager_v1")) keyboard_manager=wl_registry_bind(r,id,&zwp_virtual_keyboard_manager_v1_interface,1);
@@ -100,63 +155,160 @@ static const struct wl_registry_listener registry_listener={global,global_remove
 static void power_mode(void*d,struct zwlr_output_power_v1*p,uint32_t mode) {}
 static void power_failure(void*d,struct zwlr_output_power_v1*p) { power_failed=1; }
 static const struct zwlr_output_power_v1_listener power_listener={power_mode,power_failure};
+static void dma_disable(const char *reason) {
+    /* reason is always a fixed diagnostic tag, never driver/user text. */
+    if(!dmabuf_disabled) fprintf(stderr,"Wayland dma-buf unavailable; falling back to SHM (%s)\n",reason);
+    dmabuf_disabled=1;
+}
+static void dma_init(void) {
+    if(!dmabuf_requested) return;
+    if(!dmabuf) {dma_disable("protocol"); return;}
+    if(!dmabuf_linear_formats) {dma_disable("linear-format"); return;}
+    gbm.library=dlopen("libgbm.so.1",RTLD_NOW|RTLD_LOCAL);
+    if(!gbm.library) {dma_disable("gbm-library"); return;}
+#define GBM_LOAD(field,name) do { *(void**)(&gbm.field)=dlsym(gbm.library,name); if(!gbm.field) {dma_disable("gbm-symbol"); return;} } while(0)
+    GBM_LOAD(create_device,"gbm_create_device"); GBM_LOAD(device_destroy,"gbm_device_destroy");
+    GBM_LOAD(bo_create,"gbm_bo_create"); GBM_LOAD(bo_destroy,"gbm_bo_destroy");
+    GBM_LOAD(bo_get_fd,"gbm_bo_get_fd"); GBM_LOAD(bo_get_plane_count,"gbm_bo_get_plane_count");
+    GBM_LOAD(bo_get_stride,"gbm_bo_get_stride"); GBM_LOAD(bo_get_offset,"gbm_bo_get_offset");
+    GBM_LOAD(bo_get_modifier,"gbm_bo_get_modifier"); GBM_LOAD(bo_map,"gbm_bo_map"); GBM_LOAD(bo_unmap,"gbm_bo_unmap");
+#undef GBM_LOAD
+    const char *device=getenv("UU_WAYLAND_DMABUF_DEVICE");
+    gbm.fd=open(device && *device ? device:"/dev/dri/renderD128",O_RDWR|O_CLOEXEC);
+    if(gbm.fd<0 || !(gbm.device=gbm.create_device(gbm.fd))) dma_disable("render-device");
+}
+static void frame_clear(struct frame *frame) {
+    if(frame->handle) zwlr_screencopy_frame_v1_destroy(frame->handle);
+    if(frame->params) zwp_linux_buffer_params_v1_destroy(frame->params);
+    if(frame->buffer) wl_buffer_destroy(frame->buffer);
+    if(frame->dmabuf_used && frame->pixels) gbm.bo_unmap(frame->bo,frame->map_data);
+    else if(frame->pixels) munmap(frame->pixels,frame->length);
+    if(frame->bo) { if(frame->bo_fd>=0)close(frame->bo_fd); gbm.bo_destroy(frame->bo); }
+    memset(frame,0,sizeof(*frame));
+}
+static void frame_fail(struct frame *frame) { frame->failed=frame->done=frame->submitted=1; }
 static void copy_buffer(void*d,struct zwlr_screencopy_frame_v1*f,uint32_t fmt,uint32_t w,uint32_t h,uint32_t s) {
-    format=fmt; width=w; height=h; stride=s;
+    struct frame *frame=d;
+    frame->format=fmt; frame->width=w; frame->height=h; frame->stride=s;
     if (w==0 || h==0 || w>16384 || h>16384 || s<w*4 || s>131072 || (uint64_t)s*h>256*1024*1024 ||
         (fmt!=WL_SHM_FORMAT_XRGB8888 && fmt!=WL_SHM_FORMAT_ARGB8888 &&
-         fmt!=WL_SHM_FORMAT_XBGR8888 && fmt!=WL_SHM_FORMAT_ABGR8888)) { failed=done=1; return; }
+         fmt!=WL_SHM_FORMAT_XBGR8888 && fmt!=WL_SHM_FORMAT_ABGR8888)) { frame_fail(frame); return; }
     size_t length=(size_t)s*h;
-    if (buffer) { wl_buffer_destroy(buffer); buffer=NULL; }
-    if (pixels) { munmap(pixels,pixel_length); pixels=NULL; }
     int fd=memfd_create("uuremote-wayland-frame",MFD_CLOEXEC);
-    if (fd<0 || ftruncate(fd,(off_t)length)!=0) { if(fd>=0)close(fd); failed=done=1; return; }
-    pixels=mmap(NULL,length,PROT_READ|PROT_WRITE,MAP_SHARED,fd,0);
-    if (pixels==MAP_FAILED) { pixels=NULL; close(fd); failed=done=1; return; }
-    pixel_length=length;
+    if (fd<0 || ftruncate(fd,(off_t)length)!=0) { if(fd>=0)close(fd); frame_fail(frame); return; }
+    frame->pixels=mmap(NULL,length,PROT_READ|PROT_WRITE,MAP_SHARED,fd,0);
+    if (frame->pixels==MAP_FAILED) { frame->pixels=NULL; close(fd); frame_fail(frame); return; }
+    frame->length=length;
     struct wl_shm_pool *pool=wl_shm_create_pool(shm,fd,(int32_t)length);
-    buffer=wl_shm_pool_create_buffer(pool,0,w,h,s,fmt);
+    frame->buffer=wl_shm_pool_create_buffer(pool,0,w,h,s,fmt);
     wl_shm_pool_destroy(pool); close(fd);
     /* copy is valid immediately for SHM, including frame versions <3. */
-    if (zwlr_screencopy_frame_v1_get_version(f)<3) zwlr_screencopy_frame_v1_copy(f,buffer);
+    if (zwlr_screencopy_frame_v1_get_version(f)<3) {
+        zwlr_screencopy_frame_v1_copy(f,frame->buffer); frame->submitted=1;
+    }
 }
-static void copy_flags(void*d,struct zwlr_screencopy_frame_v1*f,uint32_t value) { flags=value; }
-static void copy_ready(void*d,struct zwlr_screencopy_frame_v1*f,uint32_t hi,uint32_t lo,uint32_t ns) { done=1; }
-static void copy_failed(void*d,struct zwlr_screencopy_frame_v1*f) { failed=done=1; }
+static void copy_flags(void*d,struct zwlr_screencopy_frame_v1*f,uint32_t value) { ((struct frame*)d)->flags=value; }
+static void copy_ready(void*d,struct zwlr_screencopy_frame_v1*f,uint32_t hi,uint32_t lo,uint32_t ns) {
+    struct frame *frame=d;
+    if(frame->dmabuf_used) {
+        /* GBM READ mapping synchronizes readback, possibly via a staging buffer. */
+        uint32_t stride=0;
+        frame->pixels=gbm.bo_map(frame->bo,0,0,frame->width,frame->height,1,&stride,&frame->map_data);
+        if(frame->pixels==MAP_FAILED) frame->pixels=NULL;
+        if(!frame->pixels || stride<frame->width*4 || stride>131072 || (uint64_t)stride*frame->height>256*1024*1024) {
+            dma_disable("cpu-map"); frame_fail(frame); return;
+        }
+        frame->stride=stride;
+        if(!dmabuf_reported) {fprintf(stderr,"Wayland dma-buf CPU mapping active (not zero-copy)\n"); dmabuf_reported=1;}
+    }
+    frame->done=1;
+}
+static void copy_failed(void*d,struct zwlr_screencopy_frame_v1*f) { frame_fail(d); }
 static void copy_damage(void*d,struct zwlr_screencopy_frame_v1*f,uint32_t x,uint32_t y,uint32_t w,uint32_t h) {}
-static void copy_dmabuf(void*d,struct zwlr_screencopy_frame_v1*f,uint32_t fmt,uint32_t w,uint32_t h) {}
-static void copy_buffer_done(void*d,struct zwlr_screencopy_frame_v1*f) { if(buffer && !failed) zwlr_screencopy_frame_v1_copy(f,buffer); else failed=done=1; }
+static void copy_dmabuf(void*d,struct zwlr_screencopy_frame_v1*f,uint32_t fmt,uint32_t w,uint32_t h) {
+    struct frame *frame=d;
+    if(w && h && w<=16384 && h<=16384 && (uint64_t)w*h*4<=256*1024*1024 && dma_format_bit(fmt)) {
+        frame->dma_format=fmt; frame->dma_width=w; frame->dma_height=h;
+    }
+}
+static void submit_shm(struct frame *frame) {
+    if(frame->buffer && !frame->failed) {
+        zwlr_screencopy_frame_v1_copy(frame->handle,frame->buffer); frame->submitted=1;
+    } else frame_fail(frame);
+}
+static void dma_created(void*d,struct zwp_linux_buffer_params_v1*params,struct wl_buffer*buffer) {
+    struct frame *frame=d;
+    zwp_linux_buffer_params_v1_destroy(params); frame->params=NULL;
+    wl_buffer_destroy(frame->buffer);
+    munmap(frame->pixels,frame->length); frame->pixels=NULL; frame->length=0;
+    frame->buffer=buffer; frame->dmabuf_used=1;
+    frame->width=frame->dma_width; frame->height=frame->dma_height;
+    frame->format=frame->dma_format==0x34325258 ? WL_SHM_FORMAT_XRGB8888:
+        frame->dma_format==0x34325241 ? WL_SHM_FORMAT_ARGB8888:frame->dma_format;
+    zwlr_screencopy_frame_v1_copy(frame->handle,buffer); frame->submitted=1;
+}
+static void dma_failed(void*d,struct zwp_linux_buffer_params_v1*params) {
+    struct frame *frame=d;
+    zwp_linux_buffer_params_v1_destroy(params); frame->params=NULL;
+    dma_disable("import"); submit_shm(frame);
+}
+static const struct zwp_linux_buffer_params_v1_listener dma_params_listener={dma_created,dma_failed};
+static int dma_start(struct frame *frame) {
+    if(!dmabuf_requested || dmabuf_disabled || !gbm.device || frame->failed || !frame->buffer ||
+       !(dmabuf_linear_formats&dma_format_bit(frame->dma_format))) return 0;
+    /* Single-plane linear RGB only; unsupported imports are asynchronous failures,
+       never create_immed protocol errors. No privilege or device probing changes. */
+    frame->bo=gbm.bo_create(gbm.device,frame->dma_width,frame->dma_height,frame->dma_format,(1u<<2)|(1u<<4));
+    frame->bo_fd=-1;
+    if(!frame->bo) {dma_disable("allocation"); return 0;}
+    uint32_t stride=gbm.bo_get_stride(frame->bo);
+    if(gbm.bo_get_plane_count(frame->bo)!=1 || gbm.bo_get_modifier(frame->bo)!=0 ||
+       stride<frame->dma_width*4 || stride>131072 || (uint64_t)stride*frame->dma_height>256*1024*1024 ||
+       (frame->bo_fd=gbm.bo_get_fd(frame->bo))<0) {dma_disable("layout-or-export"); return 0;}
+    frame->params=zwp_linux_dmabuf_v1_create_params(dmabuf);
+    zwp_linux_buffer_params_v1_add_listener(frame->params,&dma_params_listener,frame);
+    zwp_linux_buffer_params_v1_add(frame->params,frame->bo_fd,0,gbm.bo_get_offset(frame->bo,0),stride,0,0);
+    zwp_linux_buffer_params_v1_create(frame->params,frame->dma_width,frame->dma_height,frame->dma_format,0);
+    return 1;
+}
+static void copy_buffer_done(void*d,struct zwlr_screencopy_frame_v1*f) {
+    struct frame *frame=d;
+    if(!dma_start(frame)) submit_shm(frame);
+}
 static const struct zwlr_screencopy_frame_v1_listener copy_listener={copy_buffer,copy_flags,copy_ready,copy_failed,copy_damage,copy_dmabuf,copy_buffer_done};
-static int capture(void) {
-    done=failed=0; flags=0;
-    if(buffer) { wl_buffer_destroy(buffer); buffer=NULL; }
+static void request_frame(struct frame *frame) {
     /* Initial milestone: video excludes cursor, viewer draws its own pointer. */
-    struct zwlr_screencopy_frame_v1 *f=zwlr_screencopy_manager_v1_capture_output(copy_manager,0,outputs[selected].handle);
-    zwlr_screencopy_frame_v1_add_listener(f,&copy_listener,NULL);
-    int result=dispatch_until(&done);
-    zwlr_screencopy_frame_v1_destroy(f);
-    return result==0 && !failed && pixels ? 0:-1;
+    frame->handle=zwlr_screencopy_manager_v1_capture_output(copy_manager,0,outputs[selected].handle);
+    zwlr_screencopy_frame_v1_add_listener(frame->handle,&copy_listener,frame);
 }
 static void reset(void) {
     if (key_state) xkb_state_unref(key_state);
     if (keymap) xkb_keymap_unref(keymap);
     if (xkb) xkb_context_unref(xkb);
-    if (pixels) munmap(pixels,pixel_length);
+    for(unsigned i=0;i<2;i++) frame_clear(&frames[i]);
+    if(gbm.device) gbm.device_destroy(gbm.device);
+    if(gbm.fd>=0) close(gbm.fd);
+    if(gbm.library) dlclose(gbm.library);
+    memset(&gbm,0,sizeof(gbm)); gbm.fd=-1;
     /* Disconnect drops every proxy; failure never leaves an initialized backend. */
     if (display) wl_display_disconnect(display);
     display=NULL; shm=NULL; seat=NULL; copy_manager=NULL; pointer_manager=NULL; keyboard_manager=NULL;
-    pointer=NULL; keyboard=NULL; xkb=NULL; keymap=NULL; key_state=NULL; buffer=NULL; pixels=NULL;
+    pointer=NULL; keyboard=NULL; xkb=NULL; keymap=NULL; key_state=NULL;
     power_manager=NULL; power=NULL; power_failed=0;
-    pixel_length=0; output_count=0; initialized=0; memset(outputs,0,sizeof(outputs));
+    dmabuf=NULL; dmabuf_requested=dmabuf_disabled=dmabuf_reported=0; dmabuf_linear_formats=0;
+    pending=0; output_count=0; initialized=0; memset(outputs,0,sizeof(outputs));
     memset(held_keys,0,sizeof(held_keys));
 }
 int uu_wl_init(int32_t *w,int32_t *h) {
     pthread_mutex_lock(&lock);
     if(initialized) { *w=width; *h=height; pthread_mutex_unlock(&lock); return 0; }
     int result=-1;
+    const char *dma=getenv("UU_WAYLAND_DMABUF"); dmabuf_requested=dma && !strcmp(dma,"1");
     display=wl_display_connect(NULL); if (!display) goto end;
     struct wl_registry *registry=wl_display_get_registry(display);
     wl_registry_add_listener(registry,&registry_listener,NULL);
     if(sync_display()!=0 || sync_display()!=0) goto end;
+    dma_init();
     if(!shm || !seat || !copy_manager || !pointer_manager || !keyboard_manager || !output_count) goto end;
     const char *name=getenv("UU_WAYLAND_OUTPUT"); selected=0;
     if(name && *name) {
@@ -203,18 +355,41 @@ int uu_wl_wake(void) {
 }
 int uu_wl_capture(uint8_t *out,size_t length) {
     pthread_mutex_lock(&lock);
-    int result=-1;
-    if(initialized && capture()==0 && length==(size_t)width*height*4) {
+    int result=-1,retried=0;
+retry:;
+    struct frame *frame=&frames[pending];
+    if(!initialized || length!=(size_t)width*height*4) goto end;
+    if(!frame->handle) request_frame(frame);
+    if(dispatch_until(&frame->done)!=0) goto end;
+    if(frame->failed && frame->dmabuf_used && !retried) {
+        /* Mapping/copy failure retries once on SHM; connection errors do not. */
+        dma_disable("copy"); retried=1;
+        for(unsigned i=0;i<2;i++) frame_clear(&frames[i]);
+        pending=0; goto retry;
+    }
+    if(frame->failed || !frame->pixels || frame->width!=width || frame->height!=height) goto end;
+    zwlr_screencopy_frame_v1_destroy(frame->handle); frame->handle=NULL;
+    const char *pipeline=getenv("UU_WAYLAND_PIPELINE");
+    if(!pipeline || strcmp(pipeline,"0")) {
+        struct frame *next=&frames[1-pending];
+        request_frame(next);
+        /* Submit the next GPU copy before copying/delivering these CPU pixels. */
+        if(dispatch_until(&next->submitted)!=0 || wl_display_flush(display)<0) goto end;
+    }
+    {
         for(uint32_t y=0;y<height;y++) {
-            uint32_t source=(flags&ZWLR_SCREENCOPY_FRAME_V1_FLAGS_Y_INVERT)?height-y-1:y;
+            uint32_t source=(frame->flags&ZWLR_SCREENCOPY_FRAME_V1_FLAGS_Y_INVERT)?height-y-1:y;
             uint8_t *row=out+(size_t)y*width*4;
-            memcpy(row,(uint8_t*)pixels+(size_t)source*stride,width*4);
-            if(format==WL_SHM_FORMAT_XBGR8888 || format==WL_SHM_FORMAT_ABGR8888) {
+            memcpy(row,(uint8_t*)frame->pixels+(size_t)source*frame->stride,width*4);
+            if(frame->format==WL_SHM_FORMAT_XBGR8888 || frame->format==WL_SHM_FORMAT_ABGR8888) {
                 for(uint32_t x=0;x<width;x++) { uint8_t red=row[x*4]; row[x*4]=row[x*4+2]; row[x*4+2]=red; }
             }
         }
         result=0;
     }
+    frame_clear(frame); pending=1-pending;
+end:
+    if(result!=0) for(unsigned i=0;i<2;i++) frame_clear(&frames[i]);
     pthread_mutex_unlock(&lock); return result;
 }
 int uu_wl_move(int32_t x,int32_t y,int relative) {
@@ -274,4 +449,29 @@ int uu_wl_key(uint64_t symbol,int pressed) {
         }
     }
     pthread_mutex_unlock(&lock); return result;
+}
+
+int uu_wl_release_all(void) {
+    pthread_mutex_lock(&lock);
+    int result=-1;
+    if(initialized) {
+        /* Sweep this client's virtual keyboard directly: a keysym lookup can
+           fail for unmapped OEM/keypad symbols before reaching held modifiers. */
+        for(xkb_keycode_t code=xkb_keymap_min_keycode(keymap);code<=xkb_keymap_max_keycode(keymap);code++) {
+            if(code<8 || code>=sizeof(held_keys) || !xkb_keymap_key_get_name(keymap,code)) continue;
+            zwp_virtual_keyboard_v1_key(keyboard,timestamp(),code-8,WL_KEYBOARD_KEY_STATE_RELEASED);
+            if(held_keys[code]) xkb_state_update_key(key_state,code,XKB_KEY_UP);
+        }
+        memset(held_keys,0,sizeof(held_keys));
+        zwp_virtual_keyboard_v1_modifiers(keyboard,
+            xkb_state_serialize_mods(key_state,XKB_STATE_MODS_DEPRESSED),
+            xkb_state_serialize_mods(key_state,XKB_STATE_MODS_LATCHED),
+            xkb_state_serialize_mods(key_state,XKB_STATE_MODS_LOCKED),
+            xkb_state_serialize_layout(key_state,XKB_STATE_LAYOUT_EFFECTIVE));
+        for(unsigned code=0x110;code<=0x114;code++)
+            zwlr_virtual_pointer_v1_button(pointer,timestamp(),code,WL_POINTER_BUTTON_STATE_RELEASED);
+        zwlr_virtual_pointer_v1_frame(pointer);
+        result=wl_display_flush(display)<0?-1:0;
+    }
+    pthread_mutex_unlock(&lock);return result;
 }

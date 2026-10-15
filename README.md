@@ -45,6 +45,10 @@
 | 多次重连 | 每个工具窗口独立连接，互不影响 |
 | 无头服务器 | 没有显示器也能上线，提供终端、文件传输和端口映射；也可以用 Xvfb 虚拟桌面提供完整远程桌面（见下文） |
 
+桌面连接建立、结束及服务启动时会清理遗留输入状态；旧连接的迟到事件不能影响新的桌面连接。
+X11 清理当前已认证显示上的按下状态（包括无法区分来源的实际按键）；uinput 仅清理本服务虚拟设备，
+Portal 仅作用于本服务获授权的会话。文件传输、终端等独立工具连接不触发桌面松键。
+
 ## 支持的 Linux 桌面
 
 | 桌面环境 | 显示协议 | 状态 | 编译方式 |
@@ -59,7 +63,9 @@
 除 GNOME（X11）外，其余桌面目前都是在虚拟机里测试的。如果你在真机上遇到问题，欢迎[提交 issue](../../issues)，
 请附上发行版、桌面环境、显卡型号和 `journalctl --user -u uuremote-native.service` 里的相关日志。
 
-Wayland 下的限制：只支持单屏、固定分辨率；Hyprland 原生后端通过 shm screencopy 截屏，帧率受合成器限制（2560x1600 实测约 16～22 帧），控制端的帧率选项不生效；portal 后端暂不支持唤醒屏幕和动态分辨率；剪贴板只在控制端的远控窗口处于前台时同步。
+Wayland 下的限制：只支持单屏、固定分辨率；Hyprland 原生后端默认使用双缓冲流水线 shm screencopy，控制端帧率设置会同步到采集节拍和编码器，但实际帧率仍受合成器、渲染和读回速度限制（旧串行路径在 2560x1600 曾测得约 16～22 帧；流水线只在虚拟机里测量过，不代表实机保证）；portal 后端暂不支持唤醒屏幕和动态分辨率；剪贴板只在控制端的远控窗口处于前台时同步。
+
+原生 Wayland 实验选项：`UU_WAYLAND_PIPELINE=0` 可关闭流水线做对照。`UU_WAYLAND_DMABUF=1` 显式尝试 dma-buf→GBM CPU 映射（默认关闭，需要运行时 libgbm；可用 `UU_WAYLAND_DMABUF_DEVICE` 指定 render node，默认 `/dev/dri/renderD128`）。仅支持显式线性修饰符、单平面 8-bit RGB，失败回退 SHM；virgl VM 中只验证了回退，成功导入/映射和硬件加速均未验证。这不是零拷贝 VAAPI 路径；选择 `UU_VIDEO_ENCODER=vaapi` 时仍由 FFmpeg 上传 CPU 帧。
 首次连接时，桌面会弹窗请求「远程桌面 / 屏幕共享」授权，同意后会记住授权。
 
 ## 尚未实现 / 不支持
@@ -289,13 +295,13 @@ VAAPI 可选包：Intel 新显卡用 `intel-media-driver`，AMD 用 `libva-mesa-
 `vainfo`。KMS 依赖 `libdrm`。虚拟 Xfce 依赖 `xorg-server-xvfb xorg-xauth xorg-xdpyinfo
 xfce4-session xfce4-panel xfdesktop xfwm4 gnome-terminal`。
 滚动 Arch 的 FFmpeg 可能超出 `inproc-av` 支持的 6.x；请使用默认进程方案或独立的 FFmpeg 6 前缀，
-不要降级系统 FFmpeg。当前 Arch/Hyprland VM 验证结果见[开发验证记录](docs/validation/v017-results.md)。
+不要降级系统 FFmpeg。
 
 ### 实验性 KMS 截屏
 
 编译 `--features kms` 后显式设置 `UU_DESKTOP_BACKEND=kms`；`UU_KMS_DEVICE` 默认
 `/dev/dri/card0`。需要 libdrm、card 节点访问权及主动授予的 `cap_sys_admin+ep`。
-程序不会自动启用或授权；此 capability 权限很大，先阅读[限制、安全风险及撤销步骤](docs/validation/kms.md)。
+程序不会自动启用或授权；此 capability 权限很大，此 capability 权限很大：它作用于整个联网的服务进程，也能看到登录界面/锁屏等原本受授权保护的画面；只在可丢弃的机器上、对审查过的二进制使用，用 `getcap` 检查，`sudo setcap -r <路径>` 撤销。目前在虚拟机里登录界面截图全黑，不支持锁屏/登录界面。
 当前仅为线性帧缓冲原型：VM 的 GDM 截图仍是黑屏，**没有通过登录界面视觉验收**，不承诺锁屏可用。
 键鼠需 uinput；没有桌面会话时不提供剪贴板。
-无头桌面错误码的[官方证据仍不足](docs/validation/headless-error-evidence.md)，因此保持原有 offer 行为。
+无头模式下桌面连接没有找到官方的「无桌面」错误码，因此保持原有 offer 行为。

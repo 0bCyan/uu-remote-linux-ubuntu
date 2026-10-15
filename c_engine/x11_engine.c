@@ -195,6 +195,30 @@ int x11_key_event(int keycode, int is_press) {
     return 0;
 }
 
+/* Session boundaries must also recover XTEST state left by a previous process.
+ * Only query/release on this authenticated display; never log key state. */
+int x11_release_all(void) {
+    if (!g_display) return -1;
+    XSync(g_display, False);
+    char keys[32];
+    XQueryKeymap(g_display, keys);
+    for (int code = 8; code < 256; code++) {
+        if (((unsigned char)keys[code >> 3] | g_injected_down[code >> 3]) & (1u << (code & 7)))
+            XTestFakeKeyEvent(g_display, code, False, CurrentTime);
+    }
+    /* Includes side buttons; wheel buttons are stateless and need no release. */
+    unsigned char mapping[256];
+    int buttons = XGetPointerMapping(g_display, mapping, sizeof(mapping));
+    for (int button = 1; button <= buttons && button <= 9; button++) {
+        if (button <= 3 || button >= 8) XTestFakeButtonEvent(g_display, button, False, CurrentTime);
+    }
+    if (g_restore_repeat) XAutoRepeatOn(g_display);
+    memset(g_injected_down, 0, sizeof(g_injected_down));
+    g_injected_count = g_restore_repeat = 0;
+    XSync(g_display, False);
+    return 0;
+}
+
 /* ---- Terminal-aware paste (Mac viewer Cmd+V arrives as Ctrl+V) ------------------------------
  * Linux terminals paste with Ctrl+Shift+V; Ctrl+V quotes the next key (a paste then shows as
  * "^[[200~..."). Reports whether the focused window is a terminal emulator. Uses its own
