@@ -9,6 +9,8 @@
 #include <sys/ipc.h>
 #include <X11/Xlib.h>
 #include <X11/Xutil.h>
+#include <X11/Xatom.h>
+#include <strings.h>
 #include <X11/extensions/XShm.h>
 #include <X11/extensions/XTest.h>
 #include <X11/extensions/Xfixes.h>
@@ -187,6 +189,46 @@ int x11_key_event(int keycode, int is_press) {
     XTestFakeKeyEvent(g_display, keycode, is_press ? True : False, CurrentTime);
     if (!is_press) track_injected_key(keycode, 0);
     XFlush(g_display);
+    return 0;
+}
+
+/* ---- Terminal-aware paste (Mac viewer Cmd+V arrives as Ctrl+V) ------------------------------
+ * Linux terminals paste with Ctrl+Shift+V; Ctrl+V quotes the next key (a paste then shows as
+ * "^[[200~..."). Reports whether the focused window is a terminal emulator. Uses its own
+ * connection so it never races the capture/input connection. */
+static Display *g_probe = NULL;
+
+static int class_is_terminal(const char *value) {
+    static const char *names[] = { "gnome-terminal", "gnome-terminal-server", "org.gnome.Console", "kgx", "konsole",
+        "xfce4-terminal", "mate-terminal", "lxterminal", "qterminal", "terminator", "tilix", "xterm", "uxterm",
+        "urxvt", "rxvt", "alacritty", "kitty", "wezterm", "wezterm-gui", "foot", "st-256color", "terminology",
+        "guake", "tilda", "deepin-terminal", "ptyxis", "io.elementary.terminal", "cool-retro-term", NULL };
+    if (!value) return 0;
+    for (int i = 0; names[i]; i++) if (strcasecmp(value, names[i]) == 0) return 1;
+    return 0;
+}
+
+/* Returns 1 when the focused window belongs to a terminal emulator, else 0. */
+int x11_terminal_shortcut_state(void) {
+    if (!g_probe && !(g_probe = XOpenDisplay(NULL))) return 0;
+    Window focus = 0; int revert = 0;
+    XGetInputFocus(g_probe, &focus, &revert);
+    if (focus == None || focus == PointerRoot) return 0;
+    Window cur = focus;
+    for (int depth = 0; depth < 12 && cur; depth++) {
+        XClassHint hint = {0};
+        if (XGetClassHint(g_probe, cur, &hint)) {
+            int terminal = class_is_terminal(hint.res_name) || class_is_terminal(hint.res_class);
+            if (hint.res_name) XFree(hint.res_name);
+            if (hint.res_class) XFree(hint.res_class);
+            return terminal;
+        }
+        Window root, parent, *children = NULL; unsigned int n = 0;
+        if (!XQueryTree(g_probe, cur, &root, &parent, &children, &n)) return 0;
+        if (children) XFree(children);
+        if (parent == root) return 0;
+        cur = parent;
+    }
     return 0;
 }
 

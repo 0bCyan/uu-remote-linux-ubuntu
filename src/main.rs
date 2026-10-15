@@ -14,6 +14,7 @@ mod session_lock;
 mod capture;
 mod file_trans;
 mod input;
+mod uinput;
 mod input_mapping;
 mod port_mapping;
 mod power;
