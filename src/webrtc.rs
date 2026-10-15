@@ -865,7 +865,11 @@ impl WebRtcSession {
             .set_local_description(answer.clone())
             .await
             .map_err(|e| format!("Set local desc failed: {}", e))?;
-        Ok(answer.sdp)
+        // webrtc-rs omits a=max-message-size, so the viewer (libwebrtc) assumes 64 KB and refuses
+        // larger data-channel messages (port-mapping uploads stalled after the first frame).
+        // Only the copy sent to the viewer is amended: webrtc-rs rejects a local description that
+        // differs from the answer it generated. Our receive buffer (1 MB) accepts 256 KB messages.
+        Ok(with_max_message_size(&answer.sdp))
     }
 
     /// 接收远端 ICE Candidate
@@ -906,6 +910,23 @@ impl WebRtcSession {
 }
 
 
+/// Max SCTP message size we accept (libwebrtc's default, as the official host advertises).
+const MAX_MESSAGE_SIZE: usize = 262_144;
+
+/// Adds `a=max-message-size` after `a=sctp-port` in the data-channel section if missing.
+fn with_max_message_size(sdp: &str) -> String {
+    if sdp.contains("a=max-message-size:") { return sdp.to_owned(); }
+    let eol = if sdp.contains("\r\n") { "\r\n" } else { "\n" };
+    let mut out = String::with_capacity(sdp.len() + 32);
+    for line in sdp.split_inclusive('\n') {
+        out.push_str(line);
+        if line.trim_end().starts_with("a=sctp-port:") {
+            out.push_str(&format!("a=max-message-size:{MAX_MESSAGE_SIZE}{eol}"));
+        }
+    }
+    out
+}
+
 fn negotiated_bundle_media(sdp: &str) -> Option<(String, u16)> {
     let preferred: Vec<&str> = sdp.lines().find_map(|l| l.strip_prefix("a=group:BUNDLE "))?
         .split_whitespace().collect();
@@ -931,6 +952,15 @@ fn negotiated_bundle_media(sdp: &str) -> Option<(String, u16)> {
 #[cfg(test)]
 mod tests {
     use super::negotiated_bundle_media;
+    #[test]
+    fn advertises_max_message_size_once_in_the_data_channel_section() {
+        use super::with_max_message_size;
+        let sdp = "v=0\r\nm=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\na=sctp-port:5000\r\n";
+        let out = with_max_message_size(sdp);
+        assert!(out.contains("a=sctp-port:5000\r\na=max-message-size:262144\r\n"));
+        assert_eq!(with_max_message_size(&out), out);
+    }
+
     #[test]
     fn skips_rejected_audio_for_ice_transport() {
         let sdp = "a=group:BUNDLE 1 2\r\nm=audio 0 RTP 0\r\na=mid:0\r\nm=video 9 RTP 98\r\na=mid:1\r\nm=application 9 SCTP 0\r\na=mid:2\r\n";

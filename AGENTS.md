@@ -174,6 +174,13 @@ started a second full host server instead, so check that a subcommand exists in 
   `operation_result`. Host root is shown as ":/" (此电脑); home is "~/".
 - Terminal: BINARY channel, RPC 28 check_env → 24; frames `"TERM"`, version 1, type (enum+1), 2 flag bytes,
   session u32 LE, length u32 LE, payload; JSON `{cols,rows,shell,option}`.
+- Port mapping (capture_type 9): Message 27 `PortMappingFrame {1 session_id, 2 rule_id, 3 stream_id, 4 type, 5 payload}`
+  on FILE_DATA_CHANNEL only. Types SYN=0, FIN=1, DATA=2, SYN_ACK=3, DATA_ACK=4 (ignored by both sides). SYN payload
+  JSON `{"version","target_host","target_port"}` → connect → SYN_ACK `{"version","ok","error"}`; DATA raw bytes both ways.
+  Echo session/rule/stream ids with their original wire types. The viewer does not support TCP half-close.
+- SCTP message size: webrtc-rs omits `a=max-message-size`, so the viewer assumes 64 KB and refuses larger messages; the
+  answer sent to the viewer adds `a=max-message-size:262144` (only the sent copy — webrtc-rs rejects a modified local
+  description) and `vendor/webrtc` raises the data-channel receive buffer from 65535 to 262144 bytes.
 - Cursor shape = Message 15 SystemStateChange field 2. Audio: the viewer always offers an Opus m-line.
 - Login API: `/api/v1/device/windows/init` → device_id; `/qrcode/gen/login`; long-poll
   `/qrcode/login/status` (1 wait, 2 scanned, 4 confirmed); `/login/by_qrcode` → user token. QR expires after

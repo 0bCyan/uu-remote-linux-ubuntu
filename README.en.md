@@ -44,6 +44,7 @@
 | Lock after remote session | Stored on the host, so it still applies after reconnecting |
 | Mute host while controlled | Host speakers are muted while the viewer still hears the sound; the previous mute state is restored afterwards |
 | System actions | Lock, show desktop, task manager (system monitor), reboot, shut down |
+| Port mapping | The official "port mapping" tool: forwards a local port on the viewer to an address reachable from the Linux host (e.g. 127.0.0.1:22); `UU_PORT_MAPPING=0` disables it |
 | Reconnects | Every tool window has its own connection; they do not disturb each other |
 
 ## Supported Linux desktops
@@ -77,7 +78,6 @@ permission; the permission is remembered once granted.
 | Microphone (viewer audio played on the host) | Not implemented (needs a virtual sound card) |
 | Plugins such as the WoW queue notifier | Not supported; the client is told that no plugins exist |
 | Access before login (greeter / no user logged in) | Not supported; only an already logged-in desktop session can be controlled |
-| Port mapping | Code exists, not yet accepted |
 | Relay connections on restrictive networks | Uses the ICE servers provided by the UU cloud; complex network setups are not thoroughly tested |
 | Acting as a viewer (controlling other machines from Linux) | Out of scope |
 
@@ -161,6 +161,7 @@ Common environment variables:
 | `UU_FFMPEG_ROOT` | Use FFmpeg from this prefix |
 | `UU_AUDIO=0` | Disable sound; `UU_AUDIO_SOURCE` picks the PulseAudio source |
 | `UU_LOGIN_WINDOW=0` | Do not open the login window automatically when credentials are missing |
+| `UU_PORT_MAPPING=0` | Disable port mapping (the official host's controlled-side switch) |
 
 Host settings such as "lock after remote session" and "mute host" are stored in
 `~/.config/uuremote/host_settings.json`.
