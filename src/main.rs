@@ -205,7 +205,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     log::info!("Starting uu-remote-linux host v{}...", env!("CARGO_PKG_VERSION"));
 
-    let mut capture = Arc::new((if desktop_backend::detect()?==desktop_backend::DesktopBackend::Portal
+    let mut capture = Arc::new((if desktop_backend::headless() {
+        Err("headless mode (UU_DESKTOP_BACKEND=none)".to_owned())
+    } else if desktop_backend::detect()?==desktop_backend::DesktopBackend::Portal
         && std::env::var("UU_PORTAL_PREAUTHORIZE").ok().as_deref()!=Some("1") {
         Err("Portal screen access requires a desktop connection and local consent".to_owned())
     } else { ScreenCapture::new() }).unwrap_or_else(|error| {
@@ -359,6 +361,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
                         let stale_portal=capture.portal.as_ref().is_some_and(|session|!session.is_alive())
                             && crate::session_lock::locked_now() == Some(false);
+                        if desktop && desktop_backend::headless() {
+                            log::info!("Desktop connection ignored: headless mode (terminal, file transfer and port mapping remain available)");
+                            continue;
+                        }
                         let session_capture=if desktop && (capture.init_error.is_some() || stale_portal) {
                             if stale_portal {
                                 input.release_held();input.bind_portal(None);

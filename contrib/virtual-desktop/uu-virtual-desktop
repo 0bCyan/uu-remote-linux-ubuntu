@@ -1,0 +1,40 @@
+#!/bin/sh
+# Virtual desktop for a monitorless Linux host: Xvfb + a desktop session on its own D-Bus session bus.
+# uuremote-server then serves it with DISPLAY=$UU_VIRTUAL_DISPLAY (see README in this folder).
+#   UU_VIRTUAL_DISPLAY  X display number (default :99)
+#   UU_VIRTUAL_SIZE     screen size (default 1920x1080)
+#   UU_VIRTUAL_SESSION  session command (default: first of startxfce4, mate-session, startlxqt, openbox-session, xterm)
+#   UU_VIRTUAL_BUS      user (default): the systemd user bus (`loginctl enable-linger`) gets DISPLAY, so
+#                       D-Bus/systemd-activated apps (GNOME terminal, portals, ...) open on the virtual screen;
+#                       private: own dbus-run-session bus, for machines that also run a real desktop session
+set -eu
+display="${UU_VIRTUAL_DISPLAY:-:99}"
+size="${UU_VIRTUAL_SIZE:-1920x1080}"
+session="${UU_VIRTUAL_SESSION:-}"
+if [ -z "$session" ]; then
+    for candidate in startxfce4 mate-session startlxqt openbox-session xterm; do
+        if command -v "$candidate" >/dev/null 2>&1; then session="$candidate"; break; fi
+    done
+fi
+[ -n "$session" ] || { echo "no desktop session found; set UU_VIRTUAL_SESSION" >&2; exit 1; }
+command -v Xvfb >/dev/null || { echo "Xvfb not installed (apt install xvfb)" >&2; exit 1; }
+command -v dbus-run-session >/dev/null || { echo "dbus-run-session not installed (apt install dbus)" >&2; exit 1; }
+
+Xvfb "$display" -screen 0 "${size}x24" -nolisten tcp -noreset &
+xvfb=$!
+trap 'kill "$xvfb" 2>/dev/null' EXIT INT TERM
+socket="/tmp/.X11-unix/X${display#:}"
+for _ in $(seq 50); do [ -S "$socket" ] && break; sleep 0.1; done
+[ -S "$socket" ] || { echo "Xvfb did not start on $display" >&2; exit 1; }
+
+export DISPLAY="$display"
+unset WAYLAND_DISPLAY XAUTHORITY
+export XDG_SESSION_TYPE=x11
+if [ "${UU_VIRTUAL_BUS:-user}" = user ]; then
+    # Activated services inherit the user manager's environment, not this process's: export DISPLAY there.
+    dbus-update-activation-environment --systemd DISPLAY XDG_SESSION_TYPE
+    exec sh -c "$session"
+else
+    # Private bus: independent of the user manager; activation through systemd may still escape to the user bus.
+    dbus-run-session -- sh -c "$session"
+fi

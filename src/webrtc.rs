@@ -438,18 +438,22 @@ impl WebRtcSession {
                             let next_seq = || sequence.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                             // Default file-transfer folder: the desktop user's home directory.
                             let home = std::env::var("HOME").unwrap_or_else(|_| "/".into());
-                            let desktop_permission=if screen.init_error.is_none() {
+                            // Tool peers are permitted without a desktop; the port-mapping viewer aborts on Reject.
+                            let desktop_permission=if screen.init_error.is_none() || !desktop {
                                 crate::system_metrics::Permission::Allow
                             } else { crate::system_metrics::Permission::Reject };
+                            // Without a desktop (headless/portal before consent) the port-mapping tool still waits
+                            // for ScreenSources/CaptureChange and aborts otherwise: tool peers get a nominal screen.
+                            let screen_size=if screen.init_error.is_none() { (screen.width, screen.height) } else { (1920, 1080) };
                             let messages = [
                                 (8, crate::initialization::encode_capture_change(next_seq(), timestamp, 0, 0, "Linux desktop")),
                                 (13, Ok(crate::initialization::envelope(next_seq(), timestamp, 13, &init_actions.metrics_payload(desktop_sound, desktop_permission)))),
                                 (26, Ok(crate::initialization::envelope(next_seq(), timestamp, 26,
                                     &crate::system_metrics::remote_download_path(&home)))),
-                                (7, crate::capture_setting::screen_sources(next_seq(), timestamp, (screen.width, screen.height), init_video.borrow().output, "Linux desktop")),
+                                (7, crate::capture_setting::screen_sources(next_seq(), timestamp, screen_size, init_video.borrow().output, "Linux desktop")),
                             ];
                             for (field, message) in messages {
-                                if screen.init_error.is_some() && matches!(field,7|8) { continue; }
+                                if desktop && screen.init_error.is_some() && matches!(field,7|8) { continue; }
                                 let message = match message {
                                     Ok(message) => message,
                                     Err(e) => { log::error!("CONTROL initialization encode failed: {}", e); return; }

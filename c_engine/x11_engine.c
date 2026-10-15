@@ -60,9 +60,12 @@ int x11_init(const char *display_name) {
         g_display = XOpenDisplay(display_name);
     } else {
         const char *configured = getenv("DISPLAY");
+        /* An explicit DISPLAY that fails must not silently fall back to another (physical) screen. */
         if (configured && *configured) g_display = XOpenDisplay(configured);
-        if (!g_display) g_display = XOpenDisplay(":0");
-        if (!g_display) g_display = XOpenDisplay(":1");
+        else {
+            g_display = XOpenDisplay(":0");
+            if (!g_display) g_display = XOpenDisplay(":1");
+        }
     }
     if (!g_display) {
         return -1;

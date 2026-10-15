@@ -2,6 +2,10 @@
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DesktopBackend { X11, Wayland, Portal }
 
+/// `UU_DESKTOP_BACKEND=none`: headless host — no display is opened; terminal, file transfer and
+/// port mapping stay available (servers without a monitor or logged-in session).
+pub fn headless() -> bool { std::env::var("UU_DESKTOP_BACKEND").is_ok_and(|v| v == "none") }
+
 pub fn detect() -> Result<DesktopBackend, String> {
     let backend=select(std::env::var("UU_DESKTOP_BACKEND").ok().as_deref(),
         std::env::var("XDG_SESSION_TYPE").ok().as_deref(),
@@ -16,12 +20,13 @@ fn select(explicit: Option<&str>, session: Option<&str>, socket: Option<&str>) -
         Some("x11") => Ok(DesktopBackend::X11),
         Some("wayland") => Ok(DesktopBackend::Wayland),
         Some("portal") => Ok(DesktopBackend::Portal),
+        Some("none") => Ok(DesktopBackend::X11), // never opened, see headless()
         None | Some("auto") => {
             if session == Some("wayland") || socket.is_some_and(|s| !s.is_empty()) {
                 Ok(DesktopBackend::Wayland)
             } else { Ok(DesktopBackend::X11) }
         },
-        Some(_) => Err("UU_DESKTOP_BACKEND must be auto, x11, wayland or portal".into()),
+        Some(_) => Err("UU_DESKTOP_BACKEND must be auto, x11, wayland, portal or none".into()),
     }
 }
 
