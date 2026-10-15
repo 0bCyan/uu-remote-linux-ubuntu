@@ -7,6 +7,7 @@ mod network_diagnostics;
 mod session_ice;
 mod wayland;
 mod auth;
+mod assist;
 mod config;
 mod login;
 mod login_ui;
@@ -53,17 +54,79 @@ use std::sync::Arc;
 use tokio::sync::{mpsc, Mutex};
 use webrtc::WebRtcSession;
 
+/// Set before a normal return when the host must come back in the other mode (signed in / out).
+static RESTART: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// Re-executes this host; the new instance opens its window so the user sees the result.
+fn restart_host() -> ! {
+    use std::os::unix::process::CommandExt;
+    let error = std::process::Command::new("/proc/self/exe").args(std::env::args_os().skip(1)).env("UU_SHOW_WINDOW", "1").exec();
+    eprintln!("restart failed: {error}");
+    std::process::exit(1);
+}
+fn display_present() -> bool { std::env::var_os("DISPLAY").is_some() || std::env::var_os("WAYLAND_DISPLAY").is_some() }
+/// SIGUSR1 (`uuremote-server show`) opens the host window.
+fn present_on_usr1(ui: std::sync::Arc<assist::LocalUi>) {
+    write_host_pid();
+    tokio::spawn(async move {
+        let Ok(mut usr1) = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::user_defined1()) else { return };
+        while usr1.recv().await.is_some() { ui.present(); }
+    });
+}
+
+fn host_pid_path() -> std::path::PathBuf { config::path().with_file_name("host.pid") }
+/// Lets `uuremote-server show` find this host service to open its window (SIGUSR1).
+fn write_host_pid() {
+    use std::os::unix::fs::OpenOptionsExt;
+    use std::io::Write;
+    if let Ok(mut f) = std::fs::OpenOptions::new().write(true).create(true).truncate(true).mode(0o600).open(host_pid_path()) {
+        let _ = write!(f, "{}", std::process::id());
+    }
+}
+/// `uuremote-server show` (desktop launcher): open the running host's window, or start the host in the
+/// foreground with its window when none runs (e.g. no systemd unit installed yet).
+fn show_running_host() -> Result<(), Box<dyn std::error::Error>> {
+    let running = std::fs::read_to_string(host_pid_path()).ok().and_then(|s| s.trim().parse::<i32>().ok()).filter(|p| *p > 1)
+        .filter(|pid| {
+            let exe = std::fs::read_link(format!("/proc/{pid}/exe")).ok();
+            let own = std::env::current_exe().ok();
+            exe.is_some() && exe.as_ref().and_then(|p| p.file_name()) == own.as_ref().and_then(|p| p.file_name())
+        });
+    if let Some(pid) = running {
+        if unsafe { libc::kill(pid, libc::SIGUSR1) } == 0 { return Ok(()); }
+    }
+    use std::os::unix::process::CommandExt;
+    Err(Box::new(std::process::Command::new("/proc/self/exe").env("UU_SHOW_WINDOW", "1").exec()))
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
+    // Not signed in, with a desktop: one window offers remote assistance (guest identity) and the QR
+    // login together; signing in restarts the host in account mode (assistance continues there).
+    let unified = std::env::args().nth(1).is_none() && display_present()
+        && std::env::var("UU_REMOTE_ASSIST").ok().as_deref() != Some("0") && std::env::var("UU_LOGIN_WINDOW").ok().as_deref() != Some("0")
+        && config::read_fresh().ok().flatten().and_then(|c| c.get("token").and_then(|t| t.as_str()).map(|t| !t.is_empty())) != Some(true)
+        && ["UU_USER_ID", "UU_TOKEN", "UU_CSRF"].iter().all(|k| std::env::var_os(k).map_or(true, |v| v.is_empty()));
+    let assist_enabled = unified || std::env::args().nth(1).as_deref() == Some("assist")
+        || (std::env::args().nth(1).is_none() && std::env::var("UU_REMOTE_ASSIST").ok().as_deref() == Some("1"));
+    if assist_enabled {
+        // HTTP/WS dependency trace logging can expose Authorization or room headers.
+        env_logger::Builder::new().filter_level(log::LevelFilter::Off)
+            .filter_module("uuremote_server", log::LevelFilter::Info).init();
+    } else { env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init(); }
     // An unknown argument must never fall through to starting a second full host server.
-    const SUBCOMMANDS: [&str; 11] = ["desktop-input-probe", "virtual-audio-probe", "login", "unlock-check", "desktop-probe", "desktop-video-probe", "desktop-audio-probe", "wayland-capture",
+    const SUBCOMMANDS: [&str; 13] = ["show", "assist", "desktop-input-probe", "virtual-audio-probe", "login", "unlock-check", "desktop-probe", "desktop-video-probe", "desktop-audio-probe", "wayland-capture",
         "wayland-input-probe", "clipboard-acceptance", "portal-acceptance"];
     if let Some(arg) = std::env::args().nth(1).filter(|a| !SUBCOMMANDS.contains(&a.as_str())) {
         let usage = format!("usage: uuremote-server [{}]\n  (no argument: run the host)", SUBCOMMANDS.join(" | "));
         if matches!(arg.as_str(), "help" | "-h" | "--help") { println!("{usage}"); return Ok(()); }
-        eprintln!("unknown argument: {arg}\n{usage}");
+        eprintln!("unknown argument\n{usage}");
         std::process::exit(2);
+    }
+
+    if std::env::args().nth(1).as_deref() == Some("show") { return show_running_host(); }
+    if assist_enabled && !unified {
+        if std::env::args().len() > 2 { return Err("assist accepts no additional arguments; configure it with a private UU_CONFIG".into()); }
+        assist::configure()?;
     }
     if std::env::args().nth(1).as_deref() == Some("clipboard-acceptance") {
         return tokio::task::spawn_blocking(clipboard_probe::run).await?.map_err(Into::into);
@@ -261,7 +324,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let _audio_cleanup=virtual_audio::Cleanup;
     log::info!("Starting uu-remote-linux host v{}...", env!("CARGO_PKG_VERSION"));
 
-    let mut capture = Arc::new((if desktop_backend::headless() {
+    let capture = Arc::new((if desktop_backend::headless() {
         Err("headless mode (UU_DESKTOP_BACKEND=none)".to_owned())
     } else if desktop_backend::detect()?==desktop_backend::DesktopBackend::Portal
         && std::env::var("UU_PORTAL_PREAUTHORIZE").ok().as_deref()!=Some("1") {
@@ -274,34 +337,120 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     input.bind_portal(capture.portal.clone());
     input.release_held(); // recover stale input before accepting any peer
     let _pointer_worker = input.start_pointer_worker();
-    #[cfg(target_os="linux")]
-    {
-        let shutdown_input=input.clone();
+    let (shutdown_tx, mut shutdown) = tokio::sync::watch::channel(false);
+    let shutdown_input = input.clone();
+    let signal_tx = shutdown_tx.clone();
+    tokio::spawn(async move {
+        #[cfg(target_os="linux")]
+        {
+            let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).expect("SIGTERM handler");
+            tokio::select! { _ = term.recv() => {}, _ = tokio::signal::ctrl_c() => {} }
+        }
+        #[cfg(not(target_os="linux"))]
+        let _ = tokio::signal::ctrl_c().await;
+        if !assist_enabled { shutdown_input.shutdown(); virtual_audio::disable(); terminal::shutdown_all(); std::process::exit(0); }
+        let _ = signal_tx.send(true);
+    });
+    let mut assist = if assist_enabled { Some(assist::Assist::start(&mut shutdown, unified).await?) } else { None };
+    if let Some(session) = assist.as_ref().filter(|_| unified) {
+        present_on_usr1(session.ui());
+        let login_done = shutdown_tx.clone();
         tokio::spawn(async move {
-            if let Ok(mut term)=tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
-                tokio::select! { _=term.recv()=>{}, _=tokio::signal::ctrl_c()=>{} }
-                shutdown_input.shutdown(); virtual_audio::disable(); terminal::shutdown_all(); std::process::exit(0);
+            let ui = login_ui::LoginUi::attached();
+            loop {
+                match login::flow(&ui).await {
+                    Ok(_) => { RESTART.store(true, std::sync::atomic::Ordering::SeqCst); let _ = login_done.send(true); return; }
+                    Err(error) => { log::warn!("QR login failed: {error}; retrying"); tokio::time::sleep(std::time::Duration::from_secs(5)).await; }
+                }
             }
         });
     }
-    let creds = match config::file().and_then(Credentials::load) {
-        Ok(creds) => creds,
-        Err(e) => {
-            log::warn!("Not logged in: {e} ({} or UU_* environment variables)", config::path().display());
-            login::wait_for_credentials(None).await
-        }
+    let webrtc_sessions: Arc<Mutex<HashMap<String, WebRtcSession>>> = Arc::new(Mutex::new(HashMap::new()));
+    let (mut commands, command_task) = match assist.as_ref() {
+        Some(s) => { let (rx, task) = s.commands(shutdown_tx); (rx, Some(task)) },
+        None => (tokio::sync::mpsc::channel(1).1, None),
     };
-    let mut auth = Arc::new(UUAuthClient::new(creds));
+    let mut immediate_shutdown = shutdown.clone();
+    let result = tokio::select! {
+        result = serve(capture, input.clone(), &mut shutdown, &mut assist, &mut commands, webrtc_sessions.clone()) => result,
+        _ = immediate_shutdown.changed() => Ok(()),
+    };
+    if let Some(task) = command_task { task.abort(); }
+    // One exit path for commands, signals, transport failures and UI failures.
+    if let Some(session) = assist.as_mut() { session.allowed = false; }
+    for (_, old) in webrtc_sessions.lock().await.drain() { let _ = old.pc.close().await; }
+    virtual_audio::disable(); input.shutdown(); terminal::shutdown_all();
+    // Switching identity (signed in / out) restarts at once and the new identity republishes the same
+    // device share: logout already withdrew it, and after a QR login the cloud moved it to the account
+    // (a guest cancel then fails). Only a real stop withdraws here.
+    let switching = RESTART.load(std::sync::atomic::Ordering::SeqCst);
+    let revoke = match assist.as_mut() { Some(s) if !switching => s.cancel().await, _ => Ok(()) };
+    if revoke.is_err() { log::error!("Cloud assistance revocation failed; host is closed locally"); }
+    result?;
+    if RESTART.load(std::sync::atomic::Ordering::SeqCst) { restart_host(); }
+    revoke.map_err(|_| "assist disabled locally, but cloud cancel failed; cloud revocation is unverified")?;
+    Ok(())
+}
+
+async fn serve(mut capture: Arc<ScreenCapture>, input: Arc<InputInjector>, shutdown: &mut tokio::sync::watch::Receiver<bool>,
+    assist: &mut Option<assist::Assist>, commands: &mut mpsc::Receiver<assist::Command>, webrtc_sessions: Arc<Mutex<HashMap<String, WebRtcSession>>>) -> Result<(), Box<dyn std::error::Error>> {
+    let mut auth = if let Some(session) = assist.as_ref() { session.client.clone() } else {
+        let creds = match config::file().and_then(Credentials::load) {
+            Ok(creds) => creds,
+            Err(e) => {
+                log::warn!("Not logged in: {e} ({} or UU_* environment variables)", config::path().display());
+                login::wait_for_credentials(None).await
+            }
+        };
+        let client = Arc::new(UUAuthClient::new(creds.clone()));
+        // Logged-in host: remote assistance (ID + code) alongside the device list, like the official
+        // client. Shown in a hidden window opened with `uuremote-server show`; UU_REMOTE_ASSIST=0 disables.
+        if std::env::var("UU_REMOTE_ASSIST").ok().as_deref() != Some("0") {
+            match assist::Assist::start_account(client.clone(), creds) {
+                Ok(session) => {
+                    let (rx, _task) = session.commands(tokio::sync::watch::channel(false).0);
+                    *commands = rx;
+                    session.load_account_name().await;
+                    present_on_usr1(session.ui());
+                    if std::env::var("UU_SHOW_WINDOW").ok().as_deref() == Some("1") { session.ui().present(); }
+                    std::env::remove_var("UU_SHOW_WINDOW");
+                    log::info!("Remote assistance ready on the logged-in host (window: uuremote-server show)");
+                    *assist = Some(session);
+                }
+                Err(error) => log::info!("Remote assistance unavailable on this host: {error}"),
+            }
+        }
+        client
+    };
 
     // One peer per viewer connection (desktop, file transfer, terminal...), keyed by ice_id.
-    let webrtc_sessions: Arc<Mutex<HashMap<String, WebRtcSession>>> = Arc::new(Mutex::new(HashMap::new()));
     let mut next_capture_type: Option<(u64,crate::session_ice::SessionIce)> = None;
     let mut capture_types: HashMap<String, (u64,crate::session_ice::SessionIce)> = HashMap::new();
 
     loop {
+        if *shutdown.borrow() {
+            return Ok(());
+        }
         log::info!("Requesting fresh room credentials from NetEase cloud...");
-        let room_data = match auth.create_room().await {
-            Ok(data) => data,
+        let room_result = tokio::select! {
+            result = async {
+                match assist.as_mut() {
+                    Some(session) if !session.is_account() => {
+                        let result = session.room().await.map_err(auth::RoomError::Other);
+                        auth = session.client.clone(); result
+                    }
+                    _ => auth.create_room().await,
+                }
+            } => result,
+            _ = shutdown.changed() => return Ok(()),
+        };
+        let room_data = match room_result {
+            Ok(data) => {
+                if let Some(session) = assist.as_mut().filter(|s| s.is_account()) {
+                    if let Err(error) = session.ensure_published().await { log::warn!("Remote assistance share info failed: {error}"); }
+                }
+                data
+            }
             Err(auth::RoomError::LoginExpired) => {
                 // Like the official client: an expired token needs a new QR login, not retries.
                 log::error!("UU login is invalid or expired; a new QR login is required");
@@ -316,20 +465,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         };
 
-        log::info!(
-            "Acquired room signaling target: {}",
-            room_data.signaling_server
-        );
+        log::info!("Acquired room signaling credentials");
 
         let (tx_event, mut rx_event) = mpsc::channel::<SignalingEvent>(64);
         let tx_timer = tx_event.clone();
-        let signaling_client = match SignalingClient::connect(
-            &room_data.signaling_server,
-            &room_data.token,
-            tx_event,
-        )
-        .await
-        {
+        let connected = tokio::select! {
+            result = SignalingClient::connect(&room_data.signaling_server, &room_data.token, tx_event) => result,
+            _ = shutdown.changed() => return Ok(()),
+        };
+        let signaling_client = match connected {
             Ok(cli) => {
                 let renewal_peers=webrtc_sessions.clone();
                 tokio::spawn(async move {
@@ -351,27 +495,80 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 Arc::new(cli)
             }
             Err(e) => {
-                log::error!("Failed to connect signaling: {}. Retrying in 5s...", e);
+                let _ = e;
+                log::error!("Failed to connect signaling; retrying in 5s (details omitted)");
                 tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
                 continue;
             }
         };
 
-        // 事件处理主循环
-        while let Some(evt) = rx_event.recv().await {
+        // Guest display/control commands never use stdout, stderr or logs.
+        let mut assist_tick = tokio::time::interval(std::time::Duration::from_secs(1));
+        loop {
+            let event = tokio::select! {
+                biased;
+                _ = shutdown.changed() => Some(SignalingEvent::Stop),
+                command = commands.recv(), if assist.is_some() => Some(SignalingEvent::AssistCommand(command.unwrap_or(assist::Command::Stop))),
+                _ = assist_tick.tick(), if assist.is_some() => Some(SignalingEvent::AssistTick),
+                event = rx_event.recv() => event,
+            };
+            let Some(evt) = event else { break; };
             match evt {
+                SignalingEvent::Stop | SignalingEvent::AssistCommand(assist::Command::Stop) => {
+                    return Ok(());
+                }
+                SignalingEvent::AssistCommand(assist::Command::Allow) => { if let Some(s) = assist.as_mut() { s.allow()?; } }
+                SignalingEvent::AssistCommand(assist::Command::Deny) => { if let Some(s) = assist.as_mut() { s.deny()?; } }
+                SignalingEvent::AssistCommand(assist::Command::Verify(v)) => { if let Some(s) = assist.as_mut() { s.set_verify(v)?; } }
+                SignalingEvent::AssistCommand(assist::Command::Refresh(r)) => { if let Some(s) = assist.as_mut() { s.set_refresh(r)?; } }
+                SignalingEvent::AssistCommand(assist::Command::Custom(c)) => { if let Some(s) = assist.as_mut() { s.set_custom(c)?; } }
+                SignalingEvent::AssistCommand(assist::Command::Logout) => {
+                    if let Some(s) = assist.as_mut().filter(|s| s.is_account()) {
+                        s.logout().await;
+                        RESTART.store(true, std::sync::atomic::Ordering::SeqCst);
+                        return Ok(());
+                    }
+                }
+                SignalingEvent::AssistCommand(assist::Command::Reset) => { if let Some(s) = assist.as_mut() { s.reset()?; } }
+                SignalingEvent::AssistTick => {
+                    let mut sessions = webrtc_sessions.lock().await;
+                    let ended: Vec<_> = sessions.iter().filter(|(_, s)| matches!(s.pc.connection_state(),
+                        ::webrtc::peer_connection::peer_connection_state::RTCPeerConnectionState::Closed |
+                        ::webrtc::peer_connection::peer_connection_state::RTCPeerConnectionState::Failed)).map(|(id, _)| id.clone()).collect();
+                    let mut desktop_ended = false;
+                    for id in ended { if let Some(s) = sessions.remove(&id) { desktop_ended |= s.desktop; let _ = s.pc.close().await; } }
+                    if desktop_ended && !sessions.values().any(|s| s.desktop) { if let Some(s) = assist.as_mut() { s.session_ended()?; } }
+                    if let Some(s) = assist.as_mut() { s.tick()?; }
+                }
                 SignalingEvent::Connected => {
                     log::info!("Signaling handshake established.");
                 }
-                SignalingEvent::RoomInfoAck(val) => {
-                    log::info!(
-                        "RoomInfo acknowledged by NetEase server: room_id={}",
-                        val.get("room_id")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("unknown")
-                    );
-                }
+                SignalingEvent::RoomInfoAck(_) => { log::info!("RoomInfo acknowledged by NetEase server"); }
                 SignalingEvent::DeviceInfoChanged(val) => {
+                    if assist.is_some() {
+                        // Shape only (type value + key names), never field values: guest challenges carry salts/ids.
+                        let keys = |v: Option<&serde_json::Value>| v.and_then(|v| v.as_object()).map(|o| o.keys().cloned().collect::<Vec<_>>()).unwrap_or_default();
+                        log::debug!("Assist bmsg_push shape: type={:?} keys={:?} data_keys={:?}",
+                            val.get("type").and_then(serde_json::Value::as_str), keys(Some(&val)), keys(val.get("data")));
+                    }
+                    if val.get("type").and_then(serde_json::Value::as_str) == Some("get_control_mode") {
+                        if let Some(s) = assist.as_mut() {
+                            match s.control_mode(val.get("data").unwrap_or(&serde_json::Value::Null)).await {
+                                Ok(()) => log::info!("Assist control mode reported"),
+                                Err(error) => log::warn!("Assist control mode report failed: {error}"),
+                            }
+                        }
+                        continue;
+                    }
+                    if val.get("type").and_then(serde_json::Value::as_str) == Some("remote_control") {
+                        if let Some(s) = assist.as_mut() {
+                            if let Err(error) = s.challenge(val.get("data").unwrap_or(&serde_json::Value::Null)).await {
+                                log::warn!("Assist challenge failed: {error}");
+                            }
+                            if s.renewed { break; }
+                        }
+                        continue;
+                    }
                     log::info!(
                         "Device status synchronized: status={:?}, availability={:?}",
                         val.get("data")
@@ -394,18 +591,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
 
                 SignalingEvent::Soac(soac) => {
-                    log::info!(
-                        "SOAC signaling received: type={}, ice_id={:?}",
-                        soac.msg_type,
-                        soac.ice_id
-                    );
+                    log::info!("SOAC signaling received: offer={} candidate={}", soac.msg_type == "offer", soac.msg_type == "candidate");
+                    // Guest host: every peer is an assist peer. A logged-in host must keep serving its owner;
+                    // assist peers there are already gated by the cloud (allow_control / code check).
+                    if assist.as_ref().is_some_and(|s| !s.is_account() && !s.allowed) { continue; }
                     let ice = soac.ice_id.as_ref().map(|v| v.as_str().map(str::to_owned).unwrap_or_else(|| v.to_string())).unwrap_or_default();
                     let mut sessions = webrtc_sessions.lock().await;
                     // Drop peers that already ended.
                     let ended: Vec<String> = sessions.iter().filter(|(_, s)| matches!(s.pc.connection_state(),
                         ::webrtc::peer_connection::peer_connection_state::RTCPeerConnectionState::Closed |
                         ::webrtc::peer_connection::peer_connection_state::RTCPeerConnectionState::Failed)).map(|(k, _)| k.clone()).collect();
-                    for k in ended { if let Some(old) = sessions.remove(&k) { let _ = old.pc.close().await; } }
+                    let mut desktop_ended = false;
+                    for k in ended { if let Some(old) = sessions.remove(&k) { desktop_ended |= old.desktop; let _ = old.pc.close().await; } }
+                    if desktop_ended && !sessions.values().any(|s| s.desktop) { if let Some(s) = assist.as_mut() { s.session_ended()?; } }
+                    if let Some(s) = assist.as_mut() { s.tick()?; }
 
                     if soac.msg_type == "offer" {
                         let (capture_type,transport) = capture_types.remove(&ice).or_else(|| next_capture_type.take()).unwrap_or((1,crate::session_ice::SessionIce::default()));
@@ -439,7 +638,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         // current desktop's authorized Portal input session.
                         if desktop { input.bind_portal(session_capture.portal.clone()); }
                         match WebRtcSession::new(session_capture, input.clone(), signaling_client.clone(), desktop, transport).await {
-                            Ok(sess) => match sess.handle_offer(&soac).await {
+                            Ok(sess) => {
+                                // Register before awaiting SDP: shutdown can always close
+                                // a peer whose answer may already be queued to the viewer.
+                                sessions.insert(ice.clone(), sess);
+                                let offer = sessions.get(&ice).expect("registered peer").handle_offer(&soac).await;
+                                match offer {
                                 Ok(answer_sdp) => {
                                     log::info!("Local SDP Answer generated, emitting soac response...");
                                     let resp = SoacMessage {
@@ -454,15 +658,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         app_control_id: soac.app_control_id.clone(),
                                     };
                                     if let Err(e) = signaling_client.emit_soac(resp).await { log::error!("Answer signaling send failed: {}", e); }
-                                    sessions.insert(ice, sess);
                                 }
-                                Err(e) => { log::error!("Failed to handle offer: {}", e); let _ = sess.pc.close().await; }
-                            },
-                            Err(e) => log::error!("Create peer failed: {}", e),
+                                Err(_) => {
+                                    log::error!("Failed to handle offer (details omitted)");
+                                    if let Some(session) = sessions.remove(&ice) { let _ = session.pc.close().await; }
+                                }
+                            }},
+                            Err(_) => log::error!("Create peer failed (details omitted)"),
                         }
                     } else if soac.msg_type == "candidate" {
                         if let Some(sess) = sessions.get(&ice) {
-                            if let Err(e) = sess.add_candidate(&soac).await { log::error!("Remote ICE candidate failed: {}", e); }
+                            if let Err(e) = sess.add_candidate(&soac).await { let _ = e; log::error!("Remote ICE candidate failed (details omitted)"); }
                         } else {
                             log::warn!("Remote ICE candidate for unknown connection");
                         }
@@ -478,11 +684,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         _ => sessions.keys().cloned().collect(),
                     };
                     log::info!("Remote controller disconnected: keys={:?} ice_matched={} closing={}", keys, ice.as_ref().is_some_and(|i| sessions.contains_key(i)), targets.len());
+                    let mut desktop_ended = false;
                     for k in targets {
                         if let Some(old) = sessions.remove(&k) {
+                            desktop_ended |= old.desktop;
                             if let Err(e) = old.pc.close().await { log::warn!("Close released peer failed: {}", e); }
                         }
                     }
+                    if desktop_ended && !sessions.values().any(|s| s.desktop) { if let Some(s) = assist.as_mut() { s.session_ended()?; } }
+                    if let Some(s) = assist.as_mut() { s.tick()?; }
                 }
                 SignalingEvent::Disconnected => {
                     capture_types.clear();

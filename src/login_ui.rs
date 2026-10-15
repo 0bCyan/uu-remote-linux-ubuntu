@@ -15,13 +15,13 @@ extern "C" {
 #[derive(Clone, Copy)]
 pub enum Tone { Info = 0, Ok = 1, Error = 2 }
 
-pub struct LoginUi { shown: bool }
+pub struct LoginUi { shown: bool, attached: bool }
 
 #[cfg(uu_gtk)]
 fn cstr(s: &str) -> std::ffi::CString { std::ffi::CString::new(s.replace('\0', "")).unwrap_or_default() }
 
 impl LoginUi {
-    pub fn none() -> Self { LoginUi { shown: false } }
+    pub fn none() -> Self { LoginUi { shown: false, attached: false } }
 
     /// Opens the window when built with GTK and a display is present; falls back silently otherwise.
     #[allow(unused_variables)]
@@ -30,13 +30,23 @@ impl LoginUi {
         if std::env::var_os("DISPLAY").is_some() || std::env::var_os("WAYLAND_DISPLAY").is_some() {
             let (n, o, c, g) = (cstr(name), cstr(os), cstr(cpu), cstr(gpu));
             if unsafe { uu_login_ui_start(n.as_ptr(), o.as_ptr(), c.as_ptr(), g.as_ptr()) } == 0 {
-                return LoginUi { shown: true };
+                return LoginUi { shown: true, attached: false };
             }
             eprintln!("Login window unavailable; using the terminal QR code");
         }
         LoginUi::none()
     }
 
+    /// Account card of the host's own main window (already open): the QR stays in the window only
+    /// (a service's stdout is the journal and the QR URL is a login ticket), and dropping this
+    /// handle never closes the shared window.
+    pub fn attached() -> Self {
+        #[cfg(uu_gtk)]
+        { unsafe { uu_login_ui_start(std::ptr::null(), std::ptr::null(), std::ptr::null(), std::ptr::null()) }; LoginUi { shown: true, attached: true } }
+        #[cfg(not(uu_gtk))]
+        LoginUi { shown: false, attached: true }
+    }
+    pub fn quiet(&self) -> bool { self.attached }
     pub fn shown(&self) -> bool { self.shown }
 
     #[allow(unused_variables)]
@@ -73,6 +83,6 @@ impl LoginUi {
 impl Drop for LoginUi {
     fn drop(&mut self) {
         #[cfg(uu_gtk)]
-        if self.shown { unsafe { uu_login_ui_close() } }
+        if self.shown && !self.attached { unsafe { uu_login_ui_close() } }
     }
 }

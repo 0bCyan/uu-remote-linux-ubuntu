@@ -839,7 +839,7 @@ impl WebRtcSession {
             ctx.client_id = soac.client_id.clone();
             ctx.ice_id = soac.ice_id.clone();
             ctx.app_control_id = soac.app_control_id.clone();
-            log::info!("Updated WebRTC session context: client_id={:?}, ice_id={:?}", ctx.client_id, ctx.ice_id);
+            log::info!("Updated WebRTC session context: client_id_present={} ice_id_present={}", ctx.client_id.is_some(), ctx.ice_id.is_some());
         }
         let mut sdp_str = soac.sdp.clone().unwrap_or_default();
         if sdp_str.is_empty() {

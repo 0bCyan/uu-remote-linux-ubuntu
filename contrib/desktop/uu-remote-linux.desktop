@@ -1,0 +1,13 @@
+[Desktop Entry]
+Type=Application
+Name=UU 远程 Linux 主机
+Name[en]=UU Remote Linux Host
+GenericName=Remote assistance host
+Comment=非官方 UU 远程被控端：远程协助与扫码登录
+Comment[en]=Unofficial NetEase UU Remote host: remote assistance and QR sign-in
+Exec=uuremote-server show
+Icon=uu-remote-linux
+Terminal=false
+Categories=Network;RemoteAccess;
+Keywords=remote;assist;UU;远程;协助;
+StartupNotify=false

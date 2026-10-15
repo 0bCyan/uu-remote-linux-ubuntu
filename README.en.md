@@ -31,7 +31,8 @@
 
 | Feature | Notes |
 |---|---|
-| QR login | GTK login window (or a terminal QR code with `login --no-gui`); expired codes refresh automatically; the service opens the login window by itself when credentials are missing or expired |
+| Main window and QR login | One window with "This device" (remote assistance) and "Account": a QR code before sign-in, the account and a sign-out button after; `login --no-gui` prints the QR in a terminal |
+| Remote assistance (experimental) | Like the official client: share the **device ID + verification code**; the other person enters them under 开始协助 in UU Remote. Works before sign-in (guest identity) and after; see below |
 | Remote desktop | H.264 video, NVENC hardware encoding on NVIDIA GPUs, libx264 otherwise; the viewer draws its local pointer, so there is no double cursor |
 | Mouse / keyboard | Absolute and relative motion, clicks, wheel, keys; no spurious key repeat on high-latency links; optional uinput virtual devices on Wayland (layout independent, see below) |
 | Terminal shortcuts | Mac viewers send both Cmd and Ctrl as Ctrl. In a focused terminal window Ctrl+V / Cmd+V become Ctrl+Shift+V (paste); Ctrl+C always interrupts, copy with Cmd+Shift+C (X11) |
@@ -180,6 +181,34 @@ sudo udevadm control --reload && sudo udevadm trigger --name-match=uinput
 `uaccess` grants access only to the user sitting at the machine. `UU_INPUT_BACKEND=uinput|native` forces a backend.
 X11 keeps XTest by default because it handles held keys correctly on high-latency links.
 
+## Remote assistance and the main window (experimental)
+
+As in the official client, this host shows a **device ID** and a **verification code**; whoever you give them to can
+connect from 开始协助 (remote assistance) in UU Remote.
+
+- **Not signed in**: the main window opens at start, offers remote assistance as a guest and shows the sign-in QR code.
+  Signing in switches to account mode automatically.
+- **Signed in**: the host is in your device list and remote assistance keeps working (same device ID). A background
+  service keeps the window hidden; open it with `uuremote-server show` or the "UU Remote Linux Host" launcher.
+  Closing the window only hides it.
+- **Settings** (as in the official client): allow switch (off by default); verification by temporary code, custom code
+  (8–16 letters and digits) or either; temporary code rotation after each session / hourly / 12 h / 24 h / never;
+  copy buttons for the ID and the code. Stored in the 0600 config.
+- The code is only shown in the local window, never logged. Without a desktop, `uuremote-server assist` shows it on the
+  terminal (`allow` / `deny` / `reset` / `mode …` / `refresh …` / `off`).
+- **Security**: the ID and code give full control (desktop, files, terminal). Share them only with people you trust.
+
+Optional launcher icon:
+
+```sh
+install -Dm644 contrib/desktop/uu-remote-linux.svg ~/.local/share/icons/hicolor/scalable/apps/uu-remote-linux.svg
+install -Dm644 contrib/desktop/uu-remote-linux.desktop ~/.local/share/applications/uu-remote-linux.desktop
+```
+
+Verified with the official Mac viewer: guest connections, wrong-code rejection, code rotation, switching assistance off,
+signing in and out. **Remote assistance while signed in has not yet been tested from a different account** (devices of
+the same account cannot assist each other, an official restriction).
+
 ## Servers without a monitor
 
 **Headless mode** (terminal, file transfer and port mapping only): add `Environment=UU_DESKTOP_BACKEND=none` to the
@@ -220,6 +249,8 @@ Common environment variables:
 | `UU_VIDEO_ENCODER` | `cpu`: libx264; `vaapi`: opt-in Intel/AMD; `nvenc`: force NVENC; unset: NVENC only when an NVIDIA driver is loaded, else CPU |
 | `UU_FFMPEG_ROOT` | Use FFmpeg from this prefix |
 | `UU_AUDIO=0` | Disable sound; `UU_AUDIO_SOURCE` picks the PulseAudio source |
+| `UU_REMOTE_ASSIST=0` | Disable remote assistance (no guest assistance before sign-in either) |
+| `UU_ASSIST_ALLOW=1` | Allow remote assistance at start (overrides the saved switch) |
 | `UU_LOGIN_WINDOW=0` | Do not open the login window automatically when credentials are missing |
 | `UU_PORT_MAPPING=0` | Disable port mapping (the official host's controlled-side switch) |
 

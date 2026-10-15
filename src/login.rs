@@ -143,7 +143,7 @@ fn qr_rgba(content: &str, scale: usize, quiet: usize) -> Result<(Vec<u8>, usize)
     Ok((rgba, edge))
 }
 
-fn write_config(cfg: &Value) -> Result<std::path::PathBuf, String> {
+pub(crate) fn write_config(cfg: &Value) -> Result<std::path::PathBuf, String> {
     use std::io::Write;
     use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
     let path = crate::config::path();
@@ -227,8 +227,8 @@ pub async fn run(gui: bool) -> Result<(), String> {
     result.map(|_| ())
 }
 
-/// Returns the account nickname (or user id) on success.
-async fn flow(ui: &LoginUi) -> Result<String, String> {
+/// Local installation identifiers only; guest creation does not require device/init.
+pub fn prepare_identity() -> Result<(Value, Credentials), String> {
     let mut cfg = crate::config::file()?.cloned().unwrap_or_else(|| json!({}));
     let get = |cfg: &Value, k: &str| std::env::var(format!("UU_{}", k.to_uppercase())).ok().filter(|v| !v.is_empty())
         .or_else(|| cfg.get(k).and_then(|v| v.as_str()).map(str::to_owned)).unwrap_or_default();
@@ -237,8 +237,16 @@ async fn flow(ui: &LoginUi) -> Result<String, String> {
     for (key, make) in [("client_id", random_uuid as fn() -> String), ("system_id", || random_uuid().to_uppercase()), ("machine_guid", machine_guid)] {
         if get(&cfg, key).is_empty() { cfg[key] = json!(make()); }
     }
-    let mut creds = Credentials { client_id: get(&cfg, "client_id"), system_id: get(&cfg, "system_id"), sign_key, ..Default::default() };
+    let creds = Credentials { client_id: get(&cfg, "client_id"), system_id: get(&cfg, "system_id"), device_id: get(&cfg, "device_id"), sign_key, ..Default::default() };
 
+    write_config(&cfg)?;
+    Ok((cfg, creds))
+}
+
+pub async fn prepare_device() -> Result<(Value, Credentials), String> {
+    let (mut cfg, mut creds) = prepare_identity()?;
+    let get = |cfg: &Value, k: &str| std::env::var(format!("UU_{}", k.to_uppercase())).ok().filter(|v| !v.is_empty())
+        .or_else(|| cfg.get(k).and_then(|v| v.as_str()).map(str::to_owned)).unwrap_or_default();
     if get(&cfg, "device_id").is_empty() {
         let body = json!({
             "name": hostname(), "client_id": creds.client_id, "system_id": creds.system_id, "machine_guid": get(&cfg, "machine_guid"),
@@ -248,11 +256,17 @@ async fn flow(ui: &LoginUi) -> Result<String, String> {
         let (status, resp) = UUAuthClient::new(creds.clone()).post_json("/api/v1/device/windows/init", &body).await?;
         let d = data("device init", status, &resp)?;
         let id = d.get("device_id").and_then(|v| v.as_str()).ok_or("device init returned no device_id")?;
-        println!("Registered device: name={} id={}", d.get("alias").and_then(|v| v.as_str()).unwrap_or(""), id);
+        log::info!("Registered local device identity");
         cfg["device_id"] = json!(id);
         write_config(&cfg)?; // keep the device even if the QR step is abandoned
     }
     creds.device_id = get(&cfg, "device_id");
+    Ok((cfg, creds))
+}
+
+/// Returns the account nickname (or user id) on success.
+pub(crate) async fn flow(ui: &LoginUi) -> Result<String, String> {
+    let (mut cfg, creds) = prepare_device().await?;
     let client = UUAuthClient::new(creds.clone());
 
     loop {
@@ -274,7 +288,7 @@ async fn flow(ui: &LoginUi) -> Result<String, String> {
             let mut file=std::fs::OpenOptions::new().write(true).create(true).truncate(true).mode(0o600).open(path).map_err(|e|e.to_string())?;
             file.write_all(&crate::cursor::encode_png(edge as u32,edge as u32,&rgba)).map_err(|e|e.to_string())?;
         }
-        println!("\nScan with the UU Remote mobile app (网易UU远程 App 扫码登录):\n{}", render_qr(&url)?);
+        if !ui.quiet() { println!("\nScan with the UU Remote mobile app (网易UU远程 App 扫码登录):\n{}", render_qr(&url)?); }
         // Status is a long poll: send the state already shown (server enum 1..4; observed:
         // 1 waiting, 2 scanned, 4 after the phone confirmed); the server answers when it changes.
         let mut login_status = 1i64;
@@ -315,8 +329,13 @@ async fn flow(ui: &LoginUi) -> Result<String, String> {
                     cfg["token"] = json!(token);
                     cfg["user_id"] = json!(user);
                     cfg["csrf"] = json!(csrf_from_token(token).ok_or("token carries no csrf claim")?);
-                    let path = write_config(&cfg)?;
                     let nickname = d.get("nickname").and_then(|v| v.as_str()).unwrap_or("");
+                    if !nickname.is_empty() { cfg["account_name"] = json!(nickname); }
+                    // Keep settings saved meanwhile (e.g. from the assist card): merge into the fresh file.
+                    if let Ok(Some(Value::Object(fresh))) = crate::config::read_fresh() {
+                        for (k, v) in fresh { if cfg.get(&k).is_none() { cfg[k] = v; } }
+                    }
+                    let path = write_config(&cfg)?;
                     println!("Logged in as {} ({}); saved to {}", nickname, user, path.display());
                     return Ok(if nickname.is_empty() { user.to_string() } else { nickname.to_string() });
                 }

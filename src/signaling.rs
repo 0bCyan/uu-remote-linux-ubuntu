@@ -32,6 +32,9 @@ pub struct SoacMessage {
 }
 
 pub enum SignalingEvent {
+    Stop,
+    AssistCommand(crate::assist::Command),
+    AssistTick,
     Connected,
     RoomInfoAck(Value),
     DeviceInfoChanged(Value),
@@ -119,7 +122,7 @@ impl SignalingClient {
             .await
             .map_err(|e| format!("WS connect failed: {}", e))?;
 
-        log::info!("Connected to Engine.IO / Socket.IO at {}", ws_url);
+        log::info!("Connected to Engine.IO / Socket.IO");
         let (mut write, mut read) = ws_stream.split();
         let (tx_outgoing, mut rx_outgoing) = mpsc::channel::<String>(32);
 
@@ -127,7 +130,8 @@ impl SignalingClient {
         let writer=tokio::spawn(async move {
             while let Some(msg) = rx_outgoing.recv().await {
                 if let Err(e) = write.send(Message::Text(msg)).await {
-                    log::warn!("WS send error: {}", e);
+                    let _ = e;
+                    log::warn!("WS send failed (details omitted)");
                     break;
                 }
             }
@@ -267,7 +271,8 @@ impl SignalingClient {
                                                         .await;
                                                 }
                                                 Err(e) => {
-                                                    log::error!("Failed to deserialize SoacMessage: error={}, raw={}", e, data);
+                                                    let _ = e;
+                                                    log::error!("Failed to deserialize SoacMessage (payload omitted)");
                                                 }
                                             }
                                         }

@@ -73,7 +73,7 @@ pub struct ApiResponse<T> {
     pub data: Option<T>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Clone, Deserialize)]
 pub struct RoomData {
     pub signaling_server: String,
     pub token: String,
@@ -81,9 +81,14 @@ pub struct RoomData {
     pub ws_connect_timeout_ms: Option<u64>,
 }
 
+impl std::fmt::Debug for RoomData {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { f.write_str("RoomData { .. }") }
+}
+
 pub struct UUAuthClient {
     pub creds: Credentials,
     http: reqwest::Client,
+    guest_id: Option<String>,
 }
 
 impl UUAuthClient {
@@ -92,7 +97,16 @@ impl UUAuthClient {
             .timeout(std::time::Duration::from_secs(12))
             .build()
             .unwrap();
-        Self { creds, http }
+        Self { creds, http, guest_id: None }
+    }
+
+    /// Explicit guest identity: never inherits account Authorization/cookies.
+    /// Official ApiDefaultHeaders 0x1003853ac/0x1003853f8 (see assist evidence).
+    pub fn new_guest(mut device: Credentials, guest_id: String, token: String) -> Self {
+        device.user_id.clear(); device.csrf.clear(); device.token = token;
+        let mut client = Self::new(device);
+        client.guest_id = Some(guest_id);
+        client
     }
 
     /// 计算网易 NRD HMAC-SHA256 签名
@@ -147,6 +161,7 @@ impl UUAuthClient {
             ("x-param-system-id", &self.creds.system_id), ("x-param-user-id", &self.creds.user_id)] {
             if !value.is_empty() { param_map.insert(key.into(), value.clone()); }
         }
+        if let Some(id) = &self.guest_id { param_map.insert("x-param-guest-id".into(), id.clone()); }
         param_map.insert("x-param-ts".into(), ts);
 
         let sign = self.sign_request(method, path, &param_map, body_str);
@@ -160,10 +175,12 @@ impl UUAuthClient {
         );
         if !self.creds.token.is_empty() {
             if let Ok(v) = HeaderValue::from_str(&format!("Bearer {}", self.creds.token)) { headers.insert("Authorization", v); }
-            if let Ok(v) = HeaderValue::from_str(&format!("nrd_access_token={}; nrd_csrf_access_token={}", self.creds.token, self.creds.csrf)) {
-                headers.insert("Cookie", v);
+            if self.guest_id.is_none() {
+                if let Ok(v) = HeaderValue::from_str(&format!("nrd_access_token={}; nrd_csrf_access_token={}", self.creds.token, self.creds.csrf)) {
+                    headers.insert("Cookie", v);
+                }
+                if let Ok(v) = HeaderValue::from_str(&self.creds.csrf) { headers.insert("X-CSRF-TOKEN", v); }
             }
-            if let Ok(v) = HeaderValue::from_str(&self.creds.csrf) { headers.insert("X-CSRF-TOKEN", v); }
         }
 
         for (k, v) in param_map {
@@ -187,6 +204,34 @@ impl UUAuthClient {
         let status = resp.status().as_u16();
         let value = resp.json().await.unwrap_or(serde_json::Value::Null);
         Ok((status, value))
+    }
+
+    /// Guest APIs use requestPlain for empty requests; sign the actual empty body.
+    /// Errors intentionally exclude response text and URL (both can contain secrets).
+    pub async fn assist_post(&self, path: &str, body: Option<&serde_json::Value>) -> Result<(u16, serde_json::Value), String> {
+        self.assist_send(self.assist_request(path, body)?).await
+    }
+    /// Account share info is a GET (POST answers 405, verified live).
+    pub async fn assist_get(&self, path: &str) -> Result<(u16, serde_json::Value), String> {
+        let request = self.http.get(format!("{BASE_URL}{path}")).headers(self.build_headers("GET", path, "")).build()
+            .map_err(|_| "assist request construction failed")?;
+        self.assist_send(request).await
+    }
+    async fn assist_send(&self, request: reqwest::Request) -> Result<(u16, serde_json::Value), String> {
+        let response = self.http.execute(request)
+            .await.map_err(|_| "assist request transport failed")?;
+        let status = response.status().as_u16();
+        let bytes = response.bytes().await.map_err(|_| "assist response read failed")?;
+        if bytes.len() > 65536 { return Err("assist response too large".into()); }
+        let value = serde_json::from_slice(&bytes).map_err(|_| "assist response malformed")?;
+        Ok((status, value))
+    }
+
+    fn assist_request(&self, path: &str, body: Option<&serde_json::Value>) -> Result<reqwest::Request, String> {
+        let body = body.map(serde_json::to_string).transpose().map_err(|_| "assist request encoding failed")?.unwrap_or_default();
+        self.http.post(format!("{BASE_URL}{path}"))
+            .headers(self.build_headers("POST", path, &body)).body(body).build()
+            .map_err(|_| "assist request construction failed".into())
     }
 
     /// 向网易服务器请求创建房间，获取最新的信令服务器与鉴权 Token
@@ -229,5 +274,40 @@ mod room_lifetime_tests {
         assert_eq!(room_token_lifetime(&format!("h.{payload}.s"),1000),Some(1200));
         assert_eq!(room_token_lifetime("opaque",1000),None);
         assert_eq!(room_token_lifetime("h.invalid.s",1000),None);
+    }
+}
+
+#[cfg(test)]
+mod guest_tests {
+    use super::*;
+    #[test]
+    fn official_request_plain_body_and_sanitized_room_debug() {
+        let client = UUAuthClient::new_guest(Credentials { sign_key: "fixture-key".into(), ..Default::default() },
+            "fixture-guest".into(), "fixture-token".into());
+        let request = client.assist_request("/api/v1/guest/create", None).unwrap();
+        assert_eq!(request.method(), reqwest::Method::POST);
+        assert_eq!(request.body().unwrap().as_bytes(), Some(&b""[..]));
+        let other = client.assist_request("/api/v1/guest/create", Some(&serde_json::json!({}))).unwrap();
+        assert_eq!(other.body().unwrap().as_bytes(), Some(&b"{}"[..]));
+        assert_ne!(request.headers()["x-param-sign"], other.headers()["x-param-sign"]);
+        let room: RoomData = serde_json::from_value(serde_json::json!({"signaling_server":"wss://fixture.invalid", "token":"synthetic-room-secret"})).unwrap();
+        assert!(!format!("{room:?}").contains("synthetic-room-secret"));
+        assert!(serde_json::from_value::<RoomData>(serde_json::json!({"token":42})).is_err());
+    }
+    #[test]
+    fn guest_signs_guest_id_and_never_inherits_account_identity() {
+        let account = Credentials { user_id: "fixture-account".into(), token: "fixture-account-token".into(),
+            csrf: "fixture-account-csrf".into(), client_id: "fixture-client".into(),
+            device_id: "fixture-device".into(), sign_key: "fixture-sign-key".into(), ..Default::default() };
+        let client = UUAuthClient::new_guest(account, "fixture-guest".into(), "fixture-guest-token".into());
+        let headers = client.build_headers("POST", "/api/v1/guest/room/create", "");
+        assert_eq!(headers["authorization"], "Bearer fixture-guest-token");
+        assert_eq!(headers["x-param-guest-id"], "fixture-guest");
+        for key in ["x-param-user-id", "cookie", "x-csrf-token"] { assert!(!headers.contains_key(key)); }
+        let params: BTreeMap<String,String> = headers.iter().filter_map(|(key, value)|
+            key.as_str().starts_with("x-param-").then(|| (key.to_string(), value.to_str().unwrap().to_owned()))).collect();
+        assert_eq!(headers["x-param-sign"], client.sign_request("POST", "/api/v1/guest/room/create", &params, ""));
+        let mut without_guest = params; without_guest.remove("x-param-guest-id");
+        assert_ne!(headers["x-param-sign"], client.sign_request("POST", "/api/v1/guest/room/create", &without_guest, ""));
     }
 }

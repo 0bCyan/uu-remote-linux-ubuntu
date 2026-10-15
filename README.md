@@ -27,7 +27,8 @@
 
 | 功能 | 说明 |
 |---|---|
-| 扫码登录 | GTK 登录窗口（或 `login --no-gui` 终端二维码）；二维码过期自动刷新；登录凭证失效时服务会自动弹出登录窗口 |
+| 主窗口与扫码登录 | 一个窗口包含「本设备」（远程协助）和「账号」两部分：未登录时显示扫码二维码，登录后显示账号并可退出登录；也可用 `login --no-gui` 在终端扫码 |
+| 远程协助（实验性） | 像官方客户端一样，把**设备 ID + 验证码**发给别人，对方在 UU「开始协助」里输入即可连接；登录前（访客身份）和登录后都能用，见下文 |
 | 远程桌面 | H.264 视频，NVIDIA 显卡用 NVENC 硬件编码，否则用 libx264；查看端绘制本地鼠标，不会出现双光标 |
 | 鼠标 / 键盘 | 绝对/相对移动、点击、滚轮、按键；修复了网络延迟导致的按键连发；Wayland 下可用 uinput 虚拟键鼠（不依赖键盘布局，见下文） |
 | 终端快捷键 | Mac 控制端的 Cmd 和 Ctrl 到被控端都是 Ctrl。焦点在终端窗口时，Ctrl+V / Cmd+V 自动转成 Ctrl+Shift+V 粘贴；Ctrl+C 始终是中断，复制请用 Cmd+Shift+C（X11） |
@@ -164,6 +165,26 @@ sudo udevadm control --reload && sudo udevadm trigger --name-match=uinput
 `uaccess` 只把权限给当前坐在这台机器前的登录用户。`UU_INPUT_BACKEND=uinput|native` 可以强制指定后端。
 X11 默认继续用 XTest，因为它能正确处理网络延迟下按住不放的按键。
 
+## 远程协助与主窗口（实验性）
+
+和官方客户端的「远程协助」一样：本机显示**设备 ID** 和**验证码**，把它们发给信任的人，对方在 UU 远程的「开始协助」里输入即可控制本机。
+
+- **未登录**：启动后直接显示主窗口，用访客身份提供远程协助，同时显示扫码登录二维码。扫码登录后自动切换到账号模式。
+- **已登录**：本机出现在你的设备列表里，可以直接连；远程协助也照常可用（同一设备 ID）。服务在后台运行时窗口默认隐藏，用 `uuremote-server show` 或应用菜单里的「UU 远程 Linux 主机」打开。关闭窗口只是隐藏，不会停止服务。
+- **设置**（与官方一致）：「允许他人远程协助」开关（默认关闭）；验证方式：仅临时验证码 / 仅自定义验证码（8–16 位，需同时包含字母和数字） / 两种都可以；临时验证码自动刷新：每次远控结束 / 每小时 / 每 12 小时 / 每 24 小时 / 不刷新；ID 和验证码旁各有「复制」按钮。设置保存在本机配置文件（0600）。
+- **只在本机窗口显示**：验证码不会写进日志。没有图形界面时，单独运行 `uuremote-server assist` 会在终端显示（`allow` / `deny` / `reset` / `mode …` / `refresh …` / `off`）。
+- **安全**：拿到 ID 和验证码的人可以完全控制这台电脑（桌面、文件、终端）。只发给信任的人，用完关掉开关或刷新验证码。
+
+安装应用菜单图标（可选）：
+
+```sh
+install -Dm644 contrib/desktop/uu-remote-linux.svg ~/.local/share/icons/hicolor/scalable/apps/uu-remote-linux.svg
+install -Dm644 contrib/desktop/uu-remote-linux.desktop ~/.local/share/applications/uu-remote-linux.desktop
+```
+
+验证情况：访客身份下的连接、错误验证码拒绝、用完换码、关闭后不可连接、登录与退出登录的切换，已用官方 Mac 客户端实测通过。
+**登录状态下的远程协助尚未用另一个账号实测**（同一账号的设备不能互相发起远程协助，这是官方限制）。
+
 ## 没有显示器的服务器
 
 **无头模式**：只要终端、文件传输和端口映射，不需要图形界面。在服务里加 `Environment=UU_DESKTOP_BACKEND=none`，
@@ -203,6 +224,8 @@ systemctl --user restart uuremote-native.service
 | `UU_FFMPEG_ROOT` | 使用指定目录下的 FFmpeg |
 | `UU_AUDIO=0` | 关闭声音转发；`UU_AUDIO_SOURCE` 指定 PulseAudio 采集源 |
 | `UU_LOGIN_WINDOW=0` | 凭证缺失时不自动弹出登录窗口 |
+| `UU_REMOTE_ASSIST=0` | 关闭远程协助（未登录时也不再以访客身份提供协助） |
+| `UU_ASSIST_ALLOW=1` | 启动时就允许他人远程协助（覆盖窗口里保存的开关状态） |
 | `UU_PORT_MAPPING=0` | 关闭端口映射（对应官方被控端的开关） |
 
 「远程结束后自动锁屏」「静音运行」等设置保存在 `~/.config/uuremote/host_settings.json`。

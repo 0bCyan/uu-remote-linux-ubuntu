@@ -112,6 +112,7 @@ viewer does not reconnect them automatically.
 | `UU_FFMPEG_ROOT` | FFmpeg prefix (`bin/ffmpeg`, libs in `lib/x86_64-linux-gnu`) |
 | `UU_AUDIO=0`, `UU_AUDIO_SOURCE` | disable sound / choose the Pulse source (default `@DEFAULT_MONITOR@`) |
 | `UU_LOGIN_WINDOW=0` | don't auto-open the login window |
+| `UU_REMOTE_ASSIST=0`, `UU_ASSIST_ALLOW=1`, `UU_ASSIST_UI=tty`, `UU_ASSIST_DEBUG=1` | disable assistance / allow at start / terminal UI for `assist` / include the server's short error message in assist errors |
 
 Token has no expiry field; API code 1120 (HTTP 422) means invalid/expired → re-login. The config is re-read
 every 60 s.
@@ -138,7 +139,7 @@ every 60 s.
 | `src/desktop_backend.rs`, `src/wayland.rs`, `src/portal*.rs` | backend selection, Hyprland, GNOME/KDE portal |
 | `c_engine/x11_engine.c`, `c_engine/clipboard.c` | X11 capture/input/selection |
 | `c_engine/wayland_engine.c`, `c_engine/portal_engine.c` | Wayland and portal engines |
-| `c_engine/login_window.c` | GTK3 login window |
+| `src/assist.rs`, `c_engine/assist_window.c` | remote assistance (guest + account) and the unified GTK main window (assist + account/QR card) |
 
 Diagnostic subcommands: `login [--no-gui]`, `unlock-check` (password on stdin, prints only accepted/rejected),
 `desktop-probe [new.png]`, `desktop-video-probe`, `wayland-input-probe`, `clipboard-acceptance`,
@@ -188,6 +189,23 @@ started a second full host server instead, so check that a subcommand exists in 
 - Login API: `/api/v1/device/windows/init` → device_id; `/qrcode/gen/login`; long-poll
   `/qrcode/login/status` (1 wait, 2 scanned, 4 confirmed); `/login/by_qrcode` → user token. QR expires after
   ~5 min with HTTP 400 code 1190 (not fatal: generate a new one).
+
+- Remote assistance (recipient side), live-verified with the official Mac viewer; protocol from the official
+  Windows lite host (GameViewerLite: GameViewerServer + GameViewerLiteInner). Guest (not signed in) and account
+  identities use parallel endpoints:
+  | step | guest | signed in |
+  |---|---|---|
+  | identity | register the Windows device, then `POST /api/v1/guest/create` (422/1001 if unregistered) | account token |
+  | room | `POST /api/v1/guest/room/create` **before** share info (else 400/2004) | the host's own room |
+  | ID + code owner | `POST /api/v1/guest/share/info` → `connect_id` | `GET /api/v1/device/share/info` (POST = 405) |
+  | withdraw | `POST /api/v1/guest/share/cancel` | `POST /api/v1/device/share/cancel` |
+  Cloud pushes arrive as `bmsg_push`: `get_control_mode {control_id}` → `POST …/room/share/upload_control_mode`
+  `{control_id, allow_control, control_mode: by_password}` (guest v1, account v2); the viewer only asks for the code
+  after this. `remote_control {control_id, salt}` → `upload/sign` (guest v1) / `upload_sign` (account v2)
+  `{control_id, can_remote_control, sign: sha256hex(salt+code), backup_sign}`. Temporary-only: sign=temp code,
+  empty backup; both: backup=custom; custom-only: sign=custom. The share ID stays the same across sign-in/out.
+  Same-account devices cannot assist each other (viewer: 无法对同账号的设备发起远程协助). On a signed-in host never gate
+  the owner's offers on the assist switch; the cloud already gates assist peers.
 
 ## 8. Known pitfalls
 
