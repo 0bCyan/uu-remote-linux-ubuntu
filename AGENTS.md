@@ -108,7 +108,7 @@ viewer does not reconnect them automatically.
 | `UU_INPUT_BACKEND` | `auto` (uinput on Wayland/portal when `/dev/uinput` is accessible, udev `uaccess` rule in README) / `uinput` / `native`. X11 keeps XTest (held-key autorepeat handling) |
 | `UU_TERMINAL_SHORTCUTS=0` | disable Ctrl+V → Ctrl+Shift+V in focused X11 terminals (Mac Cmd and Ctrl both arrive as VK_LCONTROL) |
 | `contrib/virtual-desktop/` | Xvfb + session (`UU_VIRTUAL_SESSION`, `UU_VIRTUAL_BUS=user|private`) for monitorless hosts; serve it with `DISPLAY=:99` |
-| `UU_VIDEO_ENCODER` | `cpu`: libx264; `vaapi`: explicit Intel/AMD; unset: NVENC→CPU |
+| `UU_VIDEO_ENCODER` | `cpu`: libx264; `vaapi`: explicit Intel/AMD; `nvenc`: force; unset: NVENC→CPU only if `/proc/driver/nvidia/version` or `/dev/nvidia0` exists, else CPU (#10) |
 | `UU_FFMPEG_ROOT` | FFmpeg prefix (`bin/ffmpeg`, libs in `lib/x86_64-linux-gnu`) |
 | `UU_AUDIO=0`, `UU_AUDIO_SOURCE` | disable sound / choose the Pulse source (default `@DEFAULT_MONITOR@`) |
 | `UU_LOGIN_WINDOW=0` | don't auto-open the login window |

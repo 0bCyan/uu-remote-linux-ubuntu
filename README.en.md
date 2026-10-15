@@ -64,7 +64,7 @@ Apart from GNOME on X11, these desktops have been tested in virtual machines so 
 real hardware, please [open an issue](../../issues) with your distribution, desktop, GPU and the relevant lines from
 `journalctl --user -u uuremote-native.service`.
 
-Wayland limits: single screen, fixed resolution. The portal backend does not support screen wake or
+Wayland limits: single screen, fixed resolution. The native Hyprland backend captures via shm screencopy, so the frame rate is bounded by the compositor (about 16–22 fps measured at 2560x1600) and the viewer fps option has no effect. The portal backend does not support screen wake or
 dynamic resolution yet; the clipboard syncs while the viewer's remote window has focus. On the first connection the desktop asks for "Remote Desktop / Screen Sharing"
 permission; the permission is remembered once granted.
 
@@ -203,7 +203,7 @@ Common environment variables:
 | `UU_DESKTOP_BACKEND` | `auto` / `x11` / `wayland` / `portal` / `kms` (experimental feature) / `none` (headless) |
 | `UU_INPUT_BACKEND` | `auto` (default: uinput on Wayland when accessible) / `uinput` / `native` |
 | `UU_TERMINAL_SHORTCUTS=0` | Disable the Ctrl+V paste rewrite in terminal windows |
-| `UU_VIDEO_ENCODER` | `cpu`: libx264; `vaapi`: opt-in Intel/AMD; unset: existing NVENC→CPU |
+| `UU_VIDEO_ENCODER` | `cpu`: libx264; `vaapi`: opt-in Intel/AMD; `nvenc`: force NVENC; unset: NVENC only when an NVIDIA driver is loaded, else CPU |
 | `UU_FFMPEG_ROOT` | Use FFmpeg from this prefix |
 | `UU_AUDIO=0` | Disable sound; `UU_AUDIO_SOURCE` picks the PulseAudio source |
 | `UU_LOGIN_WINDOW=0` | Do not open the login window automatically when credentials are missing |

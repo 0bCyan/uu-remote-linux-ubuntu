@@ -56,11 +56,17 @@ const RTP_CLOCK: u64 = 90_000;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Encoder { Cpu, Nvenc, Vaapi }
 impl Encoder {
-    pub(crate) fn requested() -> Self { Self::from_setting(std::env::var("UU_VIDEO_ENCODER").ok().as_deref()) }
-    fn from_setting(value: Option<&str>) -> Self {
-        match value { Some("cpu") => Self::Cpu, Some("vaapi") => Self::Vaapi, _ => Self::Nvenc }
+    pub(crate) fn requested() -> Self { Self::from_setting(std::env::var("UU_VIDEO_ENCODER").ok().as_deref(), nvidia_present()) }
+    /// Unset/auto tries NVENC only with an NVIDIA driver loaded: `ffmpeg -encoders` lists h264_nvenc
+    /// on any machine, so without this every stream start first ran a doomed NVENC process (#10).
+    fn from_setting(value: Option<&str>, nvidia: bool) -> Self {
+        match value { Some("cpu") => Self::Cpu, Some("vaapi") => Self::Vaapi, Some("nvenc") => Self::Nvenc,
+            _ => if nvidia { Self::Nvenc } else { Self::Cpu } }
     }
     pub(crate) fn name(self) -> &'static str { match self { Self::Cpu => "libx264", Self::Nvenc => "h264_nvenc", Self::Vaapi => "h264_vaapi" } }
+}
+fn nvidia_present() -> bool {
+    std::path::Path::new("/proc/driver/nvidia/version").exists() || std::path::Path::new("/dev/nvidia0").exists()
 }
 pub(crate) fn vaapi_device() -> String { std::env::var("UU_VAAPI_DEVICE").unwrap_or_else(|_| "/dev/dri/renderD128".into()) }
 
@@ -454,9 +460,11 @@ mod tests {
     use super::*;
     #[test]
     fn vaapi_is_explicit_and_upload_follows_scale() {
-        assert_eq!(Encoder::from_setting(None), Encoder::Nvenc);
-        assert_eq!(Encoder::from_setting(Some("cpu")), Encoder::Cpu);
-        assert_eq!(Encoder::from_setting(Some("vaapi")), Encoder::Vaapi);
+        assert_eq!(Encoder::from_setting(None, true), Encoder::Nvenc);
+        assert_eq!(Encoder::from_setting(None, false), Encoder::Cpu);
+        assert_eq!(Encoder::from_setting(Some("nvenc"), false), Encoder::Nvenc);
+        assert_eq!(Encoder::from_setting(Some("cpu"), true), Encoder::Cpu);
+        assert_eq!(Encoder::from_setting(Some("vaapi"), true), Encoder::Vaapi);
         assert_eq!(vaapi_filter(None), "format=nv12,hwupload");
         assert_eq!(vaapi_filter(Some((1280,720))), "scale=1280:720:flags=bilinear,format=nv12,hwupload");
         let options = vaapi_options(&VideoSettings::default(), "30");

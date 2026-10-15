@@ -59,7 +59,7 @@
 除 GNOME（X11）外，其余桌面目前都是在虚拟机里测试的。如果你在真机上遇到问题，欢迎[提交 issue](../../issues)，
 请附上发行版、桌面环境、显卡型号和 `journalctl --user -u uuremote-native.service` 里的相关日志。
 
-Wayland 下的限制：只支持单屏、固定分辨率；portal 后端暂不支持唤醒屏幕和动态分辨率；剪贴板只在控制端的远控窗口处于前台时同步。
+Wayland 下的限制：只支持单屏、固定分辨率；Hyprland 原生后端通过 shm screencopy 截屏，帧率受合成器限制（2560x1600 实测约 16～22 帧），控制端的帧率选项不生效；portal 后端暂不支持唤醒屏幕和动态分辨率；剪贴板只在控制端的远控窗口处于前台时同步。
 首次连接时，桌面会弹窗请求「远程桌面 / 屏幕共享」授权，同意后会记住授权。
 
 ## 尚未实现 / 不支持
@@ -193,7 +193,7 @@ systemctl --user restart uuremote-native.service
 | `UU_DESKTOP_BACKEND` | `auto` / `x11` / `wayland` / `portal` / `kms`（实验性特性） / `none`（无头模式） |
 | `UU_INPUT_BACKEND` | `auto`（默认，Wayland 下可用时用 uinput）/ `uinput` / `native` |
 | `UU_TERMINAL_SHORTCUTS=0` | 关闭终端窗口里的 Ctrl+V 粘贴转换 |
-| `UU_VIDEO_ENCODER` | `cpu` 强制 CPU；`vaapi` 显式启用 Intel/AMD 硬编；未设置时保留 NVENC→CPU |
+| `UU_VIDEO_ENCODER` | `cpu` 强制 CPU；`vaapi` 显式启用 Intel/AMD 硬编；`nvenc` 强制 NVENC；未设置时检测到 NVIDIA 驱动才用 NVENC，否则用 CPU |
 | `UU_FFMPEG_ROOT` | 使用指定目录下的 FFmpeg |
 | `UU_AUDIO=0` | 关闭声音转发；`UU_AUDIO_SOURCE` 指定 PulseAudio 采集源 |
 | `UU_LOGIN_WINDOW=0` | 凭证缺失时不自动弹出登录窗口 |
