@@ -81,9 +81,9 @@ pub async fn stream_audio(pc: Arc<RTCPeerConnection>, track: Arc<TrackLocalStati
         if closed(&pc) { return; }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
-    let source = std::env::var("UU_AUDIO_SOURCE").unwrap_or_else(|_| "@DEFAULT_MONITOR@".into());
     let mut failures = 0u32;
     while !closed(&pc) {
+        let source = crate::virtual_audio::source();
         let (tx, mut rx) = tokio::sync::mpsc::channel::<bytes::Bytes>(25);
         let (stopper, job) = match start(&source, tx) {
             Ok(started) => started,
@@ -101,7 +101,7 @@ pub async fn stream_audio(pc: Arc<RTCPeerConnection>, track: Arc<TrackLocalStati
                     }
                     packets += 1;
                 },
-                _ = health.tick() => if closed(&pc) { break },
+                _ = health.tick() => if closed(&pc) || crate::virtual_audio::source() != source { break },
             }
         }
         // Dropping the receiver and the stopper ends the encoder at its next packet.
@@ -109,6 +109,7 @@ pub async fn stream_audio(pc: Arc<RTCPeerConnection>, track: Arc<TrackLocalStati
         drop(stopper);
         let result = job.await.unwrap_or_else(|e| Err(e.to_string()));
         if closed(&pc) { break; }
+        if crate::virtual_audio::source() != source { failures=0; continue; }
         log::warn!("Desktop audio stopped after {packets} packets: {:?}", result.err());
         failures = if packets > 250 { 0 } else { failures + 1 };
         if failures >= 5 { log::warn!("Desktop audio disabled for this connection"); return; }

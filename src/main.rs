@@ -28,6 +28,7 @@ mod damage_capture;
 mod inproc_encoder;
 mod capture_setting;
 mod audio;
+mod virtual_audio;
 mod system_actions;
 mod capability;
 mod protocol;
@@ -55,7 +56,7 @@ use webrtc::WebRtcSession;
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
     // An unknown argument must never fall through to starting a second full host server.
-    const SUBCOMMANDS: [&str; 9] = ["login", "unlock-check", "desktop-probe", "desktop-video-probe", "desktop-audio-probe", "wayland-capture",
+    const SUBCOMMANDS: [&str; 10] = ["virtual-audio-probe", "login", "unlock-check", "desktop-probe", "desktop-video-probe", "desktop-audio-probe", "wayland-capture",
         "wayland-input-probe", "clipboard-acceptance", "portal-acceptance"];
     if let Some(arg) = std::env::args().nth(1).filter(|a| !SUBCOMMANDS.contains(&a.as_str())) {
         let usage = format!("usage: uuremote-server [{}]\n  (no argument: run the host)", SUBCOMMANDS.join(" | "));
@@ -196,6 +197,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if std::env::args().nth(1).as_deref() == Some("unlock-check") {
         return session_lock::check_from_stdin().map_err(|e| e.into());
     }
+    if std::env::args().nth(1).as_deref() == Some("virtual-audio-probe") {
+        virtual_audio::init();
+        if !virtual_audio::enable() { return Err("Virtual audio probe setup failed".into()); }
+        println!("Virtual audio probe active");
+        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+        virtual_audio::disable();
+        if virtual_audio::active() { return Err("Virtual audio probe restore incomplete".into()); }
+        println!("Virtual audio probe ended");
+        return Ok(());
+    }
     if std::env::args().nth(1).as_deref() == Some("login") {
         // Interactive: register this host and bind it to an account via QR scan
         // (GTK window when available; `login --no-gui` keeps it terminal-only).
@@ -203,6 +214,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         if login::run(gui).await.is_err() { std::process::exit(1); } // error already shown
         return Ok(());
     }
+    virtual_audio::init();
+    let _audio_cleanup=virtual_audio::Cleanup;
     log::info!("Starting uu-remote-linux host v{}...", env!("CARGO_PKG_VERSION"));
 
     let mut capture = Arc::new((if desktop_backend::headless() {
@@ -221,7 +234,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let shutdown_input=input.clone();
         tokio::spawn(async move {
             if let Ok(mut term)=tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
-                term.recv().await; shutdown_input.release_held(); terminal::shutdown_all(); std::process::exit(0);
+                term.recv().await; virtual_audio::disable(); shutdown_input.release_held(); terminal::shutdown_all(); std::process::exit(0);
             }
         });
     }

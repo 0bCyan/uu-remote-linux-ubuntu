@@ -113,10 +113,14 @@ pub fn args_shape(args: &[u8]) -> String {
 }
 
 fn mute_for_session(state: &mut HostState) {
-    if state.restore.is_none() { state.restore = host_muted(); }
-    set_host_muted(true);
+    if state.restore.is_none() {
+        state.restore = host_muted();
+        set_host_muted(true);
+    }
+    crate::virtual_audio::enable();
 }
 fn restore_mute(state: &mut HostState) {
+    crate::virtual_audio::disable();
     if let Some(previous) = state.restore.take() { set_host_muted(previous); }
 }
 
@@ -188,6 +192,7 @@ impl PeerActions {
         let mut state = state().lock().unwrap();
         state.desktop_sessions = state.desktop_sessions.saturating_sub(1);
         if state.desktop_sessions > 0 { return; }
+        crate::virtual_audio::disable();
         if !state.settings.mute_permanent { restore_mute(&mut state); }
         if state.settings.auto_lock {
             log::info!("Auto lock after remote session: ok={}", lock_session());
