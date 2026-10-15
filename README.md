@@ -190,10 +190,10 @@ systemctl --user restart uuremote-native.service
 | 变量 | 作用 |
 |---|---|
 | `UU_CONFIG` | 配置文件路径（默认 `~/.config/uuremote/config.json`） |
-| `UU_DESKTOP_BACKEND` | `auto` / `x11` / `wayland` / `portal` / `none`（无头模式） |
+| `UU_DESKTOP_BACKEND` | `auto` / `x11` / `wayland` / `portal` / `kms`（实验性特性） / `none`（无头模式） |
 | `UU_INPUT_BACKEND` | `auto`（默认，Wayland 下可用时用 uinput）/ `uinput` / `native` |
 | `UU_TERMINAL_SHORTCUTS=0` | 关闭终端窗口里的 Ctrl+V 粘贴转换 |
-| `UU_VIDEO_ENCODER=cpu` | 强制使用 CPU 编码 |
+| `UU_VIDEO_ENCODER` | `cpu` 强制 CPU；`vaapi` 显式启用 Intel/AMD 硬编；未设置时保留 NVENC→CPU |
 | `UU_FFMPEG_ROOT` | 使用指定目录下的 FFmpeg |
 | `UU_AUDIO=0` | 关闭声音转发；`UU_AUDIO_SOURCE` 指定 PulseAudio 采集源 |
 | `UU_LOGIN_WINDOW=0` | 凭证缺失时不自动弹出登录窗口 |
@@ -245,33 +245,29 @@ flowchart LR
 - [webrtc-rs](https://github.com/webrtc-rs/webrtc)、FFmpeg、GTK 等开源项目。
 - 本项目的大部分代码在 Claude 和 Codex 的协助下完成。
 
-### VAAPI (opt-in / 显式启用)
+### VAAPI 硬件编码（显式启用）
 
-`UU_VIDEO_ENCODER=vaapi` selects Intel/AMD H.264 VAAPI; `UU_VAAPI_DEVICE` defaults to
-`/dev/dri/renderD128` (render-node permissions required). No automatic VAAPI selection.
-Both FFmpeg process and `--features inproc-av` upload NV12 frames to a VAAPI frame pool.
-VBR uses the viewer bitrate preset and CQ-derived minimum QP, no B-frames, async depth 1,
-AUD and the existing GOP/VFR timing. Unsupported device/driver/initialization falls back to libx264
-with a warning. Intel/AMD hardware acceptance is still required (未实机验证).
+设置 `UU_VIDEO_ENCODER=vaapi` 使用 Intel/AMD H.264 VAAPI；`UU_VAAPI_DEVICE` 默认
+`/dev/dri/renderD128`，运行用户需要 render 节点权限。不会自动选择 VAAPI；设备或驱动初始化
+失败会明确警告并回退 libx264。外部 FFmpeg 和 `--features inproc-av` 均先转 NV12 再上传硬件帧。
+VBR 使用控制端码率预设及 CQ 对应的最小 QP，无 B 帧、async depth=1，并保留现有 GOP/VFR 规则。
+Intel/AMD 硬编**未实机验证**，不能把 virtio 的 CPU 回退测试当作硬编验收。
 
-### Virtual audio / 虚拟声卡
+### 静音运行与虚拟声卡
 
-The viewer's 静音运行 switch creates `uu-remote-sink` with `pactl module-null-sink`,
-moves streams from the original default output and captures `uu-remote-sink.monitor`.
-New output goes to this sink; streams explicitly pinned to other outputs are untouched.
-The last desktop session restores the previous default output and unloads the module.
-`mute_permanent` retains the physical mute policy, but still releases the virtual sink.
-A private recovery record beside the config and a process lock recover crash leftovers on startup.
-PulseAudio and PipeWire-pulse use the same `pactl` interface (install `pulseaudio-utils` on Debian,
-`libpulse` on Arch). When routing is unavailable, the existing mute/monitor path remains.
-Changing the switch restarts only the scoped audio encoder; normal non-muted capture is unchanged.
-`virtual-audio-probe` temporarily routes output for five seconds and restores it (local diagnostic).
+控制端开启「静音运行」后，程序用 `pactl module-null-sink` 创建 `uu-remote-sink`，保存原默认输出，
+迁移其播放流并采集 `uu-remote-sink.monitor`。新播放也走虚拟输出；其他输出上的流不迁移。
+最后一个桌面连接结束后恢复原默认输出并卸载模块；`mute_permanent` 仍保留原物理静音策略。
+恢复记录保存在配置旁，权限 0600；进程锁避免重复实例抢占，异常退出后下次启动会恢复遗留路由。
+PulseAudio 和 PipeWire-pulse 都使用该接口（Debian 安装 `pulseaudio-utils`，Arch 安装 `libpulse`）。
+路由失败时保留原静音/monitor 方案。开关变化仅重启当前音频编码器，未开启时采集方式保持不变。
+本地诊断命令 `virtual-audio-probe` 会临时切换输出五秒并恢复。
 
-### Virtual desktop user bus
+### 虚拟桌面的用户总线
 
-The supervisor imports DISPLAY and XAUTHORITY into the linger user bus, waits for authenticated
-X11 readiness, and keeps its cleanup trap alive. The sample drop-in uses `%t/uu-virtual-99.Xauthority`.
-Use a dedicated headless account. See the [setup and official Mac acceptance checklist](contrib/virtual-desktop/ACCEPTANCE.md).
+默认 `UU_VIRTUAL_BUS=user`：监督脚本将 DISPLAY/XAUTHORITY 导入 linger 用户总线，等待经过认证的
+X11 就绪后通知 systemd；退出时清理 Xvfb。示例主机 drop-in 使用 `%t/uu-virtual-99.Xauthority`。
+请使用没有真实图形会话的专用账号；参见[设置与官方 Mac 验收清单](contrib/virtual-desktop/ACCEPTANCE.md)。
 
 ### Arch Linux / Omarchy
 
@@ -282,27 +278,23 @@ cargo test --locked --features wayland
 cargo build --release --features wayland
 ```
 
-Omarchy uses Hyprland: run in its user session, select `UU_DESKTOP_BACKEND=wayland`,
-and retain `WAYLAND_DISPLAY` / `XDG_RUNTIME_DIR`. This requires wlr-screencopy and the
-virtual input protocols supported by Hyprland; other compositors may need `--features wayland,portal`.
-For uinput, load `uinput` and apply the uaccess rule above; seat ACLs require an active login.
-For unattended accounts, explicitly restrict `/dev/uinput` access to a dedicated group.
-This permission can inject into the whole seat, including lock/greeter screens.
-`UU_INPUT_BACKEND=uinput` requests kernel devices; verify startup actually reports uinput.
-Optional VAAPI: `intel-media-driver` (modern Intel) or `libva-mesa-driver` (AMD), `libva-utils`
-for `vainfo`. Optional KMS: `libdrm`. Virtual Xfce: `xorg-server-xvfb xorg-xauth xorg-xdpyinfo
-xfce4-session xfce4-panel xfdesktop xfwm4 gnome-terminal`.
-Rolling Arch FFmpeg may be newer than supported `inproc-av` (FFmpeg 6.x); use the default process
-pipeline or build against a separate FFmpeg 6 prefix. Do not downgrade the system FFmpeg.
-User-bus headless setup and the official Mac checklist: [virtual desktop acceptance](contrib/virtual-desktop/ACCEPTANCE.md).
+Omarchy 使用 Hyprland：在其用户会话中运行，设置 `UU_DESKTOP_BACKEND=wayland`，保留
+`WAYLAND_DISPLAY` 和 `XDG_RUNTIME_DIR`。其他合成器可能需要 `--features wayland,portal`。
+uinput 需加载内核模块并应用上文 uaccess 规则；无人登录账号需要专用组的受限授权。
+该权限能向整个 seat（包括锁屏/登录界面）注入输入。设置 `UU_INPUT_BACKEND=uinput` 后，
+仍须确认启动日志实际选择了 uinput。
 
-### Experimental KMS / 实验后端
+VAAPI 可选包：Intel 新显卡用 `intel-media-driver`，AMD 用 `libva-mesa-driver`，`libva-utils` 提供
+`vainfo`。KMS 依赖 `libdrm`。虚拟 Xfce 依赖 `xorg-server-xvfb xorg-xauth xorg-xdpyinfo
+xfce4-session xfce4-panel xfdesktop xfwm4 gnome-terminal`。
+滚动 Arch 的 FFmpeg 可能超出 `inproc-av` 支持的 6.x；请使用默认进程方案或独立的 FFmpeg 6 前缀，
+不要降级系统 FFmpeg。当前 Arch/Hyprland VM 验证结果见[开发验证记录](docs/validation/v017-results.md)。
 
-`--features kms` plus explicit `UU_DESKTOP_BACKEND=kms` enables a limited linear-framebuffer
-prototype; `UU_KMS_DEVICE=/dev/dri/card0`. Requires libdrm headers and deliberately granted
-`cap_sys_admin+ep`, plus card-node access. It is never automatically selected or granted privileges.
-Read the [KMS limitations, permission risk and revocation steps](docs/validation/kms.md) before use.
-Lock/greeter and Intel/AMD hardware acceptance are unverified. Use uinput for input; clipboard
-is unavailable without a desktop session. No default release behavior changes.
-For headless desktop offers, [official error evidence remains incomplete](docs/validation/headless-error-evidence.md);
-the existing offer behavior is retained.
+### 实验性 KMS 截屏
+
+编译 `--features kms` 后显式设置 `UU_DESKTOP_BACKEND=kms`；`UU_KMS_DEVICE` 默认
+`/dev/dri/card0`。需要 libdrm、card 节点访问权及主动授予的 `cap_sys_admin+ep`。
+程序不会自动启用或授权；此 capability 权限很大，先阅读[限制、安全风险及撤销步骤](docs/validation/kms.md)。
+当前仅为线性帧缓冲原型：VM 的 GDM 截图仍是黑屏，**没有通过登录界面视觉验收**，不承诺锁屏可用。
+键鼠需 uinput；没有桌面会话时不提供剪贴板。
+无头桌面错误码的[官方证据仍不足](docs/validation/headless-error-evidence.md)，因此保持原有 offer 行为。

@@ -200,10 +200,10 @@ Common environment variables:
 | Variable | Purpose |
 |---|---|
 | `UU_CONFIG` | Config file path (default `~/.config/uuremote/config.json`) |
-| `UU_DESKTOP_BACKEND` | `auto` / `x11` / `wayland` / `portal` / `none` (headless) |
+| `UU_DESKTOP_BACKEND` | `auto` / `x11` / `wayland` / `portal` / `kms` (experimental feature) / `none` (headless) |
 | `UU_INPUT_BACKEND` | `auto` (default: uinput on Wayland when accessible) / `uinput` / `native` |
 | `UU_TERMINAL_SHORTCUTS=0` | Disable the Ctrl+V paste rewrite in terminal windows |
-| `UU_VIDEO_ENCODER=cpu` | Force CPU encoding |
+| `UU_VIDEO_ENCODER` | `cpu`: libx264; `vaapi`: opt-in Intel/AMD; unset: existing NVENC→CPU |
 | `UU_FFMPEG_ROOT` | Use FFmpeg from this prefix |
 | `UU_AUDIO=0` | Disable sound; `UU_AUDIO_SOURCE` picks the PulseAudio source |
 | `UU_LOGIN_WINDOW=0` | Do not open the login window automatically when credentials are missing |
@@ -320,7 +320,7 @@ User-bus headless setup and the official Mac checklist: [virtual desktop accepta
 prototype; `UU_KMS_DEVICE=/dev/dri/card0`. Requires libdrm headers and deliberately granted
 `cap_sys_admin+ep`, plus card-node access. It is never automatically selected or granted privileges.
 Read the [KMS limitations, permission risk and revocation steps](docs/validation/kms.md) before use.
-Lock/greeter and Intel/AMD hardware acceptance are unverified. Use uinput for input; clipboard
+The VM GDM greeter capture was solid black (failed visual acceptance); lock/greeter support and Intel/AMD hardware remain unverified. Use uinput for input; clipboard
 is unavailable without a desktop session. No default release behavior changes.
 For headless desktop offers, [official error evidence remains incomplete](docs/validation/headless-error-evidence.md);
 the existing offer behavior is retained.

@@ -104,11 +104,11 @@ viewer does not reconnect them automatically.
 |---|---|
 | `~/.config/uuremote/config.json` | user_id, device_id, client_id, system_id, machine_guid, token, csrf; optional `sign_key`, `ffmpeg_root`. `$UU_CONFIG` overrides the path |
 | `~/.config/uuremote/host_settings.json` | persisted 安全 settings: auto_lock, keep_mute, mute_permanent |
-| `UU_DESKTOP_BACKEND` | `auto` (default) / `x11` / `wayland` / `portal` / `none` (headless: no display; desktop offers ignored; tool peers get a nominal 1920x1080 screen + Allow permissions, which the port-mapping viewer requires) |
+| `UU_DESKTOP_BACKEND` | `auto` (default) / `x11` / `wayland` / `portal` / `kms` (experimental feature) / `none` (headless: no display; desktop offers ignored; tool peers get a nominal 1920x1080 screen + Allow permissions, which the port-mapping viewer requires) |
 | `UU_INPUT_BACKEND` | `auto` (uinput on Wayland/portal when `/dev/uinput` is accessible, udev `uaccess` rule in README) / `uinput` / `native`. X11 keeps XTest (held-key autorepeat handling) |
 | `UU_TERMINAL_SHORTCUTS=0` | disable Ctrl+V → Ctrl+Shift+V in focused X11 terminals (Mac Cmd and Ctrl both arrive as VK_LCONTROL) |
 | `contrib/virtual-desktop/` | Xvfb + session (`UU_VIRTUAL_SESSION`, `UU_VIRTUAL_BUS=user|private`) for monitorless hosts; serve it with `DISPLAY=:99` |
-| `UU_VIDEO_ENCODER=cpu` | force libx264 instead of NVENC |
+| `UU_VIDEO_ENCODER` | `cpu`: libx264; `vaapi`: explicit Intel/AMD; unset: NVENC→CPU |
 | `UU_FFMPEG_ROOT` | FFmpeg prefix (`bin/ffmpeg`, libs in `lib/x86_64-linux-gnu`) |
 | `UU_AUDIO=0`, `UU_AUDIO_SOURCE` | disable sound / choose the Pulse source (default `@DEFAULT_MONITOR@`) |
 | `UU_LOGIN_WINDOW=0` | don't auto-open the login window |
@@ -282,7 +282,7 @@ User-bus headless setup and the official Mac checklist: [virtual desktop accepta
 prototype; `UU_KMS_DEVICE=/dev/dri/card0`. Requires libdrm headers and deliberately granted
 `cap_sys_admin+ep`, plus card-node access. It is never automatically selected or granted privileges.
 Read the [KMS limitations, permission risk and revocation steps](docs/validation/kms.md) before use.
-Lock/greeter and Intel/AMD hardware acceptance are unverified. Use uinput for input; clipboard
+The VM GDM greeter capture was solid black (failed visual acceptance); lock/greeter support and Intel/AMD hardware remain unverified. Use uinput for input; clipboard
 is unavailable without a desktop session. No default release behavior changes.
 For headless desktop offers, [official error evidence remains incomplete](docs/validation/headless-error-evidence.md);
 the existing offer behavior is retained.
