@@ -29,7 +29,8 @@
 |---|---|
 | 扫码登录 | GTK 登录窗口（或 `login --no-gui` 终端二维码）；二维码过期自动刷新；登录凭证失效时服务会自动弹出登录窗口 |
 | 远程桌面 | H.264 视频，NVIDIA 显卡用 NVENC 硬件编码，否则用 libx264；查看端绘制本地鼠标，不会出现双光标 |
-| 鼠标 / 键盘 | 绝对/相对移动、点击、滚轮、按键；修复了网络延迟导致的按键连发 |
+| 鼠标 / 键盘 | 绝对/相对移动、点击、滚轮、按键；修复了网络延迟导致的按键连发；Wayland 下可用 uinput 虚拟键鼠（不依赖键盘布局，见下文） |
+| 终端快捷键 | Mac 控制端的 Cmd 和 Ctrl 到被控端都是 Ctrl。焦点在终端窗口时，Ctrl+V / Cmd+V 自动转成 Ctrl+Shift+V 粘贴；Ctrl+C 始终是中断，复制请用 Cmd+Shift+C（X11） |
 | 鼠标指针样式 | 远端指针形状实时同步（X11） |
 | 剪贴板 | 双向文本同步 |
 | 画质 / 帧率 / 分辨率 | 自动、原画 20M、超清 8M、高清 2M、自定义；30/60/90/144 帧；「其他分辨率」由编码器缩放，不改动主机显示器 |
@@ -42,6 +43,7 @@
 | 系统操作 | 锁屏、显示桌面、任务管理器（系统监视器）、重启、关机 |
 | 端口映射 | 官方「端口映射」工具：把控制端本地端口转发到 Linux 能访问到的地址（如 127.0.0.1:22）；`UU_PORT_MAPPING=0` 可关闭 |
 | 多次重连 | 每个工具窗口独立连接，互不影响 |
+| 无头服务器 | 没有显示器也能上线，提供终端、文件传输和端口映射；也可以用 Xvfb 虚拟桌面提供完整远程桌面（见下文） |
 
 ## 支持的 Linux 桌面
 
@@ -71,7 +73,7 @@ Wayland 下的限制：只支持单屏、固定分辨率；portal 后端暂不�
 | 被控端防窥模式 | 未实现 |
 | 麦克风（控制端声音传到被控端） | 未实现（需要虚拟声卡） |
 | 魔兽世界排队提醒等插件 | 不支持，会明确告诉客户端「无插件」 |
-| 登录前（登录界面 / 无人登录）访问 | 不支持，只能控制已登录的桌面会话 |
+| 登录前（登录界面 / 无人登录）访问 | 不支持控制登录界面；没有人登录时可以用无头模式或虚拟桌面（见下文） |
 | 跨运营商 / 受限网络的中继连接 | 已接入官方下发的 ICE 服务器，但复杂网络环境未充分测试 |
 | 作为控制端（在 Linux 上控制别的电脑） | 不在本项目范围 |
 
@@ -142,6 +144,45 @@ journalctl --user -u uuremote-native.service -f   # 看到 availability=Some("re
 
 如果还没有登录，服务会自动在桌面上弹出扫码窗口。
 
+### 5. Wayland 下使用 uinput 虚拟键鼠（推荐）
+
+Wayland（尤其是 GNOME/KDE portal）下，默认的键鼠注入要经过 portal 授权，部分键盘布局下还会丢符号（比如下划线）。
+允许当前登录用户访问 `/dev/uinput` 后，服务会自动改用内核级虚拟键盘和鼠标，发送物理按键码：
+
+```sh
+echo 'KERNEL=="uinput", SUBSYSTEM=="misc", OPTIONS+="static_node=uinput", TAG+="uaccess"' | \
+    sudo tee /etc/udev/rules.d/60-uu-remote-linux-uinput.rules
+sudo udevadm control --reload && sudo udevadm trigger --name-match=uinput
+```
+
+`uaccess` 只把权限给当前坐在这台机器前的登录用户。`UU_INPUT_BACKEND=uinput|native` 可以强制指定后端。
+X11 默认继续用 XTest，因为它能正确处理网络延迟下按住不放的按键。
+
+## 没有显示器的服务器
+
+**无头模式**：只要终端、文件传输和端口映射，不需要图形界面。在服务里加 `Environment=UU_DESKTOP_BACKEND=none`，
+再执行 `loginctl enable-linger $USER`，这样开机后不用登录，systemd 用户服务（以及 `XDG_RUNTIME_DIR`、用户 D-Bus）也会自动启动。
+无头模式下控制端点「远程桌面」会一直显示正在连接，这是正常的。首次登录用 `uuremote-server login --no-gui` 在终端里扫码。
+
+**虚拟桌面**：需要完整的远程桌面时，用 Xvfb 创建一块虚拟屏幕，再在上面跑一个桌面环境（推荐 Xfce）：
+
+```sh
+sudo apt install xvfb dbus-x11 xfce4      # 或其他桌面环境，用 UU_VIRTUAL_SESSION 指定
+install -Dm755 contrib/virtual-desktop/uu-virtual-desktop ~/.local/bin/uu-virtual-desktop
+install -Dm644 contrib/virtual-desktop/uu-virtual-desktop.service ~/.config/systemd/user/uu-virtual-desktop.service
+install -Dm644 contrib/virtual-desktop/virtual-display.conf ~/.config/systemd/user/uuremote-native.service.d/virtual-display.conf
+loginctl enable-linger $USER
+systemctl --user daemon-reload && systemctl --user enable --now uu-virtual-desktop.service
+systemctl --user restart uuremote-native.service
+```
+
+虚拟屏幕默认是 `:99`、1920x1080。Xvfb 没有 GPU 加速，流畅度比真实显示器略差；有 NVIDIA 显卡时视频仍然用 NVENC 编码。
+脚本会把 `DISPLAY` 导入 systemd 用户会话，这样通过 D-Bus 启动的程序也会显示在虚拟屏幕上；
+如果这台机器同时还有真实的桌面会话，请设 `UU_VIRTUAL_BUS=private`，避免影响真实桌面。
+
+想让 NVIDIA/AMD 显卡在不接显示器时也正常输出画面（而不是用 Xvfb），可以用假显示器插头（HDMI 诱骗器），
+或者用内核参数 `drm.edid_firmware=` 加载 EDID 文件，再按普通 X11 桌面的方式安装。
+
 ## 配置
 
 常用环境变量：
@@ -149,7 +190,9 @@ journalctl --user -u uuremote-native.service -f   # 看到 availability=Some("re
 | 变量 | 作用 |
 |---|---|
 | `UU_CONFIG` | 配置文件路径（默认 `~/.config/uuremote/config.json`） |
-| `UU_DESKTOP_BACKEND` | `auto` / `x11` / `wayland` / `portal` |
+| `UU_DESKTOP_BACKEND` | `auto` / `x11` / `wayland` / `portal` / `none`（无头模式） |
+| `UU_INPUT_BACKEND` | `auto`（默认，Wayland 下可用时用 uinput）/ `uinput` / `native` |
+| `UU_TERMINAL_SHORTCUTS=0` | 关闭终端窗口里的 Ctrl+V 粘贴转换 |
 | `UU_VIDEO_ENCODER=cpu` | 强制使用 CPU 编码 |
 | `UU_FFMPEG_ROOT` | 使用指定目录下的 FFmpeg |
 | `UU_AUDIO=0` | 关闭声音转发；`UU_AUDIO_SOURCE` 指定 PulseAudio 采集源 |

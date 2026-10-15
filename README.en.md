@@ -33,7 +33,8 @@
 |---|---|
 | QR login | GTK login window (or a terminal QR code with `login --no-gui`); expired codes refresh automatically; the service opens the login window by itself when credentials are missing or expired |
 | Remote desktop | H.264 video, NVENC hardware encoding on NVIDIA GPUs, libx264 otherwise; the viewer draws its local pointer, so there is no double cursor |
-| Mouse / keyboard | Absolute and relative motion, clicks, wheel, keys; no spurious key repeat on high-latency links |
+| Mouse / keyboard | Absolute and relative motion, clicks, wheel, keys; no spurious key repeat on high-latency links; optional uinput virtual devices on Wayland (layout independent, see below) |
+| Terminal shortcuts | Mac viewers send both Cmd and Ctrl as Ctrl. In a focused terminal window Ctrl+V / Cmd+V become Ctrl+Shift+V (paste); Ctrl+C always interrupts, copy with Cmd+Shift+C (X11) |
 | Pointer shape | Remote cursor shape is mirrored to the viewer (X11) |
 | Clipboard | Two-way text sync |
 | Quality / frame rate / resolution | Auto, Original 20M, Ultra 8M, HD 2M, custom; 30/60/90/144 fps; "other resolutions" are scaled by the encoder, the host monitor is left untouched |
@@ -46,6 +47,7 @@
 | System actions | Lock, show desktop, task manager (system monitor), reboot, shut down |
 | Port mapping | The official "port mapping" tool: forwards a local port on the viewer to an address reachable from the Linux host (e.g. 127.0.0.1:22); `UU_PORT_MAPPING=0` disables it |
 | Reconnects | Every tool window has its own connection; they do not disturb each other |
+| Headless servers | Goes online without a monitor with terminal, file transfer and port mapping; an Xvfb virtual desktop gives a full remote desktop (see below) |
 
 ## Supported Linux desktops
 
@@ -77,7 +79,7 @@ permission; the permission is remembered once granted.
 | Privacy screen on the host | Not implemented |
 | Microphone (viewer audio played on the host) | Not implemented (needs a virtual sound card) |
 | Plugins such as the WoW queue notifier | Not supported; the client is told that no plugins exist |
-| Access before login (greeter / no user logged in) | Not supported; only an already logged-in desktop session can be controlled |
+| Access before login (greeter / no user logged in) | The greeter cannot be controlled; without a logged-in user use headless mode or a virtual desktop (see below) |
 | Relay connections on restrictive networks | Uses the ICE servers provided by the UU cloud; complex network setups are not thoroughly tested |
 | Acting as a viewer (controlling other machines from Linux) | Out of scope |
 
@@ -149,6 +151,48 @@ journalctl --user -u uuremote-native.service -f   # online once you see availabi
 
 If you have not logged in yet, the service opens the QR login window on your desktop.
 
+### 5. uinput virtual keyboard/mouse on Wayland (recommended)
+
+On Wayland (especially GNOME/KDE via the portal) the default input path needs portal consent and some keyboard layouts
+drop symbols such as the underscore. Once the logged-in user may access `/dev/uinput`, the host switches to kernel
+virtual devices that send physical key codes:
+
+```sh
+echo 'KERNEL=="uinput", SUBSYSTEM=="misc", OPTIONS+="static_node=uinput", TAG+="uaccess"' | \
+    sudo tee /etc/udev/rules.d/60-uu-remote-linux-uinput.rules
+sudo udevadm control --reload && sudo udevadm trigger --name-match=uinput
+```
+
+`uaccess` grants access only to the user sitting at the machine. `UU_INPUT_BACKEND=uinput|native` forces a backend.
+X11 keeps XTest by default because it handles held keys correctly on high-latency links.
+
+## Servers without a monitor
+
+**Headless mode** (terminal, file transfer and port mapping only): add `Environment=UU_DESKTOP_BACKEND=none` to the
+service and run `loginctl enable-linger $USER`, so the systemd user manager (with `XDG_RUNTIME_DIR` and the user D-Bus)
+starts at boot without a login. The viewer's remote desktop keeps showing "connecting" in this mode; that is expected.
+Log in once with `uuremote-server login --no-gui` (QR in the terminal).
+
+**Virtual desktop**: for a full remote desktop, run a desktop session (Xfce recommended) on an Xvfb screen:
+
+```sh
+sudo apt install xvfb dbus-x11 xfce4      # or another session, chosen with UU_VIRTUAL_SESSION
+install -Dm755 contrib/virtual-desktop/uu-virtual-desktop ~/.local/bin/uu-virtual-desktop
+install -Dm644 contrib/virtual-desktop/uu-virtual-desktop.service ~/.config/systemd/user/uu-virtual-desktop.service
+install -Dm644 contrib/virtual-desktop/virtual-display.conf ~/.config/systemd/user/uuremote-native.service.d/virtual-display.conf
+loginctl enable-linger $USER
+systemctl --user daemon-reload && systemctl --user enable --now uu-virtual-desktop.service
+systemctl --user restart uuremote-native.service
+```
+
+The virtual screen is `:99`, 1920x1080 by default. Xvfb has no GPU acceleration, so it is a little less smooth than a
+real display; NVENC is still used for encoding when an NVIDIA GPU is present. The script exports `DISPLAY` to the
+systemd user session so D-Bus-activated programs open on the virtual screen; on a machine that also runs a real desktop
+session set `UU_VIRTUAL_BUS=private` so the real session is not affected.
+
+To make a GPU drive a real (non-Xvfb) desktop without a monitor, use a dummy HDMI plug or load an EDID file with the
+kernel parameter `drm.edid_firmware=`, then install as for a normal X11 desktop.
+
 ## Configuration
 
 Common environment variables:
@@ -156,7 +200,9 @@ Common environment variables:
 | Variable | Purpose |
 |---|---|
 | `UU_CONFIG` | Config file path (default `~/.config/uuremote/config.json`) |
-| `UU_DESKTOP_BACKEND` | `auto` / `x11` / `wayland` / `portal` |
+| `UU_DESKTOP_BACKEND` | `auto` / `x11` / `wayland` / `portal` / `none` (headless) |
+| `UU_INPUT_BACKEND` | `auto` (default: uinput on Wayland when accessible) / `uinput` / `native` |
+| `UU_TERMINAL_SHORTCUTS=0` | Disable the Ctrl+V paste rewrite in terminal windows |
 | `UU_VIDEO_ENCODER=cpu` | Force CPU encoding |
 | `UU_FFMPEG_ROOT` | Use FFmpeg from this prefix |
 | `UU_AUDIO=0` | Disable sound; `UU_AUDIO_SOURCE` picks the PulseAudio source |

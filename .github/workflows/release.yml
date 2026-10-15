@@ -26,6 +26,7 @@ jobs:
           name=uu-remote-linux-${GITHUB_REF_NAME}-x86_64-linux
           mkdir -p "$name"
           cp target/release/uuremote-server LICENSE README.md README.en.md config.example.json "$name/"
+          cp -r contrib "$name/"
           tar czf "$name.tar.gz" "$name"
           sha256sum "$name.tar.gz" > "$name.tar.gz.sha256"
       - uses: softprops/action-gh-release@v2

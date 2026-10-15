@@ -104,7 +104,10 @@ viewer does not reconnect them automatically.
 |---|---|
 | `~/.config/uuremote/config.json` | user_id, device_id, client_id, system_id, machine_guid, token, csrf; optional `sign_key`, `ffmpeg_root`. `$UU_CONFIG` overrides the path |
 | `~/.config/uuremote/host_settings.json` | persisted 安全 settings: auto_lock, keep_mute, mute_permanent |
-| `UU_DESKTOP_BACKEND` | `auto` (default) / `x11` / `wayland` / `portal` |
+| `UU_DESKTOP_BACKEND` | `auto` (default) / `x11` / `wayland` / `portal` / `none` (headless: no display; desktop offers ignored; tool peers get a nominal 1920x1080 screen + Allow permissions, which the port-mapping viewer requires) |
+| `UU_INPUT_BACKEND` | `auto` (uinput on Wayland/portal when `/dev/uinput` is accessible, udev `uaccess` rule in README) / `uinput` / `native`. X11 keeps XTest (held-key autorepeat handling) |
+| `UU_TERMINAL_SHORTCUTS=0` | disable Ctrl+V → Ctrl+Shift+V in focused X11 terminals (Mac Cmd and Ctrl both arrive as VK_LCONTROL) |
+| `contrib/virtual-desktop/` | Xvfb + session (`UU_VIRTUAL_SESSION`, `UU_VIRTUAL_BUS=user|private`) for monitorless hosts; serve it with `DISPLAY=:99` |
 | `UU_VIDEO_ENCODER=cpu` | force libx264 instead of NVENC |
 | `UU_FFMPEG_ROOT` | FFmpeg prefix (`bin/ffmpeg`, libs in `lib/x86_64-linux-gnu`) |
 | `UU_AUDIO=0`, `UU_AUDIO_SOURCE` | disable sound / choose the Pulse source (default `@DEFAULT_MONITOR@`) |
@@ -123,7 +126,7 @@ every 60 s.
 | `src/webrtc.rs` | peer connection, data channels, CONTROL dispatch, initialization messages |
 | `src/video.rs`, `src/capture_setting.rs` | FFmpeg H.264 pipeline; viewer quality/fps/resolution settings |
 | `src/audio.rs` | Pulse/PipeWire monitor → Opus audio track |
-| `src/input.rs`, `src/input_mapping.rs` | input injection (X11 XTest / Wayland / portal), Windows VK → keysym |
+| `src/input.rs`, `src/input_mapping.rs`, `src/uinput.rs` | input injection (X11 XTest / Wayland / portal / uinput), Windows VK → keysym → evdev |
 | `src/cursor.rs` | pointer shape mirroring (X11) |
 | `src/clipboard*.rs` | text clipboard bridge and protocol |
 | `src/file_trans.rs` | FileTransferFtp RPC |
@@ -196,6 +199,9 @@ started a second full host server instead, so check that a subcommand exists in 
 - Remote keys repeat at high RTT because key-up arrives after the X autorepeat delay. XTEST repeats through the
   master keyboard; the engine disables global autorepeat only while a remote key is held.
 - Interactive shells ignore SIGTERM: the server HUPs/KILLs PTY sessions on shutdown.
+- An explicit `DISPLAY` that cannot be opened is an error; the X11 engine falls back to `:0`/`:1` only when DISPLAY is unset.
+- systemd/D-Bus-activated apps (GNOME Terminal, portals) run with the user manager's environment, not the caller's:
+  a private `dbus-run-session` bus does not bring them onto a virtual display.
 - GTK windows stop repainting while GNOME is locked or the monitor is off; test UI on Xvfb or after unlock.
 - logind `unlock-session` by the session owner clears the GNOME shield in ~3 s.
 - GNOME closes the portal session on lock; capture/input must share one portal session and be rebuilt after
