@@ -62,8 +62,8 @@ Apart from GNOME on X11, these desktops have been tested in virtual machines so 
 real hardware, please [open an issue](../../issues) with your distribution, desktop, GPU and the relevant lines from
 `journalctl --user -u uuremote-native.service`.
 
-Wayland limits: single screen, fixed resolution. The portal backend does not support clipboard, screen wake or
-dynamic resolution yet. On the first connection the desktop asks for "Remote Desktop / Screen Sharing"
+Wayland limits: single screen, fixed resolution. The portal backend does not support screen wake or
+dynamic resolution yet; the clipboard syncs while the viewer's remote window has focus. On the first connection the desktop asks for "Remote Desktop / Screen Sharing"
 permission; the permission is remembered once granted.
 
 ## Not implemented / not supported
