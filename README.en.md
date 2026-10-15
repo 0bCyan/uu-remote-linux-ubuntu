@@ -94,7 +94,7 @@ mapping and hardware acceleration remain unverified. This is not zero-copy VAAPI
 | Privacy screen on the host | Not implemented |
 | Microphone (viewer audio played on the host) | Not implemented (needs a virtual sound card) |
 | Plugins such as the WoW queue notifier | Not supported; the client is told that no plugins exist |
-| Access before login (greeter / no user logged in) | The greeter cannot be controlled; without a logged-in user use headless mode or a virtual desktop (see below) |
+| Linux login screen | The system login screen (before anyone logs in to the Linux desktop) cannot be controlled yet; use headless mode or a virtual desktop (see below). This is about the Linux login: **without a UU account** the host can now be used through remote assistance |
 | Relay connections on restrictive networks | Uses the ICE servers provided by the UU cloud; complex network setups are not thoroughly tested |
 | Acting as a viewer (controlling other machines from Linux) | Out of scope |
 
