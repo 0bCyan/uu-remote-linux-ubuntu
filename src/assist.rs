@@ -477,10 +477,15 @@ mod tests {
         let ui = LocalUi::Tty(tokio::io::unix::AsyncFd::new(slave).unwrap());
         let mut master = std::fs::File::from(pair.master);
         ui.show("fixture-123", "FIXTURE8", false, Verify::Temporary, Refresh::Session, false).unwrap();
-        let mut bytes = [0u8; 1024];
-        let n = master.read(&mut bytes).unwrap();
-        let text = std::str::from_utf8(&bytes[..n]).unwrap();
-        assert!(text.contains("fixture-123") && text.contains("FIXTURE8") && text.contains("false"));
+        // A PTY may deliver the banner in several chunks: read until complete (bounded).
+        let mut text = String::new();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        let complete = |t: &str| t.contains("fixture-123") && t.contains("FIXTURE8") && t.contains("false") && t.contains("off=");
+        while !complete(&text) && std::time::Instant::now() < deadline {
+            let mut bytes = [0u8; 1024];
+            match master.read(&mut bytes) { Ok(n) if n > 0 => text.push_str(&String::from_utf8_lossy(&bytes[..n])), _ => break }
+        }
+        assert!(complete(&text));
         for (input, expected) in [(b"unknown\nallow\n".as_slice(), 0), (b"reset\n".as_slice(), 1), (b"off\n".as_slice(), 2)] {
             master.write_all(input).unwrap();
             let command = tokio::time::timeout(std::time::Duration::from_secs(2), ui.command()).await.unwrap();
