@@ -24,7 +24,7 @@ pub struct Config {
     pub target_bps: i64,
     pub max_bps: i64,
     pub buffer_bits: i64,
-    pub gpu: bool,
+    pub encoder: crate::video::Encoder,
     /// Capture on XDamage changes (XShm) instead of x11grab; `UU_CAPTURE=grab` turns it off.
     pub damage: bool,
 }
@@ -74,15 +74,16 @@ fn drain(encoder: &mut encoder::Video, packet: &mut Packet, units: &mpsc::Sender
 /// Opens the H.264 encoder for `config`. Returns the encoder, its input pixel format and output size.
 fn open_encoder(config: &Config) -> Result<(encoder::Video, Pixel, u32, u32), String> {
     let (width, height) = config.output.unwrap_or(config.input);
-    let codec = encoder::find_by_name(if config.gpu { "h264_nvenc" } else { "libx264" })
+    let codec = encoder::find_by_name(config.encoder.name())
         .ok_or("H.264 encoder is not available in this FFmpeg build")?;
     // Allocate for this codec so FFmpeg fills its defaults; libx264 rejects a context allocated without one.
     let mut context = unsafe { codec::context::Context::wrap(ff::sys::avcodec_alloc_context3(codec.as_ptr()), None) }.encoder().video().map_err(text)?;
     context.set_width(width);
     context.set_height(height);
     // NVENC takes packed BGR0 directly, so the GPU path skips the CPU colour conversion to YUV420P.
-    let pixel = if config.gpu { Pixel::BGRZ } else { Pixel::YUV420P };
-    context.set_format(pixel);
+    let pixel = match config.encoder { crate::video::Encoder::Nvenc => Pixel::BGRZ, crate::video::Encoder::Vaapi => Pixel::NV12, _ => Pixel::YUV420P };
+    context.set_format(if config.encoder == crate::video::Encoder::Vaapi { Pixel::VAAPI } else { pixel });
+    if config.encoder == crate::video::Encoder::Vaapi { attach_vaapi(&mut context, width, height)?; }
     context.set_time_base(Rational::new(1, config.fps as i32));
     context.set_frame_rate(Some(Rational::new(config.fps as i32, 1)));
     context.set_gop(config.gop);
@@ -98,7 +99,10 @@ fn open_encoder(config: &Config) -> Result<(encoder::Video, Pixel, u32, u32), St
     let cq = config.cq.to_string();
     let gop = config.gop.to_string();
     let mut options = Dictionary::new();
-    if config.gpu {
+    if config.encoder == crate::video::Encoder::Vaapi {
+        for (key,value) in [("profile", "constrained_baseline"), ("rc_mode", "VBR"), ("async_depth", "1"), ("aud", "1")] { options.set(key,value); }
+        options.set("qmin", &cq);
+    } else if config.encoder == crate::video::Encoder::Nvenc {
         for (key, value) in [("preset", "p4"), ("tune", "ull"), ("profile", "baseline"), ("rc", "vbr"),
             ("rc-lookahead", "0"), ("zerolatency", "1"), ("delay", "0"), ("aud", "1"), ("forced-idr", "1")] {
             options.set(key, value);
@@ -114,6 +118,45 @@ fn open_encoder(config: &Config) -> Result<(encoder::Video, Pixel, u32, u32), St
     }
     let encoder = context.open_as_with(codec, options).map_err(text)?;
     Ok((encoder, pixel, width, height))
+}
+
+// Each codec owns a reference to its hardware frame pool. Every error path releases
+// the temporary device/pool refs; AVCodecContext releases its own ref on drop.
+fn attach_vaapi(context: &mut encoder::video::Video, width: u32, height: u32) -> Result<(), String> {
+    use ff::sys::*;
+    let device_name = CString::new(crate::video::vaapi_device()).map_err(|_| "Invalid VAAPI device")?;
+    unsafe {
+        let mut device = std::ptr::null_mut();
+        let result = av_hwdevice_ctx_create(&mut device, AVHWDeviceType::AV_HWDEVICE_TYPE_VAAPI, device_name.as_ptr(), std::ptr::null_mut(), 0);
+        if result < 0 { return Err(format!("VAAPI device initialization failed: {}", text(ff::Error::from(result)))); }
+        let mut pool = av_hwframe_ctx_alloc(device);
+        av_buffer_unref(&mut device);
+        if pool.is_null() { return Err("VAAPI frame pool allocation failed".into()); }
+        let frames = (*pool).data as *mut AVHWFramesContext;
+        (*frames).format = AVPixelFormat::AV_PIX_FMT_VAAPI;
+        (*frames).sw_format = AVPixelFormat::AV_PIX_FMT_NV12;
+        (*frames).width = width as i32;
+        (*frames).height = height as i32;
+        (*frames).initial_pool_size = 8;
+        let result = av_hwframe_ctx_init(pool);
+        if result < 0 { av_buffer_unref(&mut pool); return Err(format!("VAAPI frame pool initialization failed: {}", text(ff::Error::from(result)))); }
+        (*context.as_mut_ptr()).hw_frames_ctx = pool;
+    }
+    Ok(())
+}
+
+fn send_video_frame(encoder: &mut encoder::Video, frame: &frame::Video, kind: crate::video::Encoder) -> Result<(), String> {
+    if kind != crate::video::Encoder::Vaapi { return encoder.send_frame(frame).map_err(text); }
+    let mut uploaded = frame::Video::empty();
+    unsafe {
+        let result = ff::sys::av_hwframe_get_buffer((*encoder.as_ptr()).hw_frames_ctx, uploaded.as_mut_ptr(), 0);
+        if result < 0 { return Err(text(ff::Error::from(result))); }
+        let result = ff::sys::av_hwframe_transfer_data(uploaded.as_mut_ptr(), frame.as_ptr(), 0);
+        if result < 0 { return Err(text(ff::Error::from(result))); }
+        let result = ff::sys::av_frame_copy_props(uploaded.as_mut_ptr(), frame.as_ptr());
+        if result < 0 { return Err(text(ff::Error::from(result))); }
+    }
+    encoder.send_frame(&uploaded).map_err(text)
 }
 
 /// Runs until `stop` is set or the receiver is dropped. A set `idr` flag forces the next frame to be an IDR.
@@ -184,7 +227,7 @@ pub fn run(config: Config, units: mpsc::Sender<Vec<u8>>, stop: Arc<AtomicBool>, 
 
         frame.set_pts(Some(slot));
         frame.set_kind(if idr.swap(false, Ordering::AcqRel) { picture::Type::I } else { picture::Type::None });
-        encoder.send_frame(frame).map_err(text)?;
+        send_video_frame(&mut encoder, frame, config.encoder)?;
         if !drain(&mut encoder, &mut packet, &units)? { return Ok(()); }
     }
     Ok(())
@@ -244,7 +287,7 @@ fn run_damage(config: Config, mut capture: DamageCapture, units: mpsc::Sender<Ve
         };
         frame.set_pts(Some(slot));
         frame.set_kind(if idr.swap(false, Ordering::AcqRel) { picture::Type::I } else { picture::Type::None });
-        encoder.send_frame(frame).map_err(text)?;
+        send_video_frame(&mut encoder, frame, config.encoder)?;
         if !drain(&mut encoder, &mut packet, &units)? { return Ok(()); }
         let now = Instant::now();
         if dirty {

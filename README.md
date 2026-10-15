@@ -244,3 +244,12 @@ flowchart LR
 - 网易 UU 远程团队：做了一个好用的远程工具。
 - [webrtc-rs](https://github.com/webrtc-rs/webrtc)、FFmpeg、GTK 等开源项目。
 - 本项目的大部分代码在 Claude 和 Codex 的协助下完成。
+
+### VAAPI (opt-in / 显式启用)
+
+`UU_VIDEO_ENCODER=vaapi` selects Intel/AMD H.264 VAAPI; `UU_VAAPI_DEVICE` defaults to
+`/dev/dri/renderD128` (render-node permissions required). No automatic VAAPI selection.
+Both FFmpeg process and `--features inproc-av` upload NV12 frames to a VAAPI frame pool.
+VBR uses the viewer bitrate preset and CQ-derived minimum QP, no B-frames, async depth 1,
+AUD and the existing GOP/VFR timing. Unsupported device/driver/initialization falls back to libx264
+with a warning. Intel/AMD hardware acceptance is still required (未实机验证).

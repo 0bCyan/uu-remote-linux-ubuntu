@@ -53,9 +53,30 @@ struct CompleteFrame {
 
 const RTP_CLOCK: u64 = 90_000;
 
-/// `UU_VIDEO_ENCODER=cpu` keeps the virtual CPU display entirely off the GPU.
-pub fn gpu_encoder_requested() -> bool {
-    std::env::var("UU_VIDEO_ENCODER").map_or(true, |v| v != "cpu")
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Encoder { Cpu, Nvenc, Vaapi }
+impl Encoder {
+    pub(crate) fn requested() -> Self { Self::from_setting(std::env::var("UU_VIDEO_ENCODER").ok().as_deref()) }
+    fn from_setting(value: Option<&str>) -> Self {
+        match value { Some("cpu") => Self::Cpu, Some("vaapi") => Self::Vaapi, _ => Self::Nvenc }
+    }
+    pub(crate) fn name(self) -> &'static str { match self { Self::Cpu => "libx264", Self::Nvenc => "h264_nvenc", Self::Vaapi => "h264_vaapi" } }
+}
+pub(crate) fn vaapi_device() -> String { std::env::var("UU_VAAPI_DEVICE").unwrap_or_else(|_| "/dev/dri/renderD128".into()) }
+
+/// NV12 conversion must precede upload; scaling runs on software frames, before hwupload.
+fn vaapi_filter(output: Option<(u32, u32)>) -> String {
+    let scale = output.map_or(String::new(), |(w,h)| format!("scale={w}:{h}:flags=bilinear,"));
+    format!("{scale}format=nv12,hwupload")
+}
+fn vaapi_options(settings: &VideoSettings, gop: &str) -> Vec<String> {
+    let (maxrate, buffer) = rate_args(settings);
+    // QVBR is not uniformly available on Intel/AMD drivers. VBR + qmin sets a quality
+    // floor while retaining the viewer's bitrate cap; unsupported drivers fall back to CPU.
+    ["-c:v", "h264_vaapi", "-profile:v", "constrained_baseline", "-g", gop, "-bf", "0",
+        "-rc_mode", "VBR", "-b:v", &settings.max_kbps().map_or("16M".into(), |k| format!("{}k",k*3/4)),
+        "-maxrate", &maxrate, "-bufsize", &buffer, "-qmin", &settings.cq().to_string(), "-async_depth", "1", "-aud", "1"]
+        .into_iter().map(str::to_owned).collect()
 }
 
 /// Round UP (+1ns float guard) so webrtc's floor(duration*90000) yields exactly `ticks`.
@@ -121,12 +142,13 @@ async fn read_encoder(
     settings: VideoSettings, sequence: Arc<std::sync::atomic::AtomicU64>, idr: Arc<AtomicBool>,
 ) -> Result<(), String> {
     // The sequence is shared so a CPU fallback or settings restart continues it (skip statistics stay correct).
-    if !gpu_encoder_requested() { return read_encoder_with(size,display,portal,latest,false,sequence,settings,idr).await; }
-    match read_encoder_with(size,display.clone(),portal.clone(),latest.clone(),true,sequence.clone(),settings,idr.clone()).await {
+    let encoder = Encoder::requested();
+    if encoder == Encoder::Cpu { return read_encoder_with(size,display,portal,latest,Encoder::Cpu,sequence,settings,idr).await; }
+    match read_encoder_with(size,display.clone(),portal.clone(),latest.clone(),encoder,sequence.clone(),settings,idr.clone()).await {
         Ok(())=>Ok(()),
         Err(error) if !latest.is_closed()=>{
-            log::warn!("NVENC stream unavailable; switching scoped encoder to CPU: {}",error);
-            read_encoder_with(size,display,portal,latest,false,sequence,settings,idr).await
+            log::warn!("{} stream unavailable; switching scoped encoder to CPU: {}",encoder.name(),error);
+            read_encoder_with(size,display,portal,latest,Encoder::Cpu,sequence,settings,idr).await
         },
         Err(error)=>Err(error),
     }
@@ -167,7 +189,7 @@ fn rate_args(settings: &VideoSettings) -> (String, String) {
 }
 
 async fn read_encoder_with(
-    size: (u32,u32),display:String,portal:Option<Arc<crate::portal::PortalSession>>,latest:mpsc::Sender<Arc<CompleteFrame>>,gpu:bool,sequence:Arc<std::sync::atomic::AtomicU64>,
+    size: (u32,u32),display:String,portal:Option<Arc<crate::portal::PortalSession>>,latest:mpsc::Sender<Arc<CompleteFrame>>,encoder:Encoder,sequence:Arc<std::sync::atomic::AtomicU64>,
     mut settings: VideoSettings, #[cfg_attr(not(feature = "inproc-av"), allow(unused_variables))] idr: Arc<AtomicBool>,
 )->Result<(),String>{
     let wayland=display.starts_with("wayland:");
@@ -178,11 +200,11 @@ async fn read_encoder_with(
             display: display.clone(), input: size, output: settings.output, fps: u32::from(settings.fps),
             gop: gop_frames(settings.fps, true) as u32, cq: settings.cq() as u32,
             target_bps: settings.max_kbps().map_or(16_000, |k| i64::from(k) * 3 / 4) * 1000,
-            max_bps: max_kbps * 1000, buffer_bits: (max_kbps / 8).clamp(100, 500) * 1000, gpu,
+            max_bps: max_kbps * 1000, buffer_bits: (max_kbps / 8).clamp(100, 500) * 1000, encoder,
             damage: crate::inproc_encoder::damage_enabled(),
         };
         log::info!("Desktop encoder: display={} source={}x{} output={:?} fps={} cq={} maxrate={}k encoder={} pipeline=in-process",
-            display,size.0,size.1,settings.output,settings.fps,config.cq,max_kbps,if gpu{"h264_nvenc"}else{"libx264"});
+            display,size.0,size.1,settings.output,settings.fps,config.cq,max_kbps,encoder.name());
         return read_inprocess(config, latest, sequence, idr).await;
     }
     let size = format!("{}x{}", size.0, size.1);
@@ -194,13 +216,14 @@ async fn read_encoder_with(
     let (maxrate, bufsize) = rate_args(&settings);
     let cq = settings.cq().to_string();
     let target = settings.max_kbps().map_or("16M".to_string(), |k| format!("{}k", k * 3 / 4));
-    log::info!("Desktop encoder: display={} source={} output={:?} fps={} cq={} maxrate={} encoder={} low_latency=true",display,size,settings.output,settings.fps,cq,maxrate,if gpu{"h264_nvenc"}else{"libx264"});
+    log::info!("Desktop encoder: display={} source={} output={:?} fps={} cq={} maxrate={} encoder={} low_latency=true",display,size,settings.output,settings.fps,cq,maxrate,encoder.name());
     // A bundled FFmpeg prefix (config ffmpeg_root / UU_FFMPEG_ROOT) or `ffmpeg` on PATH.
     let mut command=match crate::config::ffmpeg_root() {
         Some(root) => { let mut c=Command::new(root.join("bin/ffmpeg")); c.env("LD_LIBRARY_PATH",root.join("lib/x86_64-linux-gnu")); c }
         None => Command::new("ffmpeg"),
     };
     command.args(["-hide_banner","-loglevel","error","-nostdin"]);
+    if encoder == Encoder::Vaapi { command.args(["-vaapi_device", &vaapi_device()]); }
     if wayland {
         command.args(["-f","rawvideo","-pixel_format","bgra","-video_size",&size,
             "-framerate",&fps,"-i","pipe:0","-an"]);
@@ -210,10 +233,14 @@ async fn read_encoder_with(
             "-video_size",&size,"-i",&display,"-an"]);
     }
     // 其他分辨率: scale the captured desktop (the host display mode is left untouched).
-    if let Some((width, height)) = settings.output {
+    if encoder == Encoder::Vaapi {
+        command.args(["-vf", &vaapi_filter(settings.output)]);
+    } else if let Some((width, height)) = settings.output {
         command.args(["-vf", &format!("scale={width}:{height}:flags=bilinear")]);
     }
-    if gpu{
+    if encoder == Encoder::Vaapi {
+        command.args(vaapi_options(&settings, &gop));
+    } else if encoder == Encoder::Nvenc {
         command.args(["-c:v","h264_nvenc","-preset","p4","-tune","ull",
             "-profile:v","baseline","-pix_fmt","yuv420p","-g",&gop,"-bf","0",
             "-rc","vbr","-cq",&cq,"-b:v",&target,"-maxrate",&maxrate,"-bufsize",&bufsize,
@@ -403,6 +430,20 @@ pub async fn stream_desktop(pc: Arc<RTCPeerConnection>, track: Arc<TrackLocalSta
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn vaapi_is_explicit_and_upload_follows_scale() {
+        assert_eq!(Encoder::from_setting(None), Encoder::Nvenc);
+        assert_eq!(Encoder::from_setting(Some("cpu")), Encoder::Cpu);
+        assert_eq!(Encoder::from_setting(Some("vaapi")), Encoder::Vaapi);
+        assert_eq!(vaapi_filter(None), "format=nv12,hwupload");
+        assert_eq!(vaapi_filter(Some((1280,720))), "scale=1280:720:flags=bilinear,format=nv12,hwupload");
+        let options = vaapi_options(&VideoSettings::default(), "30");
+        for pair in [["-g","30"], ["-bf","0"], ["-async_depth","1"], ["-aud","1"]] {
+            assert!(options.windows(2).any(|w| w[0] == pair[0] && w[1] == pair[1]));
+        }
+        assert!(!options.iter().any(|v| v == "-r" || v == "-pix_fmt"));
+    }
+
     #[tokio::test]
     async fn encoder_restart_stops_old_producer_before_starting_new_chain() {
         use std::sync::atomic::{AtomicBool, Ordering};

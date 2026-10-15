@@ -262,3 +262,12 @@ Released under the [GPL-3.0](LICENSE): you may use, modify and redistribute it, 
 - The NetEase UU Remote team, for a remote tool that is a pleasure to use.
 - [webrtc-rs](https://github.com/webrtc-rs/webrtc), FFmpeg, GTK and the other open-source projects this builds on.
 - Most of the code was written with the help of Claude and Codex.
+
+### VAAPI (opt-in / 显式启用)
+
+`UU_VIDEO_ENCODER=vaapi` selects Intel/AMD H.264 VAAPI; `UU_VAAPI_DEVICE` defaults to
+`/dev/dri/renderD128` (render-node permissions required). No automatic VAAPI selection.
+Both FFmpeg process and `--features inproc-av` upload NV12 frames to a VAAPI frame pool.
+VBR uses the viewer bitrate preset and CQ-derived minimum QP, no B-frames, async depth 1,
+AUD and the existing GOP/VFR timing. Unsupported device/driver/initialization falls back to libx264
+with a warning. Intel/AMD hardware acceptance is still required (未实机验证).
