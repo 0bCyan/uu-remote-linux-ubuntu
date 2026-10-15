@@ -56,7 +56,7 @@ use webrtc::WebRtcSession;
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
     // An unknown argument must never fall through to starting a second full host server.
-    const SUBCOMMANDS: [&str; 10] = ["virtual-audio-probe", "login", "unlock-check", "desktop-probe", "desktop-video-probe", "desktop-audio-probe", "wayland-capture",
+    const SUBCOMMANDS: [&str; 11] = ["desktop-input-probe", "virtual-audio-probe", "login", "unlock-check", "desktop-probe", "desktop-video-probe", "desktop-audio-probe", "wayland-capture",
         "wayland-input-probe", "clipboard-acceptance", "portal-acceptance"];
     if let Some(arg) = std::env::args().nth(1).filter(|a| !SUBCOMMANDS.contains(&a.as_str())) {
         let usage = format!("usage: uuremote-server [{}]\n  (no argument: run the host)", SUBCOMMANDS.join(" | "));
@@ -164,6 +164,30 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         let path=std::env::args().nth(2);
         return video::probe((screen.width,screen.height),screen.display.clone(),screen.portal.clone(),path).await.map_err(|e|e.into());
+    }
+    if std::env::args().nth(1).as_deref() == Some("desktop-input-probe") {
+        if std::fs::read_to_string("/proc/sys/kernel/hostname").unwrap_or_default().trim()!="uu-hyprland-test" {
+            return Err("Input acceptance is restricted to the isolated VM".into());
+        }
+        let screen=ScreenCapture::new()?;
+        let input=Arc::new(InputInjector::new());
+        input.bind_portal(screen.portal.clone());
+        let worker=input.start_pointer_worker();
+        // libinput discovers newly created uinput devices asynchronously.
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        input.mouse_absolute_normalized(0.25,0.25,(screen.width,screen.height));
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        input.mouse_absolute_normalized(0.5,0.5,(screen.width,screen.height));
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        input.mouse_button(1,true); input.mouse_button(1,false);
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        input.mouse_relative(32,0);
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        for key in b"UUWAYLAND" { input.windows_key_event(i32::from(*key),true); input.windows_key_event(i32::from(*key),false); }
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        worker.abort(); input.release_held();
+        println!("Desktop test events sent; verify the GTK acceptance report");
+        return Ok(());
     }
     if std::env::args().nth(1).as_deref() == Some("wayland-input-probe") {
         return wayland::input_probe().map_err(|e|e.into());

@@ -290,3 +290,26 @@ Changing the switch restarts only the scoped audio encoder; normal non-muted cap
 The supervisor imports DISPLAY and XAUTHORITY into the linger user bus, waits for authenticated
 X11 readiness, and keeps its cleanup trap alive. The sample drop-in uses `%t/uu-virtual-99.Xauthority`.
 Use a dedicated headless account. See the [setup and official Mac acceptance checklist](contrib/virtual-desktop/ACCEPTANCE.md).
+
+### Arch Linux / Omarchy
+
+```sh
+sudo pacman -S --needed base-devel rust pkgconf clang ffmpeg libx11 libxext libxtst libxfixes gtk3 \
+  wayland libxkbcommon wl-clipboard libpipewire glib2 libpulse
+cargo test --locked --features wayland
+cargo build --release --features wayland
+```
+
+Omarchy uses Hyprland: run in its user session, select `UU_DESKTOP_BACKEND=wayland`,
+and retain `WAYLAND_DISPLAY` / `XDG_RUNTIME_DIR`. This requires wlr-screencopy and the
+virtual input protocols supported by Hyprland; other compositors may need `--features wayland,portal`.
+For uinput, load `uinput` and apply the uaccess rule above; seat ACLs require an active login.
+For unattended accounts, explicitly restrict `/dev/uinput` access to a dedicated group.
+This permission can inject into the whole seat, including lock/greeter screens.
+`UU_INPUT_BACKEND=uinput` requests kernel devices; verify startup actually reports uinput.
+Optional VAAPI: `intel-media-driver` (modern Intel) or `libva-mesa-driver` (AMD), `libva-utils`
+for `vainfo`. Optional KMS: `libdrm`. Virtual Xfce: `xorg-server-xvfb xorg-xauth xorg-xdpyinfo
+xfce4-session xfce4-panel xfdesktop xfwm4 gnome-terminal`.
+Rolling Arch FFmpeg may be newer than supported `inproc-av` (FFmpeg 6.x); use the default process
+pipeline or build against a separate FFmpeg 6 prefix. Do not downgrade the system FFmpeg.
+User-bus headless setup and the official Mac checklist: [virtual desktop acceptance](contrib/virtual-desktop/ACCEPTANCE.md).
