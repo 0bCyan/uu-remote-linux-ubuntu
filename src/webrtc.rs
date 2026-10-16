@@ -165,7 +165,7 @@ impl WebRtcSession {
                     tokio::spawn(async move {
                     let ctx = ctx.lock().await.clone();
                     if let (Some(client), Some(ice)) = (&ctx.client_id, ctx.ice_id.as_ref().and_then(|v| v.as_str())) {
-                        let payload = crate::capability::device_capability(client, ice, 0, crate::video::FPS as i32, 5, hevc);
+                        let payload = crate::capability::device_capability(client, ice, 0, crate::video::display_fps() as i32, 5, hevc);
                         if let Err(e) = sig.emit_event(crate::capability::FORWARD_SETTING_EVENT, payload).await {
                             log::error!("Device capability notification failed: {}", e);
                         }
@@ -470,7 +470,7 @@ impl WebRtcSession {
                                 (26, Ok(crate::initialization::envelope(next_seq(), timestamp, 26,
                                     &crate::system_metrics::remote_download_path(&home)))),
                                 (18, Ok(crate::initialization::envelope(next_seq(), timestamp, 18,
-                                    &crate::capture_setting::codec_negotiation(screen_size, crate::video::FPS as u32, init_track.supports(crate::capture_setting::VideoCodec::H265))))),
+                                    &crate::capture_setting::codec_negotiation(screen_size, crate::video::display_fps(), init_track.supports(crate::capture_setting::VideoCodec::H265))))),
                                 (7, crate::capture_setting::screen_sources(next_seq(), timestamp, screen_size, init_video.borrow().output, "Linux desktop")),
                             ];
                             if desktop && screen.init_error.is_none() {

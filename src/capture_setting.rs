@@ -188,7 +188,7 @@ pub fn screen_sources(seq: u64, timestamp: u64, native: (u32, u32), output: Opti
     // DPI_SCALE starts at version 5; the observed v4 request uses fields 5/6 as pixels.
     // Keep every advertised rectangle in that space; Portal/EIS maps input independently.
     let resolution = WinRect { left: 0, top: 0, width: w, height: h, pixel_width: w, pixel_height: h };
-    let screens = [Screen { id: 0, fps: crate::video::FPS as i32, resolution, primary: true, dpr: 1.0,
+    let screens = [Screen { id: 0, fps: crate::video::display_fps() as i32, resolution, primary: true, dpr: 1.0,
         display_name: name, video_track_index: 0, screen_type: 0, builtin_screen_type: 0,
         scaled: &scaled, current: output.map(|(w, h)| (w as i32, h as i32)) }];
     crate::initialization::encode_screen_sources(seq, timestamp, &screens, 0)

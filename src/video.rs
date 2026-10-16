@@ -14,6 +14,60 @@ use crate::capture_setting::{VideoCodec, VideoSettings};
 
 /// Default frame rate; the viewer's 帧率 setting overrides it per connection.
 pub const FPS: u64 = 60;
+
+/// Refresh rate reported to the viewer (display_info / capability / codec negotiation), like the
+/// official hosts report the monitor's mode (official Mac capability: 120). `UU_DISPLAY_FPS` overrides;
+/// Hyprland from `hyprctl -j monitors`, X11 from the current `xrandr` mode, otherwise 60.
+pub fn display_fps() -> u32 {
+    static CACHE: std::sync::Mutex<Option<(std::time::Instant, u32)>> = std::sync::Mutex::new(None);
+    let mut cache = CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some((at, fps)) = *cache { if at.elapsed() < Duration::from_secs(30) { return fps; } }
+    let fps = std::env::var("UU_DISPLAY_FPS").ok().and_then(|v| v.trim().parse::<f64>().ok())
+        .or_else(detect_refresh).map_or(FPS as u32, |hz| hz.round().clamp(24.0, 360.0) as u32);
+    *cache = Some((std::time::Instant::now(), fps));
+    fps
+}
+fn detect_refresh() -> Option<f64> {
+    if cfg!(test) { return None; }
+    // Bounded: a display tool must never stall connection setup (e.g. an X server started on demand).
+    let run = |program: &str, args: &[&str]| -> Option<String> {
+        use std::io::Read;
+        let mut child = std::process::Command::new(program).args(args).stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::null()).spawn().ok()?;
+        let deadline = std::time::Instant::now() + Duration::from_secs(1);
+        let status = loop {
+            if let Some(status) = child.try_wait().ok()? { break status; }
+            if std::time::Instant::now() >= deadline { let _ = child.kill(); let _ = child.wait(); return None; }
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        let mut text = String::new();
+        child.stdout.take()?.read_to_string(&mut text).ok()?;
+        status.success().then_some(text)
+    };
+    if std::env::var_os("HYPRLAND_INSTANCE_SIGNATURE").is_some() {
+        if let Some(hz) = run("hyprctl", &["-j", "monitors"]).as_deref().and_then(hyprland_refresh) { return Some(hz); }
+    }
+    if std::env::var_os("DISPLAY").is_some() { return run("xrandr", &["--current"]).as_deref().and_then(xrandr_refresh); }
+    None
+}
+/// The focused monitor (else the first); the portal/Hyprland capture serves one output.
+fn hyprland_refresh(json: &str) -> Option<f64> {
+    let monitors: Vec<serde_json::Value> = serde_json::from_str(json).ok()?;
+    let monitor = monitors.iter().find(|m| m["focused"] == true).or(monitors.first())?;
+    monitor["refreshRate"].as_f64().filter(|hz| *hz > 0.0)
+}
+/// The current mode (`60.00*+`) of the output marked `primary`, else of the first connected output.
+fn xrandr_refresh(text: &str) -> Option<f64> {
+    let current = |lines: &mut dyn Iterator<Item = &str>| lines.take_while(|l| l.starts_with(' '))
+        .flat_map(str::split_whitespace).find(|t| t.contains('*'))
+        .and_then(|t| t.trim_end_matches(['*', '+']).parse::<f64>().ok());
+    let mut lines = text.lines();
+    while let Some(line) = lines.next() {
+        if line.contains(" connected primary") { return current(&mut lines); }
+    }
+    let mut lines = text.lines().skip_while(|l| !l.contains(" connected")).skip(1);
+    current(&mut lines)
+}
 /// Keyframe interval. All-intra 60fps measured 30 Mbit/s on the real desktop (saturating the
 /// viewer's Wi-Fi: 3-6 fps received). On a static desktop with NVENC CQ18 a 0.5s GOP measured
 /// 7.7 Mbit/s and a 2s GOP 1.9 Mbit/s. A broken prediction chain freezes until the next IDR or
@@ -152,7 +206,15 @@ fn cpu_hevc_options(settings: &VideoSettings, gop: &str) -> Vec<String> {
     options
 }
 
-fn encoder_options(settings: &VideoSettings, encoder: Encoder, gop: &str) -> Vec<String> {
+/// NVENC converts packed RGB on the GPU (BT.601 limited range, tagged bt470bg like the swscale default;
+/// compared on the 3090), so 4:2:0 without scaling skips the CPU BGRA→YUV pass (#16: ~2 cores at 4K).
+/// `input` is the source pixel format; `UU_NVENC_RGB=0` restores CPU conversion.
+fn nvenc_rgb_input(settings: &VideoSettings, encoder: Encoder, input: &'static str) -> Option<&'static str> {
+    (encoder == Encoder::Nvenc && settings.chroma != crate::capture_setting::CHROMA_444 && settings.output.is_none()
+        && std::env::var("UU_NVENC_RGB").as_deref() != Ok("0")).then_some(input)
+}
+
+fn encoder_options(settings: &VideoSettings, encoder: Encoder, gop: &str, rgb: Option<&'static str>) -> Vec<String> {
     let (maxrate, bufsize) = rate_args(settings, encoder);
     let cq = settings.cq().to_string();
     let target = settings.max_kbps().map_or("16M".to_string(), |k| format!("{}k", k * 3 / 4));
@@ -160,7 +222,7 @@ fn encoder_options(settings: &VideoSettings, encoder: Encoder, gop: &str) -> Vec
     let (profile, pix_fmt) = chroma_args(settings, encoder);
     if encoder == Encoder::Nvenc {
         return ["-c:v", encoder.name_for(settings.codec), "-preset", "p4", "-tune", "ull",
-            "-profile:v", profile, "-pix_fmt", pix_fmt, "-g", gop, "-bf", "0",
+            "-profile:v", profile, "-pix_fmt", rgb.unwrap_or(pix_fmt), "-g", gop, "-bf", "0",
             "-rc", "vbr", "-cq", &cq, "-b:v", &target, "-maxrate", &maxrate, "-bufsize", &bufsize,
             "-rc-lookahead", "0", "-zerolatency", "1", "-delay", "0", "-aud", "1"]
             .into_iter().map(str::to_owned).collect();
@@ -291,7 +353,7 @@ pub async fn hevc_available() -> bool {
             if encoder == Encoder::Vaapi { command.args(["-vaapi_device", &vaapi_device()]); }
             command.args(["-f", "lavfi", "-i", "color=black:size=256x256:rate=1", "-frames:v", "1", "-an"]);
             if encoder == Encoder::Vaapi { command.args(["-vf", &vaapi_filter(None)]); }
-            command.args(encoder_options(&settings, encoder, "30"));
+            command.args(encoder_options(&settings, encoder, "30", None));
             command.args(["-f", "hevc", "pipe:1"]).kill_on_drop(true).stderr(std::process::Stdio::null());
             if let Ok(Ok(output)) = tokio::time::timeout(Duration::from_secs(5), command.output()).await {
                 if output.status.success() && is_independent_frame_for(&output.stdout, VideoCodec::H265) {
@@ -459,7 +521,9 @@ async fn read_encoder_with(
     let gop = gop_frames(settings.fps, false).to_string();
     let (maxrate, _) = rate_args(&settings, encoder);
     let cq = settings.cq().to_string();
-    log::info!("Desktop encoder: display={} source={} output={:?} fps={} cq={} maxrate={} encoder={} pix_fmt={} low_latency=true",display,size,settings.output,settings.fps,cq,maxrate,encoder.name_for(settings.codec),if encoder == Encoder::Vaapi { "nv12" } else { chroma_args(&settings, encoder).1 });
+    // x11grab delivers bgr0; the Wayland/portal/KMS pipe is bgra.
+    let rgb = nvenc_rgb_input(&settings, encoder, if wayland { "bgra" } else { "bgr0" });
+    log::info!("Desktop encoder: display={} source={} output={:?} fps={} cq={} maxrate={} encoder={} pix_fmt={} low_latency=true",display,size,settings.output,settings.fps,cq,maxrate,encoder.name_for(settings.codec),if encoder == Encoder::Vaapi { "nv12" } else { rgb.unwrap_or(chroma_args(&settings, encoder).1) });
     // A bundled FFmpeg prefix (config ffmpeg_root / UU_FFMPEG_ROOT) or `ffmpeg` on PATH.
     let ffmpeg = ffmpeg_spec();
     let mut command = ffmpeg.command();
@@ -479,7 +543,7 @@ async fn read_encoder_with(
     } else if let Some((width, height)) = settings.output {
         command.args(["-vf", &format!("scale={width}:{height}:flags=bilinear")]);
     }
-    command.args(encoder_options(&settings, encoder, &gop));
+    command.args(encoder_options(&settings, encoder, &gop, rgb));
     // x11grab paces against an absolute schedule; after a capture stall it grabs
     // back-to-back to "catch up" (measured 69 frames in 200ms). vfr on a 1/FPS
     // timebase drops those same-slot frames instead of encoding a burst. The
@@ -758,6 +822,16 @@ pub async fn stream_desktop(pc: Arc<RTCPeerConnection>, track: Arc<crate::video_
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn display_refresh_parsers() {
+        let xrandr = "Screen 0: minimum 8 x 8, current 5760 x 2160\nHDMI-1 connected 1920x1080+3840+0 (normal) 0mm x 0mm\n   1920x1080     60.00*+  50.00\nDP-1 connected primary 3840x2160+0+0 (normal) 600mm x 340mm\n   3840x2160     60.00 +  143.98*\n   2560x1440    120.00\n";
+        assert_eq!(xrandr_refresh(xrandr), Some(143.98));
+        assert_eq!(xrandr_refresh("Screen 0:\nVGA-1 disconnected\nHDMI-1 connected 1920x1080+0+0\n   1920x1080     74.97*+  60.00\n"), Some(74.97));
+        assert_eq!(xrandr_refresh("Screen 0:\nHDMI-1 connected\n   1920x1080     60.00 +\n"), None);
+        assert_eq!(hyprland_refresh(r#"[{"name":"HDMI-A-1","focused":false,"refreshRate":60.0},{"name":"DP-1","focused":true,"refreshRate":143.856}]"#), Some(143.856));
+        assert_eq!(hyprland_refresh("[]"), None);
+    }
+
     #[test]
     fn native_wayland_child_uses_requested_capture_rate() {
         for fps in [5,30,60,90,144] {
