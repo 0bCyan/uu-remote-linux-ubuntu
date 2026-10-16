@@ -60,19 +60,37 @@ pub fn key(symbol:u64,pressed:bool)->i32 {
 }
 
 /// A separate process owns capture; encoder cancellation closes its pipe.
+/// Capture and the pipe write run on separate threads with two frame buffers, so a
+/// slow encoder read no longer delays the next screencopy request.
 pub fn capture_stdout() -> Result<(),String> {
     use std::io::Write;
     let (w,h)=init()?;
-    let mut frame=vec![0u8;(w as usize)*(h as usize)*4];
-    let mut stdout=std::io::stdout().lock();
+    let size=(w as usize)*(h as usize)*4;
     let fps=capture_fps(std::env::var("UU_WAYLAND_FPS").ok().as_deref())?;
     let interval=std::time::Duration::from_nanos(1_000_000_000/u64::from(fps));
+    // A larger pipe absorbs more of each frame per write; failure keeps the default.
+    #[cfg(target_os="linux")]
+    let _=unsafe { libc::fcntl(1, libc::F_SETPIPE_SZ, 1<<20) };
+    let (full_tx,full_rx)=std::sync::mpsc::sync_channel::<Vec<u8>>(1);
+    let (free_tx,free_rx)=std::sync::mpsc::sync_channel::<Vec<u8>>(2);
+    for _ in 0..2 { free_tx.send(vec![0u8;size]).map_err(|_|"Capture buffers")?; }
+    let writer=std::thread::Builder::new().name("uu-wl-write".into()).spawn(move || -> Result<(),String> {
+        let mut stdout=std::io::stdout().lock();
+        for frame in full_rx {
+            stdout.write_all(&frame).map_err(|e|format!("Capture pipe: {e}"))?;
+            if free_tx.send(frame).is_err() { break; }
+        }
+        Ok(())
+    }).map_err(|e|format!("Capture writer: {e}"))?;
     loop {
         let start=std::time::Instant::now();
+        let Ok(mut frame)=free_rx.recv() else { break };
         capture(&mut frame)?;
-        stdout.write_all(&frame).map_err(|e|format!("Capture pipe: {e}"))?;
+        if full_tx.send(frame).is_err() { break; }
         if let Some(left)=interval.checked_sub(start.elapsed()) { std::thread::sleep(left); }
     }
+    drop(full_tx);
+    writer.join().map_err(|_|"Capture writer panicked")?
 }
 
 pub(crate) fn capture_fps(value:Option<&str>)->Result<u32,String> {

@@ -386,7 +386,24 @@ async fn read_encoder_with(
     // back-to-back to "catch up" (measured 69 frames in 200ms). vfr on a 1/FPS
     // timebase drops those same-slot frames instead of encoding a burst.
     let time_base = format!("1/{fps}");
-    if wayland { command.stdin(std::process::Stdio::piped()); }
+    // Native Wayland: the capture process writes straight into the encoder's stdin;
+    // relaying 33 MB 4K frames through this process cost a full extra copy per frame.
+    let mut native_capture=None;
+    if wayland && kms_capture.is_none() && portal.is_none() {
+        // Linux keeps the running executable inode accessible after a scoped
+        // development/release replacement; current_exe may name a deleted path.
+        #[cfg(target_os="linux")]
+        let executable=std::path::PathBuf::from("/proc/self/exe");
+        #[cfg(not(target_os="linux"))]
+        let executable=std::env::current_exe().map_err(|e|format!("Capture executable: {e}"))?;
+        let mut capture=wayland_capture_command(&executable,settings.fps)
+            .kill_on_drop(true).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::inherit())
+            .spawn().map_err(|e|format!("Start Wayland capture: {e}"))?;
+        let source:std::process::Stdio=capture.stdout.take().ok_or("Capture stdout missing")?
+            .try_into().map_err(|e|format!("Capture pipe: {e}"))?;
+        command.stdin(source);
+        native_capture=Some(capture);
+    } else if wayland { command.stdin(std::process::Stdio::piped()); }
     let mut child=command.args(["-fps_mode","vfr","-enc_time_base",&time_base,"-f",if settings.codec == VideoCodec::H265 { "hevc" } else { "h264" },"pipe:1"])
         .kill_on_drop(true)
         .stdout(std::process::Stdio::piped())
@@ -427,22 +444,10 @@ async fn read_encoder_with(
                 sink.write_all(&frame).await.map_err(|e|format!("Portal encoder pipe: {e}"))?;
             }
         })))
-    } else if wayland {
-        // Linux keeps the running executable inode accessible after a scoped
-        // development/release replacement; current_exe may name a deleted path.
-        #[cfg(target_os="linux")]
-        let executable=std::path::PathBuf::from("/proc/self/exe");
-        #[cfg(not(target_os="linux"))]
-        let executable=std::env::current_exe().map_err(|e|format!("Capture executable: {e}"))?;
-        let mut capture=wayland_capture_command(&executable,settings.fps)
-            .kill_on_drop(true).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::inherit())
-            .spawn().map_err(|e|format!("Start Wayland capture: {e}"))?;
-        let mut source=capture.stdout.take().ok_or("Capture stdout missing")?;
-        let mut sink=child.stdin.take().ok_or("Encoder stdin missing")?;
+    } else if let Some(mut capture)=native_capture {
         Some(EncoderTask(tokio::spawn(async move {
-            let result=tokio::io::copy(&mut source,&mut sink).await;
-            drop(capture);
-            result.map(|_|()).map_err(|e|format!("Wayland frame pipe: {e}"))
+            let status=capture.wait().await.map_err(|e|format!("Wayland capture: {e}"))?;
+            Err(format!("Wayland capture exited: {status}"))
         })))
     } else { None };
     let mut stdout = child.stdout.take().ok_or("Encoder stdout missing")?;

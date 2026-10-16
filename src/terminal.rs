@@ -75,6 +75,20 @@ struct Session {
 }
 
 impl Session {
+    /// Lock order sink → scrollback matches OPEN, so a reattach snapshot sees each
+    /// chunk either in the replay or live, never both.
+    fn record_output(&self, data: &[u8]) {
+        let mut sink = self.sink.lock().unwrap();
+        {
+            let mut sb = self.scrollback.lock().unwrap();
+            sb.extend(data);
+            let excess = sb.len().saturating_sub(SCROLLBACK);
+            sb.drain(..excess);
+        }
+        if let Some(tx) = sink.as_ref() {
+            if tx.send(encode(STDOUT, self.id, data)).is_err() { *sink = None; }
+        }
+    }
     fn emit(&self, kind: u8, payload: &[u8]) -> bool {
         let mut sink = self.sink.lock().unwrap();
         if let Some(tx) = sink.as_ref() {
@@ -83,8 +97,10 @@ impl Session {
         }
         false
     }
+    // The size lock is held across the ioctl so a delayed restore cannot reapply a stale size.
     fn resize(&self, cols: u16, rows: u16) {
-        *self.size.lock().unwrap() = (cols, rows);
+        let mut size = self.size.lock().unwrap();
+        *size = (cols, rows);
         self.set_winsize(cols, rows);
     }
     fn set_winsize(&self, cols: u16, rows: u16) {
@@ -94,14 +110,16 @@ impl Session {
     /// Full-screen programs repaint only on SIGWINCH, which an unchanged size never raises:
     /// shrink by one row, then restore the latest requested size after a pause.
     fn force_redraw(self: &Arc<Self>) {
-        let (cols, rows) = *self.size.lock().unwrap();
-        if rows <= 1 { return; }
-        self.set_winsize(cols, rows - 1);
+        {
+            let size = self.size.lock().unwrap();
+            if size.1 <= 1 { return; }
+            self.set_winsize(size.0, size.1 - 1);
+        }
         let s = self.clone();
         std::thread::spawn(move || {
             std::thread::sleep(std::time::Duration::from_millis(150));
-            let (cols, rows) = *s.size.lock().unwrap();
-            s.set_winsize(cols, rows);
+            let size = s.size.lock().unwrap();
+            s.set_winsize(size.0, size.1);
         });
     }
     fn write(&self, data: &[u8]) {
@@ -163,15 +181,7 @@ fn spawn(requested_id: u32, cols: u16, rows: u16, shell: Option<&str>) -> Result
         loop {
             match reader.read(&mut buf) {
                 Ok(0) | Err(_) => break,
-                Ok(n) => {
-                    {
-                        let mut sb = worker.scrollback.lock().unwrap();
-                        sb.extend(&buf[..n]);
-                        let excess = sb.len().saturating_sub(SCROLLBACK);
-                        sb.drain(..excess);
-                    }
-                    worker.emit(STDOUT, &buf[..n]);
-                }
+                Ok(n) => worker.record_output(&buf[..n]),
             }
         }
         let code = child.wait().ok().and_then(|s| s.code()).unwrap_or(-1);
