@@ -356,6 +356,9 @@ impl SignalingClient {
                                 let ice_id = ["ice_id", "iceId"].iter().find_map(|k| header.get(*k).or_else(|| header.get("data").and_then(|d| d.get(*k))))
                                     .and_then(|v| v.as_str()).map(str::to_owned);
                                 log::info!("be-controlled connect request: capture_type={} header_keys={:?} ice_id_present={}", capture_type, keys, ice_id.is_some());
+                                // Structure only (numbers, types, lengths): documents what the viewer and cloud send.
+                                let header_shape: String = crate::protocol::json_shape(&header, 4).chars().take(6000).collect();
+                                log::info!("Connect request shape: app_data={} header={}", crate::protocol::wire_shape(data, 3), header_shape);
                                 // ConnectOptions 4 decoder_cap_list: DecoderCap {1 fps, 2 codec_type (1 H264, 2 H265),
                                 // 3 width, 4 height, 5 chroma_format (1 4:2:0, 3 4:4:4)}. Numbers only.
                                 let caps: Vec<Vec<(u32, u64)>> = fields.iter().flatten().filter(|f| f.number == 4).filter_map(|f| match f.value {
