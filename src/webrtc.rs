@@ -273,9 +273,15 @@ impl WebRtcSession {
         let control_video_track = video_track.clone();
         let stream_settings = video_settings.clone();
         if desktop {
+            let state_pc = streaming_pc.clone();
             tokio::spawn(async move {
                 if let Err(e) = crate::video::stream_desktop(streaming_pc, video_track, capture_size, capture_display, portal, video_settings_rx, stream_settings, idr_request).await {
-                    log::error!("Live desktop stream stopped: {}", e);
+                    // A send racing the viewer's close fails with a misleading track error.
+                    if matches!(state_pc.connection_state(), RTCPeerConnectionState::Closed | RTCPeerConnectionState::Failed) {
+                        log::info!("Live desktop stream ended: peer connection closed ({})", e);
+                    } else {
+                        log::error!("Live desktop stream stopped: {}", e);
+                    }
                 }
             });
         } else {
