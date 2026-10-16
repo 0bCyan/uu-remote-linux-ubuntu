@@ -91,6 +91,36 @@ pub struct UUAuthClient {
     guest_id: Option<String>,
 }
 
+/// Transport failures name only the outer request; the cause (certificate, proxy, DNS,
+/// timeout) lives in the source chain. URL user-info (proxy credentials) and query
+/// strings are removed before the chain is shown.
+pub fn transport_error(error: &(dyn std::error::Error + 'static)) -> String {
+    let mut parts = vec![error.to_string()];
+    let mut source = error.source();
+    while let Some(cause) = source {
+        let text = cause.to_string();
+        if parts.last() != Some(&text) { parts.push(text); }
+        source = cause.source();
+        if parts.len() >= 8 { break; }
+    }
+    redact_urls(&parts.join(": "))
+}
+fn redact_urls(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(i) = rest.find("://") {
+        let (head, tail) = rest.split_at(i + 3);
+        out.push_str(head);
+        let end = tail.find(|c: char| c.is_whitespace() || c == ')' || c == '"' || c == '\'').unwrap_or(tail.len());
+        let url = &tail[..end];
+        let url = url.rsplit_once('@').map_or(url, |(_, host)| host);
+        out.push_str(url.split(['?', '#']).next().unwrap_or(""));
+        rest = &tail[end..];
+    }
+    out.push_str(rest);
+    out
+}
+
 impl UUAuthClient {
     pub fn new(creds: Credentials) -> Self {
         let http = reqwest::Client::builder()
@@ -200,7 +230,7 @@ impl UUAuthClient {
         let body_str = serde_json::to_string(body).map_err(|e| e.to_string())?;
         let resp = self.http.post(format!("{}{}", BASE_URL, path))
             .headers(self.build_headers("POST", path, &body_str)).body(body_str)
-            .send().await.map_err(|e| format!("HTTP post {path} failed: {e}"))?;
+            .send().await.map_err(|e| format!("HTTP post {path} failed: {}", transport_error(&e)))?;
         let status = resp.status().as_u16();
         let value = resp.json().await.unwrap_or(serde_json::Value::Null);
         Ok((status, value))
@@ -219,7 +249,7 @@ impl UUAuthClient {
     }
     async fn assist_send(&self, request: reqwest::Request) -> Result<(u16, serde_json::Value), String> {
         let response = self.http.execute(request)
-            .await.map_err(|_| "assist request transport failed")?;
+            .await.map_err(|e| format!("assist request transport failed: {}", transport_error(&e)))?;
         let status = response.status().as_u16();
         let bytes = response.bytes().await.map_err(|_| "assist response read failed")?;
         if bytes.len() > 65536 { return Err("assist response too large".into()); }
@@ -309,5 +339,11 @@ mod guest_tests {
         assert_eq!(headers["x-param-sign"], client.sign_request("POST", "/api/v1/guest/room/create", &params, ""));
         let mut without_guest = params; without_guest.remove("x-param-guest-id");
         assert_ne!(headers["x-param-sign"], client.sign_request("POST", "/api/v1/guest/room/create", &without_guest, ""));
+    }
+
+    #[test]
+    fn transport_error_redacts_proxy_credentials_and_queries() {
+        let text = super::redact_urls("proxy http://user:secret@proxy.example:3128 failed for (https://api.example/p?token=abc)");
+        assert_eq!(text, "proxy http://proxy.example:3128 failed for (https://api.example/p)");
     }
 }
