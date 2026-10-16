@@ -658,7 +658,12 @@ async fn serve(mut capture: Arc<ScreenCapture>, input: Arc<InputInjector>, shutd
                         }
                         let stale_portal=if desktop {
                             if let Some(session)=capture.portal.clone() {
-                                tokio::task::spawn_blocking(move || session.retire_if_closed()).await??
+                                // A failed check must not end the host loop; treat it as not stale.
+                                match tokio::task::spawn_blocking(move || session.retire_if_closed()).await {
+                                    Ok(Ok(stale)) => stale,
+                                    Ok(Err(error)) => { log::warn!("Portal staleness check failed: {error}"); false }
+                                    Err(_) => { log::warn!("Portal staleness check panicked"); false }
+                                }
                             } else { false }
                         } else { false };
                         if desktop && desktop_backend::headless() {
