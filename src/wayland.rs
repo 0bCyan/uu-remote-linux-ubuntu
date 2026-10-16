@@ -83,8 +83,9 @@ pub fn capture_stdout() -> Result<(),String> {
         Ok(())
     }).map_err(|e|format!("Capture writer: {e}"))?;
     loop {
-        let start=std::time::Instant::now();
+        // Time from buffer availability: a slow encoder read must not shorten the next interval.
         let Ok(mut frame)=free_rx.recv() else { break };
+        let start=std::time::Instant::now();
         capture(&mut frame)?;
         if full_tx.send(frame).is_err() { break; }
         if let Some(left)=interval.checked_sub(start.elapsed()) { std::thread::sleep(left); }

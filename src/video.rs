@@ -447,6 +447,8 @@ async fn read_encoder_with(
     } else if let Some(mut capture)=native_capture {
         Some(EncoderTask(tokio::spawn(async move {
             let status=capture.wait().await.map_err(|e|format!("Wayland capture: {e}"))?;
+            // Nothing awaits this task; log so the cause survives the generic encoder EOF.
+            log::warn!("Wayland capture exited: {status}");
             Err(format!("Wayland capture exited: {status}"))
         })))
     } else { None };
