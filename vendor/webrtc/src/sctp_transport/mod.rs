@@ -156,7 +156,10 @@ impl RTCSctpTransport {
                     association = sctp::association::Association::client(sctp::association::Config {
                         net_conn: Arc::clone(net_conn) as Arc<dyn Conn + Send + Sync>,
                         max_receive_buffer_size: 0,
-                        max_message_size: 0,
+                        // uu-remote-linux patch: the association's send limit ignores the remote
+                        // a=max-message-size and defaults to 64 KB; libwebrtc peers (official viewers,
+                        // our answers/offers) advertise 262144. A 5600-entry directory reply is ~73 KB.
+                        max_message_size: 262_144,
                         name: String::new(),
                     }) => {
                         break Arc::new(association?);
