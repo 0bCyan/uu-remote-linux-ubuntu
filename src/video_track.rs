@@ -107,6 +107,9 @@ mod tests {
         if hevc { register_hevc(&mut remote_media).unwrap(); }
         let mut setting = webrtc::api::setting_engine::SettingEngine::default();
         setting.set_ice_multicast_dns_mode(webrtc::ice::mdns::MulticastDnsMode::Disabled);
+        // UDP over IPv4 only: pairing every host interface (VPNs, IPv6) made ICE exceed the
+        // connect timeout when the whole suite runs in parallel.
+        setting.set_network_types(vec![webrtc::ice::network_type::NetworkType::Udp4]);
         let remote = APIBuilder::new().with_setting_engine(setting.clone()).with_media_engine(remote_media).build().new_peer_connection(RTCConfiguration::default()).await.unwrap();
         remote.add_transceiver_from_kind(RTPCodecType::Video, None).await.unwrap();
         let mut media = MediaEngine::default(); media.register_default_codecs().unwrap(); register_hevc(&mut media).unwrap();
@@ -141,7 +144,7 @@ mod tests {
         }).await.unwrap();
         assert_eq!(track.supports(VideoCodec::H264), h264);
         assert_eq!(track.supports(VideoCodec::H265), hevc);
-        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        tokio::time::timeout(std::time::Duration::from_secs(30), async {
             while host.connection_state() != webrtc::peer_connection::peer_connection_state::RTCPeerConnectionState::Connected {
                 tokio::time::sleep(std::time::Duration::from_millis(10)).await;
             }
