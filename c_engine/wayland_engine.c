@@ -425,7 +425,8 @@ retry:;
     if(frame->failed && frame->dmabuf_used && !retried) {
         /* Mapping/copy failure retries once on SHM; connection errors do not. */
         dma_disable("copy"); retried=1;
-        for(unsigned i=0;i<2;i++) frame_clear(&frames[i]);
+        /* dma-buf stays disabled, so its cached buffers are never reused. */
+        for(unsigned i=0;i<2;i++) { frame_clear(&frames[i]); dma_clear(&frames[i]); }
         pending=0; goto retry;
     }
     if(frame->failed || !frame->pixels || frame->width!=width || frame->height!=height) goto end;

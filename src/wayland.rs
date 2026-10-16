@@ -85,12 +85,17 @@ pub fn capture_stdout() -> Result<(),String> {
     }).map_err(|e|format!("Capture writer: {e}"))?;
     let demand=std::env::var("UU_WAYLAND_DEMAND").is_ok_and(|v|v=="1");
     let mut stdin=std::io::stdin().lock();
+    let mut delivered=std::time::Instant::now();
     loop {
         if demand { stdin.read_exact(&mut [0]).map_err(|_|"Capture demand pipe closed")?; }
         // Time from buffer availability: a slow encoder read must not shorten the next interval.
         let Ok(mut frame)=free_rx.recv() else { break };
         let start=std::time::Instant::now();
+        // The engine prefetches the next frame on delivery; after a backpressure stall that
+        // prefetch is as old as the stall, so drop it and capture the current screen.
+        if demand && start.duration_since(delivered)>interval*2 { capture(&mut frame)?; }
         capture(&mut frame)?;
+        delivered=std::time::Instant::now();
         if full_tx.send(frame).is_err() { break; }
         if !demand {
             if let Some(left)=interval.checked_sub(start.elapsed()) { std::thread::sleep(left); }
