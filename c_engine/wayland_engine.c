@@ -65,9 +65,12 @@ static int initialized;
 /* Independent slots let the compositor fill the next frame during delivery. */
 struct frame {
     struct zwlr_screencopy_frame_v1 *handle;
-    struct wl_buffer *buffer;
-    void *pixels;
-    size_t length;
+    struct wl_buffer *buffer,*shm_buffer;
+    struct wl_shm_pool *shm_pool;
+    void *pixels,*shm_pixels;
+    size_t shm_length;
+    int shm_fd,shm_busy;
+    uint32_t shm_width,shm_height,shm_stride,shm_format;
     uint32_t width,height,stride,format,flags;
     int done,failed,submitted;
     struct zwp_linux_buffer_params_v1 *params;
@@ -76,7 +79,7 @@ struct frame {
     void *map_data;
     uint32_t dma_format,dma_width,dma_height;
 };
-static struct frame frames[2];
+static struct frame frames[2]={{.shm_fd=-1},{.shm_fd=-1}};
 static unsigned pending;
 
 static uint32_t timestamp(void) {
@@ -177,14 +180,28 @@ static void dma_init(void) {
     gbm.fd=open(device && *device ? device:"/dev/dri/renderD128",O_RDWR|O_CLOEXEC);
     if(gbm.fd<0 || !(gbm.device=gbm.create_device(gbm.fd))) dma_disable("render-device");
 }
+static void shm_clear(struct frame *frame) {
+    if(frame->shm_buffer) wl_buffer_destroy(frame->shm_buffer);
+    if(frame->shm_pool) wl_shm_pool_destroy(frame->shm_pool);
+    if(frame->shm_pixels) munmap(frame->shm_pixels,frame->shm_length);
+    if(frame->shm_fd>=0) close(frame->shm_fd);
+    frame->shm_buffer=NULL; frame->shm_pool=NULL; frame->shm_pixels=NULL;
+    frame->shm_length=0; frame->shm_fd=-1; frame->shm_busy=0;
+    frame->shm_width=frame->shm_height=frame->shm_stride=frame->shm_format=0;
+}
 static void frame_clear(struct frame *frame) {
     if(frame->handle) zwlr_screencopy_frame_v1_destroy(frame->handle);
     if(frame->params) zwp_linux_buffer_params_v1_destroy(frame->params);
     if(frame->buffer) wl_buffer_destroy(frame->buffer);
     if(frame->dmabuf_used && frame->pixels) gbm.bo_unmap(frame->bo,frame->map_data);
-    else if(frame->pixels) munmap(frame->pixels,frame->length);
     if(frame->bo) { if(frame->bo_fd>=0)close(frame->bo_fd); gbm.bo_destroy(frame->bo); }
-    memset(frame,0,sizeof(*frame));
+    if(frame->shm_busy) shm_clear(frame);
+    frame->handle=NULL; frame->params=NULL; frame->buffer=NULL;
+    frame->pixels=NULL; frame->map_data=NULL; frame->bo=NULL;
+    frame->bo_fd=-1; frame->dmabuf_used=0;
+    frame->width=frame->height=frame->stride=frame->format=frame->flags=0;
+    frame->done=frame->failed=frame->submitted=0;
+    frame->dma_format=frame->dma_width=frame->dma_height=0;
 }
 static void frame_fail(struct frame *frame) { frame->failed=frame->done=frame->submitted=1; }
 static void copy_buffer(void*d,struct zwlr_screencopy_frame_v1*f,uint32_t fmt,uint32_t w,uint32_t h,uint32_t s) {
@@ -194,22 +211,32 @@ static void copy_buffer(void*d,struct zwlr_screencopy_frame_v1*f,uint32_t fmt,ui
         (fmt!=WL_SHM_FORMAT_XRGB8888 && fmt!=WL_SHM_FORMAT_ARGB8888 &&
          fmt!=WL_SHM_FORMAT_XBGR8888 && fmt!=WL_SHM_FORMAT_ABGR8888)) { frame_fail(frame); return; }
     size_t length=(size_t)s*h;
-    int fd=memfd_create("uuremote-wayland-frame",MFD_CLOEXEC);
-    if (fd<0 || ftruncate(fd,(off_t)length)!=0) { if(fd>=0)close(fd); frame_fail(frame); return; }
-    frame->pixels=mmap(NULL,length,PROT_READ|PROT_WRITE,MAP_SHARED,fd,0);
-    if (frame->pixels==MAP_FAILED) { frame->pixels=NULL; close(fd); frame_fail(frame); return; }
-    frame->length=length;
-    struct wl_shm_pool *pool=wl_shm_create_pool(shm,fd,(int32_t)length);
-    frame->buffer=wl_shm_pool_create_buffer(pool,0,w,h,s,fmt);
-    wl_shm_pool_destroy(pool); close(fd);
+    if (frame->shm_busy || !frame->shm_buffer || !frame->shm_pool || !frame->shm_pixels || frame->shm_fd<0 ||
+        frame->shm_length!=length || frame->shm_width!=w || frame->shm_height!=h ||
+        frame->shm_stride!=s || frame->shm_format!=fmt) {
+        shm_clear(frame);
+        int fd=memfd_create("uuremote-wayland-frame",MFD_CLOEXEC);
+        if (fd<0 || ftruncate(fd,(off_t)length)!=0) { if(fd>=0)close(fd); frame_fail(frame); return; }
+        void *pixels=mmap(NULL,length,PROT_READ|PROT_WRITE,MAP_SHARED,fd,0);
+        if (pixels==MAP_FAILED) { close(fd); frame_fail(frame); return; }
+        struct wl_shm_pool *pool=wl_shm_create_pool(shm,fd,(int32_t)length);
+        if (!pool) { munmap(pixels,length); close(fd); frame_fail(frame); return; }
+        struct wl_buffer *buffer=wl_shm_pool_create_buffer(pool,0,w,h,s,fmt);
+        if (!buffer) { wl_shm_pool_destroy(pool); munmap(pixels,length); close(fd); frame_fail(frame); return; }
+        frame->shm_fd=fd; frame->shm_pixels=pixels; frame->shm_length=length;
+        frame->shm_pool=pool; frame->shm_buffer=buffer;
+        frame->shm_width=w; frame->shm_height=h; frame->shm_stride=s; frame->shm_format=fmt;
+    }
+    frame->pixels=frame->shm_pixels;
     /* copy is valid immediately for SHM, including frame versions <3. */
     if (zwlr_screencopy_frame_v1_get_version(f)<3) {
-        zwlr_screencopy_frame_v1_copy(f,frame->buffer); frame->submitted=1;
+        zwlr_screencopy_frame_v1_copy(f,frame->shm_buffer); frame->shm_busy=frame->submitted=1;
     }
 }
 static void copy_flags(void*d,struct zwlr_screencopy_frame_v1*f,uint32_t value) { ((struct frame*)d)->flags=value; }
 static void copy_ready(void*d,struct zwlr_screencopy_frame_v1*f,uint32_t hi,uint32_t lo,uint32_t ns) {
     struct frame *frame=d;
+    frame->shm_busy=0;
     if(frame->dmabuf_used) {
         /* GBM READ mapping synchronizes readback, possibly via a staging buffer. */
         uint32_t stride=0;
@@ -223,7 +250,7 @@ static void copy_ready(void*d,struct zwlr_screencopy_frame_v1*f,uint32_t hi,uint
     }
     frame->done=1;
 }
-static void copy_failed(void*d,struct zwlr_screencopy_frame_v1*f) { frame_fail(d); }
+static void copy_failed(void*d,struct zwlr_screencopy_frame_v1*f) { ((struct frame*)d)->shm_busy=0; frame_fail(d); }
 static void copy_damage(void*d,struct zwlr_screencopy_frame_v1*f,uint32_t x,uint32_t y,uint32_t w,uint32_t h) {}
 static void copy_dmabuf(void*d,struct zwlr_screencopy_frame_v1*f,uint32_t fmt,uint32_t w,uint32_t h) {
     struct frame *frame=d;
@@ -232,15 +259,14 @@ static void copy_dmabuf(void*d,struct zwlr_screencopy_frame_v1*f,uint32_t fmt,ui
     }
 }
 static void submit_shm(struct frame *frame) {
-    if(frame->buffer && !frame->failed) {
-        zwlr_screencopy_frame_v1_copy(frame->handle,frame->buffer); frame->submitted=1;
+    if(frame->shm_buffer && !frame->shm_busy && !frame->failed) {
+        zwlr_screencopy_frame_v1_copy(frame->handle,frame->shm_buffer); frame->shm_busy=frame->submitted=1;
     } else frame_fail(frame);
 }
 static void dma_created(void*d,struct zwp_linux_buffer_params_v1*params,struct wl_buffer*buffer) {
     struct frame *frame=d;
     zwp_linux_buffer_params_v1_destroy(params); frame->params=NULL;
-    wl_buffer_destroy(frame->buffer);
-    munmap(frame->pixels,frame->length); frame->pixels=NULL; frame->length=0;
+    shm_clear(frame); frame->pixels=NULL;
     frame->buffer=buffer; frame->dmabuf_used=1;
     frame->width=frame->dma_width; frame->height=frame->dma_height;
     frame->format=frame->dma_format==0x34325258 ? WL_SHM_FORMAT_XRGB8888:
@@ -254,7 +280,7 @@ static void dma_failed(void*d,struct zwp_linux_buffer_params_v1*params) {
 }
 static const struct zwp_linux_buffer_params_v1_listener dma_params_listener={dma_created,dma_failed};
 static int dma_start(struct frame *frame) {
-    if(!dmabuf_requested || dmabuf_disabled || !gbm.device || frame->failed || !frame->buffer ||
+    if(!dmabuf_requested || dmabuf_disabled || !gbm.device || frame->failed || !frame->shm_buffer ||
        !(dmabuf_linear_formats&dma_format_bit(frame->dma_format))) return 0;
     /* Single-plane linear RGB only; unsupported imports are asynchronous failures,
        never create_immed protocol errors. No privilege or device probing changes. */
@@ -285,7 +311,7 @@ static void reset(void) {
     if (key_state) xkb_state_unref(key_state);
     if (keymap) xkb_keymap_unref(keymap);
     if (xkb) xkb_context_unref(xkb);
-    for(unsigned i=0;i<2;i++) frame_clear(&frames[i]);
+    for(unsigned i=0;i<2;i++) { frame_clear(&frames[i]); shm_clear(&frames[i]); }
     if(gbm.device) gbm.device_destroy(gbm.device);
     if(gbm.fd>=0) close(gbm.fd);
     if(gbm.library) dlclose(gbm.library);
