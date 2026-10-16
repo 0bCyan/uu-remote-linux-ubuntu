@@ -392,8 +392,12 @@ impl FileSession {
                 let mut listing = Enc::default();
                 for e in &entries { listing = listing.bytes(1, &e.0); }
                 let compressed = zlib(&listing.0);
-                log::info!("File transfer read_dir: request_id={} root={} entries={} dir_data_bytes={}", rid, path.is_empty(), entries.len(), compressed.len());
-                for e in entries { body = body.msg(3, e); }
+                // Both copies in one message: a 5600-entry folder is ~73 KB compressed but several hundred KB
+                // inline, beyond the 256 KB SCTP message limit, and the reply was dropped. Keep the inline copy
+                // only when the message still fits; current viewers read dir_data.
+                let inline = listing.0.len() + compressed.len() < 200_000;
+                log::info!("File transfer read_dir: request_id={} root={} entries={} dir_data_bytes={} inline={}", rid, path.is_empty(), entries.len(), compressed.len(), inline);
+                if inline { for e in entries { body = body.msg(3, e); } }
                 body = body.uint(4, FT_SUCCEEDED).bytes(5, &compressed);
             }
             Err(code) => { log::info!("File transfer read_dir failed: request_id={} error={}", rid, code); body = body.uint(4, code); }
