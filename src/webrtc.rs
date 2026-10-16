@@ -895,6 +895,29 @@ impl WebRtcSession {
             .filter_map(|c| c.split('/').next()).collect();
         codecs.dedup();
         log::info!("Offer codecs: {:?}", codecs);
+        // SDP structure only: attribute names per section and public extmap URIs; never ufrag,
+        // password, fingerprint, candidate or fmtp values.
+        let mut sections: Vec<String> = Vec::new();
+        let mut current = String::from("session");
+        let mut names: std::collections::BTreeSet<String> = Default::default();
+        let mut flush = |current: &str, names: &mut std::collections::BTreeSet<String>, sections: &mut Vec<String>| {
+            sections.push(format!("{current}[{}]", names.iter().cloned().collect::<Vec<_>>().join(",")));
+            names.clear();
+        };
+        for line in sdp_str.lines() {
+            if let Some(m) = line.strip_prefix("m=") {
+                flush(&current, &mut names, &mut sections);
+                let mut parts = m.split_whitespace();
+                let kind = parts.next().unwrap_or("?");
+                current = format!("{kind}/{}pt", parts.skip(2).count());
+            } else if let Some(a) = line.strip_prefix("a=") {
+                let name = a.split([':', ' ']).next().unwrap_or("");
+                if name == "extmap" { if let Some(uri) = a.split_whitespace().nth(1) { names.insert(format!("extmap={}", uri.rsplit('/').next().unwrap_or(uri))); } }
+                else if !name.is_empty() && name.len() <= 32 { names.insert(name.to_owned()); }
+            }
+        }
+        flush(&current, &mut names, &mut sections);
+        log::info!("Offer SDP structure: {}", sections.join(" | "));
         let offer = RTCSessionDescription::offer(sdp_str)
             .map_err(|e| format!("Invalid offer: {}", e))?;
 
