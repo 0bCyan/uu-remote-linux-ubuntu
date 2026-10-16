@@ -62,7 +62,7 @@ pub struct Screen<'a> {
     pub fps: i32,
     pub resolution: WinRect,
     pub primary: bool,
-    /// Measured pixel/logical scale; never zero or guessed from a display name.
+    /// Pixel/logical scale of the advertised coordinate space (1.0 for capture-setting v4).
     pub dpr: f64,
     pub display_name: &'a str,
     pub video_track_index: i32,
