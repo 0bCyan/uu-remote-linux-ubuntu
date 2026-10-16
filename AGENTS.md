@@ -145,7 +145,7 @@ every 60 s.
 | `src/assist.rs`, `c_engine/assist_window.c` | remote assistance (guest + account) and the unified GTK main window (assist + account/QR card) |
 
 Diagnostic subcommands: `login [--no-gui]`, `unlock-check` (password on stdin, prints only accepted/rejected),
-`desktop-probe [new.png]`, `desktop-video-probe` (`UU_PROBE_FPS`, `UU_PROBE_FRAMES`, `UU_PROBE_QUALITY` 1-5 = viewer bitrate preset, 5 auto), `wayland-input-probe`, `clipboard-acceptance`,
+`desktop-probe [new.png]`, `desktop-video-probe` (`UU_PROBE_FPS`, `UU_PROBE_FRAMES`, `UU_PROBE_QUALITY` 1-5 = viewer bitrate preset, 5 auto; `UU_PROBE_INPUT` fixed video/image sequence, `UU_PROBE_LOOP=1` repeats), `wayland-input-probe`, `clipboard-acceptance`,
 `portal-acceptance`, `help`. Unknown arguments exit with code 2. Builds up to v0.1.0 did **not** reject them and
 started a second full host server instead, so check that a subcommand exists in the binary you run.
 

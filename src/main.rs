@@ -318,6 +318,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
     if std::env::args().nth(1).as_deref() == Some("desktop-video-probe") {
+        if let Some(input)=std::env::var_os("UU_PROBE_INPUT") {
+            return video::probe_input(input,std::env::args().nth(2)).await.map_err(|e|e.into());
+        }
         let screen=ScreenCapture::new()?;
         capture::keep_display_awake()?;
         return video::probe((screen.width,screen.height),screen.display.clone(),screen.portal.clone(),std::env::args().nth(2)).await.map_err(|e|e.into());

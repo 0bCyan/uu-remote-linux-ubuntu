@@ -238,6 +238,11 @@ fn encoder_options(settings: &VideoSettings, encoder: Encoder, gop: &str, rgb: O
     options.into_iter().map(str::to_owned).collect()
 }
 
+fn scale_options(settings: &VideoSettings, encoder: Encoder) -> Vec<String> {
+    if encoder == Encoder::Vaapi { return vec!["-vf".into(), vaapi_filter(settings.output)]; }
+    settings.output.map_or_else(Vec::new, |(w,h)| vec!["-vf".into(), format!("scale={w}:{h}:flags=bilinear")])
+}
+
 #[derive(Clone, Debug, Hash, PartialEq, Eq)]
 struct FfmpegSpec {
     program: PathBuf,
@@ -538,11 +543,7 @@ async fn read_encoder_with(
             "-video_size",&size,"-i",&display,"-an"]);
     }
     // 其他分辨率: scale the captured desktop (the host display mode is left untouched).
-    if encoder == Encoder::Vaapi {
-        command.args(["-vf", &vaapi_filter(settings.output)]);
-    } else if let Some((width, height)) = settings.output {
-        command.args(["-vf", &format!("scale={width}:{height}:flags=bilinear")]);
-    }
+    command.args(scale_options(&settings, encoder));
     command.args(encoder_options(&settings, encoder, &gop, rgb));
     // x11grab paces against an absolute schedule; after a capture stall it grabs
     // back-to-back to "catch up" (measured 69 frames in 200ms). vfr on a 1/FPS
@@ -677,6 +678,97 @@ fn transport_closed(pc: &RTCPeerConnection) -> bool {
         || pc.sctp().state() == webrtc::sctp_transport::sctp_transport_state::RTCSctpTransportState::Closed
 }
 
+fn probe_settings() -> Result<VideoSettings,String> {
+    let fps=crate::wayland::capture_fps(std::env::var("UU_PROBE_FPS").ok().as_deref())?;
+    // UU_PROBE_QUALITY selects a viewer preset (1 fast 1M, 2 general 2M, 3 HD 8M, 4 bluray 20M,
+    // 5 auto); bitrate presets exercise the capped/ABR encoder path instead of CRF.
+    let quality=match std::env::var("UU_PROBE_QUALITY").ok().as_deref() {
+        None=>crate::capture_setting::QUALITY_AUTO,
+        Some(v)=>v.parse::<u64>().ok().filter(|q|(1..=5).contains(q)).ok_or("UU_PROBE_QUALITY must be 1-5")?,
+    };
+    Ok(VideoSettings {fps,quality,..VideoSettings::default()})
+}
+
+fn probe_input_command(spec:&FfmpegSpec,input:&std::ffi::OsStr,loop_input:bool,settings:&VideoSettings,
+    encoder:Encoder,wanted:u64,timing:FfmpegTimingMode)->Command {
+    let mut command=spec.command();
+    command.args(["-hide_banner","-loglevel","error","-nostdin"]);
+    if encoder==Encoder::Vaapi { command.args(["-vaapi_device",&vaapi_device()]); }
+    if loop_input { command.args(["-stream_loop","-1"]); }
+    // Override source timestamps so clips and image sequences use the same nominal probe rate.
+    command.args(["-r",&settings.fps.to_string(),"-i"]).arg(input).args(["-map","0:v:0","-an"]);
+    command.args(scale_options(settings,encoder));
+    command.args(encoder_options(settings,encoder,&gop_frames(settings.fps,false).to_string(),None));
+    command.args(timing_args(timing,settings.fps));
+    command.args(["-frames:v",&wanted.to_string(),"-f","h264","pipe:1"]);
+    command
+}
+
+async fn probe_input_size(spec:&FfmpegSpec,input:&std::ffi::OsStr)->Result<(u32,u32),String> {
+    // Read only the PNG header; never log decoded pixels, input paths or FFmpeg diagnostics.
+    let mut child=spec.command().args(["-hide_banner","-loglevel","error","-nostdin","-i"]).arg(input)
+        .args(["-map","0:v:0","-frames:v","1","-c:v","png","-f","image2pipe","pipe:1"])
+        .stdin(std::process::Stdio::null()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::null())
+        .kill_on_drop(true).spawn().map_err(|e|format!("Start fixed-input probe: {e}"))?;
+    let mut header=[0u8;24];
+    let result=tokio::time::timeout(Duration::from_secs(15),child.stdout.as_mut().unwrap().read_exact(&mut header)).await;
+    let _=child.kill().await;
+    if !matches!(result,Ok(Ok(_))) || &header[..8]!=b"\x89PNG\r\n\x1a\n" {
+        return Err("Cannot open/decode UU_PROBE_INPUT video input".into());
+    }
+    Ok((u32::from_be_bytes(header[16..20].try_into().unwrap()),u32::from_be_bytes(header[20..24].try_into().unwrap())))
+}
+
+/// Fixed input bypasses desktop initialization and always uses the FFmpeg process encoder.
+pub async fn probe_input(input:OsString,path:Option<String>)->Result<(),String> {
+    use std::io::Write;
+    let settings=probe_settings()?;
+    let wanted:u64=std::env::var("UU_PROBE_FRAMES").ok().and_then(|v|v.parse().ok()).unwrap_or(5);
+    if wanted==0 { return Err("Fixed-input UU_PROBE_FRAMES must be positive".into()); }
+    let spec=ffmpeg_spec();
+    let size=probe_input_size(&spec,&input).await?;
+    let encoder=Encoder::requested();
+    let (maxrate,_)=rate_args(&settings,encoder);
+    let output=settings.output.unwrap_or(size);
+    println!("Fixed input probe: source={}x{} output={}x{} fps={} cq={} maxrate={} encoder={}",
+        size.0,size.1,output.0,output.1,settings.fps,settings.cq(),maxrate,encoder.name_for(settings.codec));
+    let mut file=match path {
+        Some(path)=>Some(std::fs::OpenOptions::new().write(true).create_new(true).open(path).map_err(|e|format!("Video probe file: {e}"))?),
+        None=>None,
+    };
+    let mut command=probe_input_command(&spec,&input,std::env::var("UU_PROBE_LOOP").as_deref()==Ok("1"),
+        &settings,encoder,wanted,ffmpeg_timing_mode(&spec).await);
+    let mut child=command.stdin(std::process::Stdio::null()).stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null()).kill_on_drop(true).spawn().map_err(|e|format!("Start fixed-input encoder: {e}"))?;
+    let mut stdout=child.stdout.take().ok_or("Encoder stdout missing")?;
+    let (mut count,mut bytes)=(0u64,0usize);
+    tokio::time::timeout(Duration::from_secs(15+wanted/30),async {
+        let mut pending=Vec::new();
+        let mut chunk=[0u8;16384];
+        loop {
+            let n=stdout.read(&mut chunk).await.map_err(|e|format!("Encoder read: {e}"))?;
+            pending.extend_from_slice(&chunk[..n]);
+            loop {
+                let aud=aud_offsets_for(&pending,settings.codec);
+                let end=if aud.len()>1 { aud[1] } else if n==0 && !pending.is_empty() { pending.len() } else { break; };
+                if end>MAX_ACCESS_UNIT { return Err("Encoder access unit exceeds limit".into()); }
+                if count==0 && !is_independent_frame(&pending[..end]) { return Err("Video probe did not begin with IDR".into()); }
+                if let Some(file)=file.as_mut() { file.write_all(&pending[..end]).map_err(|e|e.to_string())?; }
+                bytes+=end; count+=1;
+                pending.drain(..end);
+            }
+            if pending.len()>MAX_ACCESS_UNIT { return Err("Encoder access unit exceeds limit".into()); }
+            if n==0 { break; }
+        }
+        let status=child.wait().await.map_err(|e|format!("Fixed-input encoder: {e}"))?;
+        if !status.success() { return Err(format!("Fixed-input encoder failed ({status}); check input and encoder availability")); }
+        if count!=wanted { return Err(format!("Fixed input ended after {count} frames; requested {wanted} (use UU_PROBE_LOOP=1 to repeat)")); }
+        Ok::<(),String>(())
+    }).await.map_err(|_|"Video probe timed out".to_owned())??;
+    println!("Encoded capture probe: frames={count} h264_bytes={bytes} first_frame_idr=true");
+    Ok(())
+}
+
 /// Exercise the real capture/encoder chain without UU auth or a network peer.
 pub async fn probe(size:(u32,u32),display:String,portal:Option<Arc<crate::portal::PortalSession>>,path:Option<String>)->Result<(),String> {
     use std::io::Write;
@@ -686,14 +778,7 @@ pub async fn probe(size:(u32,u32),display:String,portal:Option<Arc<crate::portal
     };
     let (tx,mut rx)=mpsc::channel(4);
     let sequence=Arc::new(std::sync::atomic::AtomicU64::new(0));
-    let fps=crate::wayland::capture_fps(std::env::var("UU_PROBE_FPS").ok().as_deref())?;
-    // UU_PROBE_QUALITY selects a viewer preset (1 fast 1M, 2 general 2M, 3 HD 8M, 4 bluray 20M,
-    // 5 auto); bitrate presets exercise the capped/ABR encoder path instead of CRF.
-    let quality=match std::env::var("UU_PROBE_QUALITY").ok().as_deref() {
-        None=>crate::capture_setting::QUALITY_AUTO,
-        Some(v)=>v.parse::<u64>().ok().filter(|q|(1..=5).contains(q)).ok_or("UU_PROBE_QUALITY must be 1-5")?,
-    };
-    let settings=VideoSettings {fps,quality,..VideoSettings::default()};
+    let settings=probe_settings()?;
     let _reader=EncoderTask(tokio::spawn(read_encoder(size,display,portal,tx,settings,sequence,Arc::new(AtomicBool::new(false)),Arc::new(Semaphore::new(4)))));
     let mut count=0;
     let mut bytes=0;
@@ -822,6 +907,44 @@ pub async fn stream_desktop(pc: Arc<RTCPeerConnection>, track: Arc<crate::video_
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn fixed_input_arguments_share_production_encoding_options() {
+        let spec=FfmpegSpec {program:"ffmpeg".into(),ld_library_path:None,path:None};
+        for encoder in [Encoder::Cpu,Encoder::Nvenc,Encoder::Vaapi] {
+            for quality in 1..=5 {
+                for chroma in [crate::capture_setting::CHROMA_420,crate::capture_setting::CHROMA_444] {
+                    let settings=VideoSettings {fps:30,quality,chroma,output:Some((640,360)),..Default::default()};
+                    let command=probe_input_command(&spec,std::ffi::OsStr::new("frames/%05d.png"),false,
+                        &settings,encoder,17,FfmpegTimingMode::Modern);
+                    let args:Vec<_>=command.as_std().get_args().map(|a|a.to_str().unwrap().to_owned()).collect();
+                    let expected=encoder_options(&settings,encoder,&gop_frames(30,false).to_string(),None);
+                    assert!(args.windows(expected.len()).any(|w|w==expected));
+                    let scale=scale_options(&settings,encoder);
+                    assert!(args.windows(scale.len()).any(|w|w==scale));
+                    assert!(args.windows(4).any(|w|w==["-r","30","-i","frames/%05d.png"]));
+                    assert!(args.windows(2).any(|w|w==["-frames:v","17"]));
+                    assert!(args.windows(4).any(|w|w==["-fps_mode","vfr","-enc_time_base","1/30"]));
+                    assert!(!args.iter().any(|a|["x11grab","rawvideo","-stream_loop"].contains(&a.as_str())));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn fixed_input_loop_is_an_input_option_and_keeps_paths_literal() {
+        let spec=FfmpegSpec {program:"ffmpeg".into(),ld_library_path:None,path:None};
+        for input in ["clip.y4m","a clip.mp4","frames/%05d.png"] {
+            let command=probe_input_command(&spec,std::ffi::OsStr::new(input),true,&VideoSettings::default(),
+                Encoder::Cpu,5,FfmpegTimingMode::Legacy);
+            let args:Vec<_>=command.as_std().get_args().map(|a|a.to_str().unwrap()).collect();
+            assert!(args.windows(2).any(|w|w==["-i",input]));
+            assert!(args.windows(2).any(|w|w==["-stream_loop","-1"]));
+            assert!(args.iter().position(|a|*a=="-stream_loop")<args.iter().position(|a|*a=="-i"));
+            assert!(args.windows(2).any(|w|w==["-vsync","0"]));
+            assert!(!args.contains(&"-vf"));
+        }
+    }
+
     #[test]
     fn display_refresh_parsers() {
         let xrandr = "Screen 0: minimum 8 x 8, current 5760 x 2160\nHDMI-1 connected 1920x1080+3840+0 (normal) 0mm x 0mm\n   1920x1080     60.00*+  50.00\nDP-1 connected primary 3840x2160+0+0 (normal) 600mm x 340mm\n   3840x2160     60.00 +  143.98*\n   2560x1440    120.00\n";

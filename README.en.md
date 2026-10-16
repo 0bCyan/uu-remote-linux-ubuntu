@@ -272,6 +272,8 @@ If you use Claude Code, Codex, Cursor or a similar coding agent, have it read [A
 It is written for language models: build and install steps, a code map, protocol notes and development rules,
 enough to take over installation or development.
 
+For local encoding diagnostics, `desktop-video-probe [output.h264]` accepts `UU_PROBE_FPS`, `UU_PROBE_FRAMES` (default 5), and `UU_PROBE_QUALITY` (1–5); set `UU_PROBE_INPUT=clip.y4m` (also `.mp4` or `frames/%05d.png`) to bypass desktop capture and measure fixed input with the same production FFmpeg encoding options, printing dimensions and encoding statistics, and optionally `UU_PROBE_LOOP=1` to repeat until the requested frame count (unreadable or short input exits nonzero; fixed input always uses the external FFmpeg pipeline).
+
 ## How it works
 
 ```mermaid
