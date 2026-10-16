@@ -357,8 +357,15 @@ impl SignalingClient {
                                     .and_then(|v| v.as_str()).map(str::to_owned);
                                 log::info!("be-controlled connect request: capture_type={} header_keys={:?} ice_id_present={}", capture_type, keys, ice_id.is_some());
                                 // Structure only (numbers, types, lengths): documents what the viewer and cloud send.
-                                let header_shape: String = crate::protocol::json_shape(&header, 4).chars().take(6000).collect();
+                                let header_shape: String = crate::protocol::json_shape(&header, 7).chars().take(8000).collect();
                                 log::info!("Connect request shape: app_data={} header={}", crate::protocol::wire_shape(data, 3), header_shape);
+                                // Relation only, never the ids themselves.
+                                let control_id = header.get("streamer_data").and_then(Value::as_str)
+                                    .and_then(|t| serde_json::from_str::<Value>(t).ok())
+                                    .and_then(|v| v.get("control_id").and_then(Value::as_str).map(str::to_owned));
+                                let app_control_id = header.get("app_control_id").and_then(Value::as_str);
+                                log::info!("Connect request ids: streamer_control_id_equals_app_control_id={:?}",
+                                    control_id.as_deref().zip(app_control_id).map(|(a, b)| a == b));
                                 // ConnectOptions 4 decoder_cap_list: DecoderCap {1 fps, 2 codec_type (1 H264, 2 H265),
                                 // 3 width, 4 height, 5 chroma_format (1 4:2:0, 3 4:4:4)}. Numbers only.
                                 let caps: Vec<Vec<(u32, u64)>> = fields.iter().flatten().filter(|f| f.number == 4).filter_map(|f| match f.value {
