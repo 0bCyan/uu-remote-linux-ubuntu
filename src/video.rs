@@ -1,4 +1,7 @@
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::ffi::OsString;
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex, OnceLock};
 use std::sync::atomic::AtomicBool;
 use std::time::{Duration, Instant};
 use tokio::io::AsyncReadExt;
@@ -173,12 +176,104 @@ fn encoder_options(settings: &VideoSettings, encoder: Encoder, gop: &str) -> Vec
     options.into_iter().map(str::to_owned).collect()
 }
 
-fn ffmpeg_command() -> Command {
-    match crate::config::ffmpeg_root() {
-        Some(root) => { let mut command = Command::new(root.join("bin/ffmpeg"));
-            command.env("LD_LIBRARY_PATH", root.join("lib/x86_64-linux-gnu")); command }
-        None => Command::new("ffmpeg"),
+#[derive(Clone, Debug, Hash, PartialEq, Eq)]
+struct FfmpegSpec {
+    program: PathBuf,
+    ld_library_path: Option<OsString>,
+    path: Option<OsString>,
+}
+
+impl FfmpegSpec {
+    fn command(&self) -> Command {
+        let mut command = Command::new(&self.program);
+        if let Some(path) = &self.ld_library_path { command.env("LD_LIBRARY_PATH", path); }
+        if let Some(path) = &self.path { command.env("PATH", path); }
+        command
     }
+}
+
+fn ffmpeg_spec() -> FfmpegSpec {
+    match crate::config::ffmpeg_root() {
+        Some(root) => FfmpegSpec {
+            program: root.join("bin/ffmpeg"),
+            ld_library_path: Some(root.join("lib/x86_64-linux-gnu").into_os_string()),
+            path: None,
+        },
+        None => FfmpegSpec {
+            program: PathBuf::from("ffmpeg"),
+            ld_library_path: None,
+            path: std::env::var_os("PATH"),
+        },
+    }
+}
+
+fn ffmpeg_command() -> Command { ffmpeg_spec().command() }
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FfmpegTimingMode { Modern, Legacy }
+
+fn help_has_option(help: &str, option: &str) -> bool {
+    help.lines().filter_map(|line| line.split_whitespace().next()).any(|token| {
+        token == option || token.starts_with(&format!("{option}:") ) || token.starts_with(&format!("{option}["))
+    })
+}
+
+fn timing_mode_from_help(help: &str) -> FfmpegTimingMode {
+    if help_has_option(help, "-fps_mode") && help_has_option(help, "-enc_time_base") {
+        FfmpegTimingMode::Modern
+    } else {
+        FfmpegTimingMode::Legacy
+    }
+}
+
+fn timing_args(mode: FfmpegTimingMode, fps: u32) -> Vec<String> {
+    match mode {
+        FfmpegTimingMode::Modern => vec!["-fps_mode".into(), "vfr".into(), "-enc_time_base".into(), format!("1/{fps}")],
+        FfmpegTimingMode::Legacy => vec!["-vsync".into(), "0".into()],
+    }
+}
+
+/// Legacy is chosen only from a completed help dump that visibly lacks the
+/// modern options. A failed probe (spawn error, non-zero exit, timeout, or no
+/// parseable help text) must keep the modern args: `-vsync` is deprecated
+/// since FFmpeg 5.1 and may not be accepted by newer builds, so falling back
+/// to it on a failed probe would kill the encoder there — worse than guessing.
+fn timing_mode_from_probe(success: bool, stdout: &[u8], stderr: &[u8]) -> FfmpegTimingMode {
+    let mut help = Vec::with_capacity(stdout.len() + stderr.len());
+    help.extend_from_slice(stdout);
+    help.extend_from_slice(stderr);
+    if !success || help.is_empty() { return FfmpegTimingMode::Modern; }
+    timing_mode_from_help(&String::from_utf8_lossy(&help))
+}
+
+async fn probe_timing_mode(spec: &FfmpegSpec) -> FfmpegTimingMode {
+    let mut command = spec.command();
+    command.args(["-hide_banner", "-nostdin", "-h", "full"])
+        .kill_on_drop(true)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    match tokio::time::timeout(Duration::from_secs(3), command.output()).await {
+        Ok(Ok(output)) => timing_mode_from_probe(output.status.success(), &output.stdout, &output.stderr),
+        _ => timing_mode_from_probe(false, &[], &[]),
+    }
+}
+
+fn timing_cache() -> &'static Mutex<HashMap<FfmpegSpec, Arc<tokio::sync::OnceCell<FfmpegTimingMode>>>> {
+    static CACHE: OnceLock<Mutex<HashMap<FfmpegSpec, Arc<tokio::sync::OnceCell<FfmpegTimingMode>>>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn timing_cell(
+    cache: &Mutex<HashMap<FfmpegSpec, Arc<tokio::sync::OnceCell<FfmpegTimingMode>>>>,
+    spec: &FfmpegSpec,
+) -> Arc<tokio::sync::OnceCell<FfmpegTimingMode>> {
+    let mut cache = cache.lock().expect("FFmpeg timing cache poisoned");
+    cache.entry(spec.clone()).or_insert_with(|| Arc::new(tokio::sync::OnceCell::const_new())).clone()
+}
+
+async fn ffmpeg_timing_mode(spec: &FfmpegSpec) -> FfmpegTimingMode {
+    let cell = timing_cell(timing_cache(), spec);
+    *cell.get_or_init(|| probe_timing_mode(spec)).await
 }
 
 /// A compiled-in encoder name does not prove that its driver can initialize.
@@ -366,7 +461,8 @@ async fn read_encoder_with(
     let cq = settings.cq().to_string();
     log::info!("Desktop encoder: display={} source={} output={:?} fps={} cq={} maxrate={} encoder={} pix_fmt={} low_latency=true",display,size,settings.output,settings.fps,cq,maxrate,encoder.name_for(settings.codec),if encoder == Encoder::Vaapi { "nv12" } else { chroma_args(&settings, encoder).1 });
     // A bundled FFmpeg prefix (config ffmpeg_root / UU_FFMPEG_ROOT) or `ffmpeg` on PATH.
-    let mut command = ffmpeg_command();
+    let ffmpeg = ffmpeg_spec();
+    let mut command = ffmpeg.command();
     command.args(["-hide_banner","-loglevel","error","-nostdin"]);
     if encoder == Encoder::Vaapi { command.args(["-vaapi_device", &vaapi_device()]); }
     if wayland {
@@ -386,8 +482,9 @@ async fn read_encoder_with(
     command.args(encoder_options(&settings, encoder, &gop));
     // x11grab paces against an absolute schedule; after a capture stall it grabs
     // back-to-back to "catch up" (measured 69 frames in 200ms). vfr on a 1/FPS
-    // timebase drops those same-slot frames instead of encoding a burst.
-    let time_base = format!("1/{fps}");
+    // timebase drops those same-slot frames instead of encoding a burst. The
+    // legacy -vsync 0 path (FFmpeg 4.x) passes catch-up frames straight through
+    // and encodes the whole burst; a known degradation on old FFmpeg.
     // Native Wayland: the capture process writes straight into the encoder's stdin;
     // relaying 33 MB 4K frames through this process cost a full extra copy per frame.
     let mut native_capture=None;
@@ -407,7 +504,10 @@ async fn read_encoder_with(
         command.stdin(source);
         native_capture=Some(capture);
     } else if wayland { command.stdin(std::process::Stdio::piped()); }
-    let mut child=command.args(["-fps_mode","vfr","-enc_time_base",&time_base,"-f",if settings.codec == VideoCodec::H265 { "hevc" } else { "h264" },"pipe:1"])
+    let timing = timing_args(ffmpeg_timing_mode(&ffmpeg).await, settings.fps);
+    let mut output_args = timing;
+    output_args.extend(["-f".into(), if settings.codec == VideoCodec::H265 { "hevc".into() } else { "h264".into() }, "pipe:1".into()]);
+    let mut child=command.args(output_args)
         .kill_on_drop(true)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::inherit())
@@ -690,6 +790,73 @@ mod tests {
         drop(permit);
         assert_eq!(budget.available_permits(),2);
     }
+    #[test]
+    fn timing_help_requires_both_modern_options() {
+        let modern = "  -fps_mode mode  video sync method\n  -enc_time_base ratio  set encoder timebase";
+        assert_eq!(timing_mode_from_help(modern), FfmpegTimingMode::Modern);
+        assert_eq!(timing_mode_from_help("  -vsync parameter\n"), FfmpegTimingMode::Legacy);
+        assert_eq!(timing_mode_from_help("  -fps_mode mode\n"), FfmpegTimingMode::Legacy);
+        assert_eq!(timing_mode_from_help("  -enc_time_base ratio\n"), FfmpegTimingMode::Legacy);
+        assert_eq!(timing_mode_from_help("  --not-fps_mode-test\n"), FfmpegTimingMode::Legacy);
+    }
+
+    #[test]
+    fn timing_args_match_ffmpeg_generation() {
+        assert_eq!(timing_args(FfmpegTimingMode::Modern, 60),
+            vec!["-fps_mode", "vfr", "-enc_time_base", "1/60"]);
+        assert_eq!(timing_args(FfmpegTimingMode::Legacy, 30), vec!["-vsync", "0"]);
+        assert!(!timing_args(FfmpegTimingMode::Modern, 60).contains(&"-r".to_owned()));
+    }
+
+    #[test]
+    fn timing_probe_failure_keeps_modern_args() {
+        let modern = b"  -fps_mode mode\n  -enc_time_base ratio\n";
+        // Legacy is only confirmed from a completed help dump that lacks the options.
+        assert_eq!(timing_mode_from_probe(true, b"", b"  -fps_mode mode\n"), FfmpegTimingMode::Legacy);
+        // Any probe failure keeps the modern args (-vsync is deprecated on new FFmpeg).
+        assert_eq!(timing_mode_from_probe(false, modern, &[]), FfmpegTimingMode::Modern);
+        assert_eq!(timing_mode_from_probe(false, &[], &[]), FfmpegTimingMode::Modern);
+        assert_eq!(timing_mode_from_probe(true, &[], &[]), FfmpegTimingMode::Modern);
+        assert_eq!(timing_mode_from_probe(true, modern, &[]), FfmpegTimingMode::Modern);
+    }
+
+    #[tokio::test]
+    async fn timing_cache_initializer_runs_once_for_concurrent_requests() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let cell = Arc::new(tokio::sync::OnceCell::new());
+        let calls = Arc::new(AtomicUsize::new(0));
+        let first = cell.clone();
+        let first_calls = calls.clone();
+        let second = cell.clone();
+        let second_calls = calls.clone();
+        let (first_mode, second_mode) = tokio::join!(
+            async move { *first.get_or_init(|| async {
+                first_calls.fetch_add(1, Ordering::SeqCst);
+                tokio::task::yield_now().await;
+                FfmpegTimingMode::Legacy
+            }).await },
+            async move { *second.get_or_init(|| async {
+                second_calls.fetch_add(1, Ordering::SeqCst);
+                tokio::task::yield_now().await;
+                FfmpegTimingMode::Modern
+            }).await },
+        );
+        assert_eq!(first_mode, second_mode);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn ffmpeg_specs_separate_executable_environments() {
+        let path = FfmpegSpec { program: PathBuf::from("ffmpeg"), ld_library_path: None,
+            path: Some(OsString::from("/one")) };
+        let other_path = FfmpegSpec { program: PathBuf::from("ffmpeg"), ld_library_path: None,
+            path: Some(OsString::from("/two")) };
+        let bundled = FfmpegSpec { program: PathBuf::from("/opt/ffmpeg/bin/ffmpeg"),
+            ld_library_path: Some(OsString::from("/opt/ffmpeg/lib/x86_64-linux-gnu")), path: None };
+        assert_ne!(path, other_path);
+        assert_ne!(path, bundled);
+    }
+
     #[test]
     fn x264_buffer_fits_keyframes() {
         assert_eq!(buffer_kbits(2000, Encoder::Nvenc), 250);
