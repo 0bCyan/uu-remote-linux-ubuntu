@@ -95,6 +95,30 @@ mod refresh_tests {
         // Retain it until after the server sees closure, just like PC callbacks.
         drop(retained);
     }
+    #[tokio::test]
+    async fn silent_half_open_socket_is_reported_disconnected() {
+        use futures_util::{SinkExt,StreamExt};
+        use tokio_tungstenite::tungstenite::Message;
+        let listener=tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address=listener.local_addr().unwrap();
+        let (hold_tx,hold_rx)=tokio::sync::oneshot::channel::<()>();
+        tokio::spawn(async move {
+            let (tcp,_)=listener.accept().await.unwrap();
+            let mut socket=tokio_tungstenite::accept_async(tcp).await.unwrap();
+            // Shortest accepted window (clamped to 5 s); the server then never pings.
+            socket.send(Message::Text(r#"0{"pingInterval":1000,"pingTimeout":1000}"#.into())).await.unwrap();
+            let _=socket.next().await;
+            socket.send(Message::Text("40{}".into())).await.unwrap();
+            let _=hold_rx.await; // keep the TCP connection open but silent
+        });
+        let (sender,mut events)=tokio::sync::mpsc::channel(8);
+        let _client=super::SignalingClient::connect(&format!("ws://{address}"),"synthetic-only",sender).await.unwrap();
+        let disconnected=tokio::time::timeout(std::time::Duration::from_secs(8),async {
+            loop { if matches!(events.recv().await,Some(super::SignalingEvent::Disconnected)|None) { return; } }
+        }).await;
+        assert!(disconnected.is_ok(),"a socket without pings must be reported dead");
+        drop(hold_tx);
+    }
 }
 
 impl SignalingClient {
@@ -156,9 +180,19 @@ impl SignalingClient {
             let mut accepted_refresh=0;
             // Socket.IO binary event awaiting attachments: (event name, header JSON).
             let mut pending_binary: Option<(String, Value)> = None;
+            // Engine.IO 4: a client treats the connection as dead when no ping arrives within
+            // pingInterval + pingTimeout. A half-open TCP socket (suspend, NAT drop) otherwise
+            // blocks the read forever and the host silently stays offline.
+            let mut ping_window=std::time::Duration::from_secs(25+20);
+            let mut ping_deadline=tokio::time::Instant::now()+ping_window;
             loop {
                 let msg_res=tokio::select! {
                     _=event_sender.closed()=>break,
+                    _=tokio::time::sleep_until(ping_deadline) => {
+                        log::warn!("Signaling heartbeat lost: generation={} age_s={} pings={} last_ping_gap_s={}",generation,started.elapsed().as_secs(),pings,last_ping.elapsed().as_secs());
+                        let _ = event_sender.send(SignalingEvent::Disconnected).await;
+                        break;
+                    },
                     // Official ControlledSession RefreshSignalTokenLoop: first
                     // 30s, success every ~300s, failure retry after 30s. Native
                     // libstreamer 0x885774 / 0x885e58; emit has NO payload args.
@@ -185,12 +219,17 @@ impl SignalingClient {
                         if txt.starts_with('0') {
                             if let Ok(open)=serde_json::from_str::<Value>(&txt[1..]) {
                                 log::info!("Signaling heartbeat config: generation={} ping_interval_ms={:?} ping_timeout_ms={:?}",generation,open.get("pingInterval").and_then(Value::as_u64),open.get("pingTimeout").and_then(Value::as_u64));
+                                if let (Some(interval),Some(timeout))=(open.get("pingInterval").and_then(Value::as_u64),open.get("pingTimeout").and_then(Value::as_u64)) {
+                                    ping_window=std::time::Duration::from_millis(interval.saturating_add(timeout).clamp(5_000,300_000));
+                                    ping_deadline=tokio::time::Instant::now()+ping_window;
+                                }
                             }
                             // Open packet -> 发送 Socket.IO connect
                             let _ = tx_out_clone.send("40".into()).await;
                         } else if txt == "2" {
                             // Ping -> 回复 Pong
                             let gap=last_ping.elapsed().as_secs();last_ping=std::time::Instant::now();pings+=1;
+                            ping_deadline=tokio::time::Instant::now()+ping_window;
                             if tx_out_clone.send("3".into()).await.is_ok() { pong_queued+=1; }
                             if pings==1 || pings%12==0 {
                                 log::info!("Signaling heartbeat progress: generation={} age_s={} pings={} pong_queued={} gap_s={}",generation,started.elapsed().as_secs(),pings,pong_queued,gap);
