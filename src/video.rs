@@ -538,6 +538,8 @@ pub async fn stream_desktop(pc: Arc<RTCPeerConnection>, track: Arc<crate::video_
     let mut health = tokio::time::interval(Duration::from_millis(200));
     health.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut stats = Instant::now();
+    // sent/skipped are cumulative; window_* and max_* cover the interval since the last stats line.
+    let (mut window_frames, mut window_skipped) = (0u64, 0u64);
     loop {
         tokio::select! {
             result = &mut reader.0 => {
@@ -598,7 +600,9 @@ pub async fn stream_desktop(pc: Arc<RTCPeerConnection>, track: Arc<crate::video_
                 frames += 1;
                 if stats.elapsed() >= Duration::from_secs(30) {
                     crate::capture::keep_display_awake()?;
-                    log::info!("Desktop latest-frame stats: sent={} skipped={} latest_seq={} max_slot_age_ms={} max_send_ms={}", frames, skipped, frame.sequence, max_age_ms,max_send_ms);
+                    log::info!("Desktop latest-frame stats: sent={} skipped={} latest_seq={} window_s={} window_sent={} window_skipped={} max_slot_age_ms={} max_send_ms={}",
+                        frames, skipped, frame.sequence, stats.elapsed().as_secs(), frames - window_frames, skipped - window_skipped, max_age_ms, max_send_ms);
+                    (window_frames, window_skipped) = (frames, skipped);
                     stats = Instant::now();
                     max_age_ms = 0;
                     max_send_ms = 0;
