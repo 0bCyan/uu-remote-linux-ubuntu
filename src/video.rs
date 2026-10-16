@@ -523,7 +523,13 @@ pub async fn probe(size:(u32,u32),display:String,portal:Option<Arc<crate::portal
     let (tx,mut rx)=mpsc::channel(4);
     let sequence=Arc::new(std::sync::atomic::AtomicU64::new(0));
     let fps=crate::wayland::capture_fps(std::env::var("UU_PROBE_FPS").ok().as_deref())?;
-    let settings=VideoSettings {fps,..VideoSettings::default()};
+    // UU_PROBE_QUALITY selects a viewer preset (1 fast 1M, 2 general 2M, 3 HD 8M, 4 bluray 20M,
+    // 5 auto); bitrate presets exercise the capped/ABR encoder path instead of CRF.
+    let quality=match std::env::var("UU_PROBE_QUALITY").ok().as_deref() {
+        None=>crate::capture_setting::QUALITY_AUTO,
+        Some(v)=>v.parse::<u64>().ok().filter(|q|(1..=5).contains(q)).ok_or("UU_PROBE_QUALITY must be 1-5")?,
+    };
+    let settings=VideoSettings {fps,quality,..VideoSettings::default()};
     let _reader=EncoderTask(tokio::spawn(read_encoder(size,display,portal,tx,settings,sequence,Arc::new(AtomicBool::new(false)),Arc::new(Semaphore::new(4)))));
     let mut count=0;
     let mut bytes=0;
