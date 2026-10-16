@@ -180,6 +180,8 @@ impl SignalingClient {
             let mut accepted_refresh=0;
             // Socket.IO binary event awaiting attachments: (event name, header JSON).
             let mut pending_binary: Option<(String, Value)> = None;
+            // Relation check only: the be-controlled ice_id versus the next offer's data.ice_id.
+            let mut last_connect_ice: Option<String> = None;
             // Engine.IO 4: a client treats the connection as dead when no ping arrives within
             // pingInterval + pingTimeout. A half-open TCP socket (suspend, NAT drop) otherwise
             // blocks the read forever and the host silently stays offline.
@@ -298,6 +300,8 @@ impl SignalingClient {
                                             let kind = data.get("data").unwrap_or(data).get("type").and_then(Value::as_str);
                                             if kind == Some("offer") {
                                                 log::info!("SOAC offer shape: {}", crate::protocol::json_shape(data, 3));
+                                                let offer_ice = data.get("data").unwrap_or(data).get("ice_id").and_then(Value::as_str);
+                                                log::info!("SOAC offer ice_id equals be-controlled ice_id: {:?}", last_connect_ice.as_deref().zip(offer_ice).map(|(a, b)| a == b));
                                             }
                                             let (target_val, client_id_opt) = if let Some(inner) = data.get("data") {
                                                 (inner.clone(), data.get("client_id").and_then(|v| v.as_str()).map(|s| s.to_string()))
@@ -361,6 +365,7 @@ impl SignalingClient {
                                 let ice_id = ["ice_id", "iceId"].iter().find_map(|k| header.get(*k).or_else(|| header.get("data").and_then(|d| d.get(*k))))
                                     .and_then(|v| v.as_str()).map(str::to_owned);
                                 log::info!("be-controlled connect request: capture_type={} header_keys={:?} ice_id_present={}", capture_type, keys, ice_id.is_some());
+                                last_connect_ice = ice_id.clone();
                                 // Structure only (numbers, types, lengths): documents what the viewer and cloud send.
                                 let header_shape: String = crate::protocol::json_shape(&header, 7).chars().take(8000).collect();
                                 log::info!("Connect request shape: app_data={} header={}", crate::protocol::wire_shape(data, 3), header_shape);
