@@ -105,15 +105,11 @@ mod tests {
             sdp_fmtp_line: "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f".into(), ..Default::default()
         }, payload_type: 102, ..Default::default() }, RTPCodecType::Video).unwrap(); }
         if hevc { register_hevc(&mut remote_media).unwrap(); }
-        let mut setting = webrtc::api::setting_engine::SettingEngine::default();
-        setting.set_ice_multicast_dns_mode(webrtc::ice::mdns::MulticastDnsMode::Disabled);
-        // UDP over IPv4 only: pairing every host interface (VPNs, IPv6) made ICE exceed the
-        // connect timeout when the whole suite runs in parallel.
-        setting.set_network_types(vec![webrtc::ice::network_type::NetworkType::Udp4]);
-        let remote = APIBuilder::new().with_setting_engine(setting.clone()).with_media_engine(remote_media).build().new_peer_connection(RTCConfiguration::default()).await.unwrap();
+        let (remote_setting, host_setting, router) = crate::test_network::virtual_network().await;
+        let remote = APIBuilder::new().with_setting_engine(remote_setting).with_media_engine(remote_media).build().new_peer_connection(RTCConfiguration::default()).await.unwrap();
         remote.add_transceiver_from_kind(RTPCodecType::Video, None).await.unwrap();
         let mut media = MediaEngine::default(); media.register_default_codecs().unwrap(); register_hevc(&mut media).unwrap();
-        let host = APIBuilder::new().with_setting_engine(setting).with_media_engine(media).build().new_peer_connection(RTCConfiguration::default()).await.unwrap();
+        let host = APIBuilder::new().with_setting_engine(host_setting).with_media_engine(media).build().new_peer_connection(RTCConfiguration::default()).await.unwrap();
         let (packets_tx, mut packets_rx) = tokio::sync::mpsc::unbounded_channel();
         remote.on_track(Box::new(move |remote_track, _, _| {
             let packets_tx = packets_tx.clone();
@@ -171,6 +167,7 @@ mod tests {
             previous = Some(packet);
         }
         host.close().await.unwrap(); remote.close().await.unwrap();
+        router.lock().await.stop().await.unwrap();
     }
     #[tokio::test]
     async fn negotiated_codecs_only_and_legacy_h264_offer() { negotiate(true, false).await; negotiate(true, true).await; negotiate(false, true).await; }

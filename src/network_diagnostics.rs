@@ -154,22 +154,21 @@ mod tests {
         assert_eq!(rates.sample(now + std::time::Duration::from_secs(3), 0, 0), None);
     }
 
-    /// Exercises actual ICE nomination and SCTP delivery between local peers, without
+    /// Exercises actual ICE nomination and SCTP delivery between virtual peers, without
     /// login, public STUN, external endpoints or production configuration.
     #[tokio::test]
-    #[ignore = "opens local UDP sockets; run explicitly for network acceptance"]
     async fn local_selected_pair_and_payload() {
         use std::sync::Arc;
-        use webrtc::api::{APIBuilder, setting_engine::SettingEngine};
+        use webrtc::api::APIBuilder;
         use webrtc::peer_connection::configuration::RTCConfiguration;
-        let mut settings = SettingEngine::default();
-        // This crate excludes loopback addresses during ICE gathering. Both
-        // peers still run in this process and use only gathered local addresses.
-        settings.set_ice_multicast_dns_mode(webrtc::ice::mdns::MulticastDnsMode::Disabled);
+        let (left_setting, right_setting, router) = crate::test_network::virtual_network().await;
         let mut media = webrtc::api::media_engine::MediaEngine::default();
         media.register_default_codecs().unwrap();
-        let api = APIBuilder::new().with_media_engine(media).with_setting_engine(settings).build();
+        let api = APIBuilder::new().with_media_engine(media).with_setting_engine(left_setting).build();
         let left = Arc::new(api.new_peer_connection(RTCConfiguration::default()).await.unwrap());
+        let mut media = webrtc::api::media_engine::MediaEngine::default();
+        media.register_default_codecs().unwrap();
+        let api = APIBuilder::new().with_media_engine(media).with_setting_engine(right_setting).build();
         let right = Arc::new(api.new_peer_connection(RTCConfiguration::default()).await.unwrap());
         for (label, peer) in [("left", &left), ("right", &right)] {
             peer.on_peer_connection_state_change(Box::new(move |state| {
@@ -222,6 +221,7 @@ mod tests {
         let outcome = tokio::time::timeout(std::time::Duration::from_secs(15), acceptance).await;
         left.close().await.unwrap();
         right.close().await.unwrap();
+        router.lock().await.stop().await.unwrap();
         outcome.expect("isolated local ICE/SCTP did not connect within 15 seconds");
     }
 }

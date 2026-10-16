@@ -25,6 +25,8 @@ mod terminal;
 mod webrtc;
 mod video;
 mod video_track;
+#[cfg(test)]
+mod test_network;
 mod hevc;
 #[cfg(feature = "inproc-av")]
 mod damage_capture;
