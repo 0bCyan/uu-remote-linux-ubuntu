@@ -6,6 +6,7 @@ use std::sync::Mutex;
 extern "C" {
     fn x11_init(display_name: *const libc::c_char) -> libc::c_int;
     fn x11_get_dimensions(out_w: *mut libc::c_int, out_h: *mut libc::c_int) -> libc::c_int;
+    fn x11_refresh_geometry() -> libc::c_int;
     fn x11_capture_frame(
         out_buffer: *mut libc::c_uchar,
         out_w: *mut libc::c_int,
@@ -37,9 +38,21 @@ unsafe fn x11_capture_frame(
 }
 #[cfg(not(target_os = "linux"))]
 unsafe fn x11_close() {}
+#[cfg(not(target_os = "linux"))]
+unsafe fn x11_refresh_geometry() -> libc::c_int { 0 }
 
 #[cfg(not(target_os = "linux"))]
 unsafe fn x11_display_name() -> *const libc::c_char { b":0\0".as_ptr().cast() }
+
+/// The X11 root can be resized while the host runs (RandR, xrdp reconnects); the
+/// geometry read at startup then makes x11grab reject every new connection.
+pub fn x11_resized() -> bool {
+    match unsafe { x11_refresh_geometry() } {
+        1 => true,
+        0 => false,
+        code => { log::warn!("X11 geometry query failed with code {code}"); false }
+    }
+}
 
 pub struct ScreenCapture {
     pub backend: crate::desktop_backend::DesktopBackend,
@@ -126,6 +139,7 @@ impl ScreenCapture {
 
         let ret = unsafe { x11_capture_frame(buf.as_mut_ptr(), &mut w, &mut h) };
         if ret != 0 {
+            if ret == -4 { return Err(format!("desktop resized to {w}x{h}; reconnect to capture the new size")); }
             return Err(format!("x11_capture_frame failed with code {}", ret));
         }
 

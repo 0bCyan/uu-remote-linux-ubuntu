@@ -16,6 +16,7 @@
 #include <X11/extensions/Xfixes.h>
 #include <stdint.h>
 #include <poll.h>
+#include <pthread.h>
 
 static Display *g_display = NULL;
 static Window g_root = 0;
@@ -27,6 +28,8 @@ static int g_depth = 0;
 static XShmSegmentInfo g_shminfo;
 static XImage *g_shm_image = NULL;
 static int g_use_shm = 0;
+/* Guards the capture geometry and SHM image against a resize between connections. */
+static pthread_mutex_t g_capture_lock = PTHREAD_MUTEX_INITIALIZER;
 static unsigned char g_injected_down[32]; // keycodes currently held by the remote viewer
 static int g_injected_count = 0;
 static int g_restore_repeat = 0;
@@ -50,6 +53,34 @@ static void track_injected_key(int keycode, int is_press) {
         *slot &= ~bit;
         if (--g_injected_count == 0 && g_restore_repeat) { XAutoRepeatOn(g_display); g_restore_repeat = 0; }
     }
+}
+
+static void shm_open_image(void) {
+    g_use_shm = 0;
+    if (!XShmQueryExtension(g_display)) return;
+    g_shm_image = XShmCreateImage(g_display, DefaultVisual(g_display, g_screen),
+                                  g_depth, ZPixmap, NULL, &g_shminfo, g_width, g_height);
+    if (!g_shm_image) return;
+    g_shminfo.shmid = shmget(IPC_PRIVATE, g_shm_image->bytes_per_line * g_shm_image->height, IPC_CREAT | 0777);
+    if (g_shminfo.shmid == -1) return;
+    g_shminfo.shmaddr = g_shm_image->data = (char *)shmat(g_shminfo.shmid, 0, 0);
+    g_shminfo.readOnly = False;
+    if (g_shminfo.shmaddr != (char *)-1 && XShmAttach(g_display, &g_shminfo)) {
+        XSync(g_display, False);
+        g_use_shm = 1;
+    }
+    shmctl(g_shminfo.shmid, IPC_RMID, 0); // 标记删除，进程退出时自动回收；失败时也不遗留段
+}
+static void shm_close_image(void) {
+    if (g_use_shm) XShmDetach(g_display, &g_shminfo);
+    if (g_shm_image) {
+        g_shm_image->data = NULL; /* shm memory is released by shmdt, not XDestroyImage */
+        XDestroyImage(g_shm_image);
+        g_shm_image = NULL;
+    }
+    if (g_shminfo.shmaddr && g_shminfo.shmaddr != (char *)-1) shmdt(g_shminfo.shmaddr);
+    memset(&g_shminfo, 0, sizeof(g_shminfo));
+    g_use_shm = 0;
 }
 
 int x11_init(const char *display_name) {
@@ -77,59 +108,60 @@ int x11_init(const char *display_name) {
     g_height = DisplayHeight(g_display, g_screen);
     g_depth = DefaultDepth(g_display, g_screen);
     
-    // 尝试初始化 XShm
-    if (XShmQueryExtension(g_display)) {
-        g_shm_image = XShmCreateImage(g_display, DefaultVisual(g_display, g_screen),
-                                      g_depth, ZPixmap, NULL, &g_shminfo, g_width, g_height);
-        if (g_shm_image) {
-            g_shminfo.shmid = shmget(IPC_PRIVATE, g_shm_image->bytes_per_line * g_shm_image->height, IPC_CREAT | 0777);
-            if (g_shminfo.shmid != -1) {
-                g_shminfo.shmaddr = g_shm_image->data = (char *)shmat(g_shminfo.shmid, 0, 0);
-                g_shminfo.readOnly = False;
-                if (g_shminfo.shmaddr != (char *)-1) {
-                    if (XShmAttach(g_display, &g_shminfo)) {
-                        XSync(g_display, False);
-                        shmctl(g_shminfo.shmid, IPC_RMID, 0); // 标记删除，进程退出时自动回收
-                        g_use_shm = 1;
-                    }
-                }
-            }
-        }
-    }
-    
+    shm_open_image();
     return 0;
 }
 
 int x11_get_dimensions(int *out_w, int *out_h) {
     if (!g_display) return -1;
+    pthread_mutex_lock(&g_capture_lock);
     *out_w = g_width;
     *out_h = g_height;
+    pthread_mutex_unlock(&g_capture_lock);
     return 0;
+}
+
+/* The startup size goes stale when RandR/xrdp resizes the root window. Query the
+ * server and rebuild the SHM image on change. Returns 1 if changed, 0 if not, <0 on error. */
+int x11_refresh_geometry(void) {
+    if (!g_display) return -1;
+    Window root; int x, y; unsigned int w, h, border, depth;
+    if (!XGetGeometry(g_display, g_root, &root, &x, &y, &w, &h, &border, &depth) || !w || !h) return -2;
+    pthread_mutex_lock(&g_capture_lock);
+    int changed = (int)w != g_width || (int)h != g_height;
+    if (changed) {
+        shm_close_image();
+        g_width = (int)w; g_height = (int)h;
+        shm_open_image();
+    }
+    pthread_mutex_unlock(&g_capture_lock);
+    return changed;
 }
 
 /**
  * 截取一帧画面（RGBA/BGRA 格式）
  * @param out_buffer 输出缓冲区，大小必须至少为 width * height * 4
  */
+/* *out_w/*out_h carry the caller's buffer geometry in; a mismatch (desktop resized
+ * since that buffer was sized) returns -4 instead of overflowing it. */
 int x11_capture_frame(unsigned char *out_buffer, int *out_w, int *out_h) {
     if (!g_display) return -1;
+    pthread_mutex_lock(&g_capture_lock);
+    int result = 0;
+    if (*out_w != g_width || *out_h != g_height) result = -4;
+    else if (g_use_shm && g_shm_image) {
+        if (!XShmGetImage(g_display, g_root, g_shm_image, 0, 0, AllPlanes)) result = -2;
+        else memcpy(out_buffer, g_shm_image->data, (size_t)g_width * g_height * 4);
+    } else {
+        // Fallback: XGetImage
+        XImage *img = XGetImage(g_display, g_root, 0, 0, g_width, g_height, AllPlanes, ZPixmap);
+        if (!img) result = -3;
+        else { memcpy(out_buffer, img->data, (size_t)g_width * g_height * 4); XDestroyImage(img); }
+    }
     *out_w = g_width;
     *out_h = g_height;
-    
-    if (g_use_shm && g_shm_image) {
-        if (!XShmGetImage(g_display, g_root, g_shm_image, 0, 0, AllPlanes)) {
-            return -2;
-        }
-        memcpy(out_buffer, g_shm_image->data, g_width * g_height * 4);
-        return 0;
-    }
-    
-    // Fallback: XGetImage
-    XImage *img = XGetImage(g_display, g_root, 0, 0, g_width, g_height, AllPlanes, ZPixmap);
-    if (!img) return -3;
-    memcpy(out_buffer, img->data, g_width * g_height * 4);
-    XDestroyImage(img);
-    return 0;
+    pthread_mutex_unlock(&g_capture_lock);
+    return result;
 }
 
 // ============ 原生输入注入 ============
@@ -261,16 +293,9 @@ int x11_terminal_shortcut_state(void) {
 
 void x11_close() {
     if (!g_display) return;
-    if (g_use_shm) {
-        XShmDetach(g_display, &g_shminfo);
-        if (g_shm_image) {
-            XDestroyImage(g_shm_image);
-            g_shm_image = NULL;
-        }
-        if (g_shminfo.shmaddr && g_shminfo.shmaddr != (char *)-1) {
-            shmdt(g_shminfo.shmaddr);
-        }
-    }
+    pthread_mutex_lock(&g_capture_lock);
+    shm_close_image();
+    pthread_mutex_unlock(&g_capture_lock);
     XCloseDisplay(g_display);
     g_display = NULL;
 }

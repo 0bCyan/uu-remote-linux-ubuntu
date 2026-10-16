@@ -549,8 +549,8 @@ pub async fn stream_desktop(pc: Arc<RTCPeerConnection>, track: Arc<crate::video_
         tokio::select! {
             result = &mut reader.0 => {
                 let result = result.map_err(|e| format!("Encoder reader task: {e}"))?;
-                if result.is_err() && current.codec == VideoCodec::H265 && track.supports(VideoCodec::H264) {
-                    log::warn!("HEVC unavailable; falling back to negotiated H264");
+                if let (Err(error), VideoCodec::H265, true) = (&result, current.codec, track.supports(VideoCodec::H264)) {
+                    log::warn!("HEVC stream failed ({error}); falling back to negotiated H264");
                     current.codec = VideoCodec::H264;
                     applied.send_modify(|value| value.codec = VideoCodec::H264);
                     current = *settings.borrow_and_update();

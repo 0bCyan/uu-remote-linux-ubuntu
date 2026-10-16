@@ -662,7 +662,10 @@ async fn serve(mut capture: Arc<ScreenCapture>, input: Arc<InputInjector>, shutd
                             log::info!("Desktop connection ignored: headless mode (terminal, file transfer and port mapping remain available)");
                             continue;
                         }
-                        let session_capture=if desktop && (capture.init_error.is_some() || stale_portal) {
+                        let resized=desktop && capture.init_error.is_none() && capture.backend==desktop_backend::DesktopBackend::X11
+                            && tokio::task::spawn_blocking(crate::capture::x11_resized).await.unwrap_or(false);
+                        if resized { log::info!("Desktop geometry changed since startup; reinitializing capture"); }
+                        let session_capture=if desktop && (capture.init_error.is_some() || stale_portal || resized) {
                             if stale_portal {
                                 input.release_held();input.bind_portal(None);
                                 capture=Arc::new(ScreenCapture::unavailable("Portal authorization expired".into()));
