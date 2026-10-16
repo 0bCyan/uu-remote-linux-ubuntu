@@ -294,6 +294,11 @@ impl SignalingClient {
                                                 .await;
                                         }
                                         "soac" => {
+                                            // Offers only: structure (keys, types, lengths), never SDP text or ids.
+                                            let kind = data.get("data").unwrap_or(data).get("type").and_then(Value::as_str);
+                                            if kind == Some("offer") {
+                                                log::info!("SOAC offer shape: {}", crate::protocol::json_shape(data, 3));
+                                            }
                                             let (target_val, client_id_opt) = if let Some(inner) = data.get("data") {
                                                 (inner.clone(), data.get("client_id").and_then(|v| v.as_str()).map(|s| s.to_string()))
                                             } else {
