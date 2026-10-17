@@ -475,6 +475,8 @@ static void build_window(void) {
 static void *ui_main(void *arg) {
     (void)arg;
     int ok = gtk_init_check(NULL, NULL);
+    // The CSS hard-codes a light palette; a dark system theme would turn unstyled text white on white (#43).
+    if (ok) g_object_set(gtk_settings_get_default(), "gtk-theme-name", "Adwaita", "gtk-application-prefer-dark-theme", FALSE, NULL);
     if (ok) build_window();
     pthread_mutex_lock(&init_lock);
     init_state = ok ? 1 : -1;
