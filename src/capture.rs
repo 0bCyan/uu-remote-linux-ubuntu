@@ -108,6 +108,7 @@ impl ScreenCapture {
         if display_ptr.is_null() { return Err("Capture display name unavailable".into()); }
         let display = unsafe { std::ffi::CStr::from_ptr(display_ptr) }.to_string_lossy().into_owned();
         log::info!("Selected capture display: {}", display);
+        X11_USERS.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
         Ok(Self {
             backend,
             init_error:None,
@@ -150,9 +151,15 @@ impl ScreenCapture {
     }
 }
 
+/// The X11 engine keeps one process-wide display connection shared by every ScreenCapture.
+/// Only the last one may close it: a short-lived capture (device init's screen size during guest
+/// assistance, or the replaced capture after a resize) used to close it under the live stream.
+static X11_USERS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
 impl Drop for ScreenCapture {
     fn drop(&mut self) {
-        if self.init_error.is_none() && self.backend==crate::desktop_backend::DesktopBackend::X11 { unsafe { x11_close() }; }
+        if self.init_error.is_none() && self.backend==crate::desktop_backend::DesktopBackend::X11
+            && X11_USERS.fetch_sub(1, std::sync::atomic::Ordering::AcqRel) == 1 { unsafe { x11_close() }; }
     }
 }
 
