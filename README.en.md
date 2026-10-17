@@ -406,6 +406,8 @@ No official "no desktop" error code was found for headless desktop offers, so th
 
 ## Experimental native viewer (uuremote-viewer)
 
+<p align="center"><img src="docs/images/viewer-window.png" width="720" alt="Linux viewer launcher: device list (device names redacted)"></p>
+
 `uuremote-viewer` is a Linux **viewer/controller**: it connects to and controls other devices on your UU account (official Windows / Mac
 hosts or this project's Linux host), and can start remote assistance with someone's device ID and code. It is experimental and
 separate from the host `uuremote-server`; the default host build and behaviour are unchanged.
