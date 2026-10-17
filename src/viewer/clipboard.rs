@@ -63,10 +63,16 @@ impl SyncState {
         self.last=Some(value);Ok(())
     }
     fn next(&mut self)->u64{self.seq=self.seq.wrapping_add(1).max(100);self.seq}
-    fn local(&mut self,value:String)->Result<Option<Vec<u8>>,&'static str>{
+    /// Two requests per change: the rich format-list offer (this project's host asks for the data) and
+    /// RpcRequest case 10 ClipboardTextChangeRequest carrying the text, which the official Windows host applies
+    /// (handle_text_change_request -> notifyReceiveText); it only acknowledges the rich offer. Each host
+    /// ignores the other form.
+    fn local(&mut self,value:String)->Result<Option<Vec<Vec<u8>>>,&'static str>{
         if self.last.as_ref()==Some(&value){return Ok(None)}
         let id=self.next();let payload=self.rich.offer(id,value.clone())?;
-        self.last=Some(value);Ok(Some(wire::envelope(self.next(),21,&payload)))
+        let rich=wire::envelope(self.next(),21,&payload);
+        let text=wire::envelope(self.next(),21,&crate::clipboard_protocol::text_request(self.next(),&value));
+        self.last=Some(value);Ok(Some(vec![rich,text]))
     }
     fn receive(&mut self,data:&[u8])->Result<(Vec<Vec<u8>>,Option<String>),&'static str>{
         if data.len()>MAX_TEXT*2+1024{return Err("clipboard message exceeds limit")}
@@ -85,7 +91,14 @@ impl SyncState {
                         value=Some(text);replies.push(wire::envelope(self.next(),22,&text::text_response(&header)));
                     }
                 },
-                22=>if let Some(text)=self.rich.response(payload)?{value=Some(text)},
+                22=>{
+                    // TextChangeResponse (case 6 {1 err}, CB_SUCCEEDED=1) answers our case 10 request: status only.
+                    if let Some(status)=decode_wire(payload).ok().and_then(|f|f.into_iter().find_map(|x|match (x.number,x.value){(6,WireValue::Bytes(b))=>Some(b.to_vec()),_=>None})){
+                        let err=decode_wire(&status).ok().and_then(|f|f.into_iter().find_map(|x|match (x.number,x.value){(1,WireValue::Varint(v))=>Some(v),_=>None})).unwrap_or(0);
+                        log::info!("Viewer clipboard text change acknowledged: err={err}");
+                    }
+                    if let Some(text)=self.rich.response(payload)?{value=Some(text)}
+                },
                 _=>{},
             }
         }
@@ -143,7 +156,7 @@ impl Bridge {
                         if channel.ready_state()!=webrtc::data_channel::data_channel_state::RTCDataChannelState::Open{continue}
                         match backend.read().await {
                             Ok(Some(value))=>{let length=value.len();match state.local(value){
-                                Ok(Some(message))=>{if send(&channel,message).await.is_err(){break}log::info!("Viewer local clipboard offered: bytes={length}");},
+                                Ok(Some(messages))=>{let mut failed=false;for m in messages{if send(&channel,m).await.is_err(){failed=true;break}}if failed{break}log::info!("Viewer local clipboard offered: bytes={length}");},
                                 Ok(None)=>{},Err(_)=>{},
                             }},
                             Ok(None)=>{},Err(())=>{warn();break},
@@ -203,7 +216,7 @@ impl Drop for Bridge{fn drop(&mut self){self.stop();}}
     fn native_host_exchange(outbound:usize,reverse:bool)->(Option<String>,bool){
         let mut viewer=SyncState::default();let mut host=[rich::State::default(),rich::State::default()];let mut id=1000;
         let value="clipboard-中文🙂\n".to_owned();
-        let offer=if reverse{wire::envelope(1,21,&host[1].offer(1,value.clone()).unwrap())}else{viewer.local(value.clone()).unwrap().unwrap()};
+        let offer=if reverse{wire::envelope(1,21,&host[1].offer(1,value.clone()).unwrap())}else{viewer.local(value.clone()).unwrap().unwrap().remove(0)};
         let mut queue=std::collections::VecDeque::from([(reverse,if reverse{1}else{outbound},offer)]);
         let mut received=None;let mut unavailable=false;let mut steps=0;
         while let Some((to_viewer,channel,packet))=queue.pop_front(){
@@ -230,6 +243,12 @@ impl Drop for Bridge{fn drop(&mut self){self.stop();}}
         }
         if reverse && received.is_some(){viewer.last=Some(value.clone());assert!(viewer.local(value).unwrap().is_none());}
         (received,unavailable)
+    }
+    #[test] fn local_change_also_sends_windows_text_change_request(){
+        let mut viewer=SyncState::default();
+        let messages=viewer.local("windows 中文".into()).unwrap().unwrap();assert_eq!(messages.len(),2);
+        let rpc=decode_wire(&messages[1]).unwrap().into_iter().find_map(|f|match (f.number,f.value){(21,WireValue::Bytes(b))=>Some(b.to_vec()),_=>None}).unwrap();
+        let (_,text)=crate::clipboard_protocol::read_text_request(&rpc).unwrap().unwrap();assert_eq!(text,"windows 中文");
     }
     #[test] fn control_clipboard_reproduces_native_host_failures(){
         assert_eq!(native_host_exchange(0,false),(None,false)); // Complete transfer, no CONTROL desktop sink.
