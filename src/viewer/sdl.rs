@@ -106,7 +106,8 @@ pub async fn run(session:&mut Session,window:&mut Window,decoder:&mut dyn super:
                 // At most one AU per iteration keeps local event polling responsive.
                 if let Some(au)=session.peer.desktop.units.pop(){
                     if session.peer.desktop.reset.swap(false,std::sync::atomic::Ordering::AcqRel){decoder.reset();}
-                    super::desktop::display(decoder,window,&au,&session.peer.desktop.pli)?;}
+                    decoder.set_codec(au.codec)?;
+                    super::desktop::display(decoder,window,&au.data,au.codec,&session.peer.desktop.pli)?;}
             }
         }}
     }.await;

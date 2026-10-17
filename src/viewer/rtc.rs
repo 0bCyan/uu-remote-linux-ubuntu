@@ -1,6 +1,6 @@
 use super::wire::{self, Shape, CHANNELS};
 use serde_json::{json, Value};
-use std::sync::{Arc,atomic::{AtomicBool,AtomicU64,Ordering}};
+use std::sync::{Arc,atomic::{AtomicBool,AtomicU32,AtomicU64,Ordering}};
 use tokio::sync::mpsc;
 use webrtc::{api::{APIBuilder,media_engine::MediaEngine,setting_engine::SettingEngine}, peer_connection::{RTCPeerConnection,configuration::RTCConfiguration,sdp::session_description::RTCSessionDescription,policy::ice_transport_policy::RTCIceTransportPolicy}, ice_transport::{ice_server::RTCIceServer,ice_candidate::RTCIceCandidateInit}, data_channel::{RTCDataChannel,data_channel_init::RTCDataChannelInit}, rtp_transceiver::{rtp_codec::RTPCodecType,rtp_transceiver_direction::RTCRtpTransceiverDirection,RTCRtpTransceiverInit}};
 
@@ -34,6 +34,8 @@ pub struct Observed {
     pub control_messages:AtomicU64,
     pub other_messages:AtomicU64,
     pub media_packets:AtomicU64,
+    pub encoder_codecs:AtomicU32,
+    pub chroma:AtomicU32,
 }
 pub struct Peer {
     clipboard:super::clipboard::Bridge,
@@ -49,17 +51,21 @@ pub struct Peer {
     ice_id:String,
     remote_client:String,
 }
+fn media_engine(shape:&Shape)->Result<MediaEngine,String>{
+    use webrtc::rtp_transceiver::rtp_codec::{RTCRtpCodecParameters,RTCRtpCodecCapability};
+    let mut engine=MediaEngine::default();
+    let mut codecs=vec![(RTPCodecType::Video,"video/H264",90000,0,"level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f",102),
+        (RTPCodecType::Audio,"audio/opus",48000,2,"minptime=10;useinbandfec=1",111)];
+    // RFC 7798 single-layer non-interleaved mode: no sprop-max-don-diff, hence no DONL.
+    if shape.decoders.iter().any(|d|d.codec==2){codecs.insert(0,(RTPCodecType::Video,"video/H265",90000,0,"",104));}
+    for (kind,mime,rate,channels,fmtp,payload) in codecs {
+        engine.register_codec(RTCRtpCodecParameters{capability:RTCRtpCodecCapability{mime_type:mime.into(),clock_rate:rate,channels,sdp_fmtp_line:fmtp.into(),..Default::default()},payload_type:payload,..Default::default()},kind).map_err(|_|"Codec initialization failed")?;
+    }Ok(engine)
+}
 impl Peer {
     pub async fn new(config:RTCConfiguration, shape:&Shape, app_id:&str, ice_id:&str, remote_client:&str, outbound:mpsc::Sender<Value>, settings:SettingEngine)->Result<Self,String> {
         shape.validate_session()?;
-        let mut engine=MediaEngine::default();
-        use webrtc::rtp_transceiver::rtp_codec::{RTCRtpCodecParameters,RTCRtpCodecCapability};
-        for (kind,mime,rate,channels,fmtp,payload) in [
-            (RTPCodecType::Video,"video/H264",90000,0,"level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f",102),
-            (RTPCodecType::Audio,"audio/opus",48000,2,"minptime=10;useinbandfec=1",111),
-        ] {
-            engine.register_codec(RTCRtpCodecParameters{capability:RTCRtpCodecCapability{mime_type:mime.into(),clock_rate:rate,channels,sdp_fmtp_line:fmtp.into(),..Default::default()},payload_type:payload,..Default::default()},kind).map_err(|_|"Codec initialization failed")?;
-        }
+        let mut engine=media_engine(shape)?;
         // UU RTP metadata the official Mac viewer offers (src/rtp_metadata.rs on the host side).
         for uri in ["http://www.webrtc.org/experiments/rtp-hdrext/video-capture-index","http://www.webrtc.org/experiments/rtp-hdrext/video-frame-is-new-frame"] {
             engine.register_header_extension(webrtc::rtp_transceiver::rtp_codec::RTCRtpHeaderExtensionCapability{uri:uri.into()},RTPCodecType::Video,None).map_err(|_|"RTP header extension registration failed")?;
@@ -104,9 +110,9 @@ impl Peer {
                 let video=track.kind()==RTPCodecType::Video;
                 log::info!("Viewer track: kind={} mime={} payload_type={}",track.kind(),track.codec().capability.mime_type,track.payload_type());
                 let opus=track.kind()==RTPCodecType::Audio && track.codec().capability.mime_type.eq_ignore_ascii_case("audio/opus");
-                if video && !track.codec().capability.mime_type.eq_ignore_ascii_case("video/H264") {return}
+                if video && super::media::Codec::from_mime(&track.codec().capability.mime_type).is_none() {return}
                 if video {desktop.ssrc.store(track.ssrc(),Ordering::Release);}
-                let mut receiver=super::media::Receiver::default();
+                let mut receiver=super::media::Receiver::new(super::media::Codec::from_mime(&track.codec().capability.mime_type).unwrap_or_default());
                 let mut tick=tokio::time::interval(std::time::Duration::from_millis(40));
                 let mut last_pli=std::time::Instant::now()-std::time::Duration::from_secs(1);
                 loop {
@@ -115,6 +121,12 @@ impl Peer {
                             Ok((p,_))=>{
                                 counters.media_packets.fetch_add(1,Ordering::Relaxed);
                                 if !video {if opus {audio.push(p.header.sequence_number,&p.payload);}continue}
+                                // TrackRemote updates codec from the negotiated payload type on each read.
+                                let Some(codec)=super::media::Codec::from_mime(&track.codec().capability.mime_type) else{continue};
+                                if receiver.codec()!=codec {
+                                    receiver=super::media::Receiver::new(codec);
+                                    desktop.reset.store(true,Ordering::Release);desktop.pli.store(true,Ordering::Release);
+                                }
                                 receiver.push(super::media::Packet{seq:p.header.sequence_number,timestamp:p.header.timestamp,marker:p.header.marker,payload:p.payload.to_vec()})
                             },
                             Err(_)=>break,
@@ -122,7 +134,7 @@ impl Peer {
                         _=tick.tick()=>{if !video {continue} receiver.expire()},
                     };
                     if output.pli {desktop.reset.store(true,Ordering::Release);desktop.pli.store(true,Ordering::Release);}
-                    for au in output.units {if desktop.units.push(au) {desktop.reset.store(true,Ordering::Release);desktop.pli.store(true,Ordering::Release);}}
+                    for au in output.units {if desktop.units.push(super::media::AccessUnit{codec:receiver.codec(),data:au}) {desktop.reset.store(true,Ordering::Release);desktop.pli.store(true,Ordering::Release);}}
                     if desktop.pli.load(Ordering::Acquire) && last_pli.elapsed()>=std::time::Duration::from_millis(250) {
                         desktop.pli.swap(false,Ordering::AcqRel);
                         if let Some(pc)=weak_pc.upgrade() {
@@ -160,9 +172,13 @@ impl Peer {
             for (index,channel) in channels.iter().enumerate() {
                 if index==0 {
                     let weak=Arc::downgrade(&channel);let state=observed.clone();
+                    let chroma444=shape.capture_type==1 && std::env::var("UU_VIEWER_CHROMA").is_ok_and(|v|v=="444");
                     channel.on_open(Box::new(move ||Box::pin(async move {
                         state.control_open.store(true,Ordering::Release);
-                        if let Some(channel)=weak.upgrade(){let _=channel.send(&bytes::Bytes::from(wire::echo_request_with_clipboard(1,clipboard_enabled))).await;}
+                        if let Some(channel)=weak.upgrade(){
+                            let _=channel.send(&bytes::Bytes::from(wire::echo_request_with_clipboard(1,clipboard_enabled))).await;
+                            if chroma444 {let _=channel.send(&bytes::Bytes::from(wire::request_chroma444())).await;}
+                        }
                     })));
                 }
                 let closed=tools.clone();let state=observed.clone();
@@ -174,6 +190,11 @@ impl Peer {
                 let control_for_echo=if index==0 {Arc::downgrade(&channel)} else {std::sync::Weak::new()};
                 channel.on_message(Box::new(move |message| {let state=state.clone();let inbox=inbox.clone();let control_for_echo=control_for_echo.clone();let clipboard_tx=clipboard_tx.clone();Box::pin(async move {
                     if index==0 {
+                        let (codecs,chroma)=wire::media_control(&message.data);
+                        if let Some(codecs)=codecs {state.encoder_codecs.store(codecs,Ordering::Release);}
+                        if let Some(chroma)=chroma {
+                            if state.chroma.swap(chroma,Ordering::AcqRel)!=chroma {log::info!("Viewer capture sync: chroma={chroma}");}
+                        }
                         let count=state.control_messages.fetch_add(1,Ordering::Relaxed);
                         if wire::echo_matches(&message.data,1) {state.clipboard_supported.store(wire::echo_clipboard_supported(&message.data),Ordering::Release);state.echo_received.store(true,Ordering::Release);}
                         if let Some(request)=wire::echo_request_seq(&message.data) {
@@ -312,4 +333,18 @@ pub fn with_max_message_size(sdp:&str)->String{
 #[cfg(test)] #[test] fn offer_advertises_max_message_size(){
     assert_eq!(with_max_message_size("m=application 9\r\na=sctp-port:5000\r\na=mid:0\r\n"),"m=application 9\r\na=sctp-port:5000\r\na=max-message-size:262144\r\na=mid:0\r\n");
     assert_eq!(with_max_message_size("a=max-message-size:1\r\n"),"a=max-message-size:1\r\n");
+}
+
+#[cfg(test)] #[tokio::test] async fn offers_both_codecs_or_h264_only(){
+    for force in [false,true] {
+        let shape:Shape=serde_json::from_str(include_str!("../../tests/fixtures/viewer/session-shape.json")).unwrap();
+        let shape=shape.video_preferences(force);
+        let api=APIBuilder::new().with_media_engine(media_engine(&shape).unwrap()).build();
+        let pc=api.new_peer_connection(RTCConfiguration::default()).await.unwrap();
+        pc.add_transceiver_from_kind(RTPCodecType::Video,Some(RTCRtpTransceiverInit{direction:RTCRtpTransceiverDirection::Recvonly,send_encodings:vec![]})).await.unwrap();
+        let offer=pc.create_offer(None).await.unwrap();
+        assert!(offer.sdp.contains("a=rtpmap:102 H264/90000"));
+        assert_eq!(offer.sdp.contains("a=rtpmap:104 H265/90000"),!force);
+        assert!(!offer.sdp.contains("sprop-max-don-diff"));pc.close().await.unwrap();
+    }
 }

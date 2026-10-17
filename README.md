@@ -389,6 +389,9 @@ xfce4-session xfce4-panel xfdesktop xfwm4 gnome-terminal`。
   `assist CONNECT_ID`（验证码从 stdin 读取一行，不能作为参数传入）。`uuremote-viewer --help` 查看全部参数。
 - 桌面窗口中按 Ctrl+Alt+F 打开文件窗口（复用同一连接）。`UU_VIEWER_AUDIO=0` 关闭声音，`UU_VIEWER_CLIPBOARD=0` 关闭剪贴板，
   `UU_VIEWER_VIEW_ONLY=1` 只看不控，`UU_VIEWER_FFMPEG` 指定 ffmpeg 路径。
+- 桌面同时提供 H.264 / H.265，由主机协商选择；`UU_VIEWER_CODEC=h264` 将 SDP 和解码能力限制为 H.264。
+  默认请求 4:2:0；`UU_VIEWER_CHROMA=444` 在 CONTROL 打开后请求真彩（4:4:4）。主机可能回落到 4:2:0，
+  以 CaptureSettingSync 回报为准。两种色度均由 FFmpeg 转为 RGB24 显示。H.265 / 4:4:4 **尚未实机测试**。
 
 **已实测**（作者环境，非全面验收）：
 | 功能 | 官方 Windows 被控端 | 官方 Mac 被控端 | 本项目 Linux 主机 |
@@ -404,4 +407,4 @@ xfce4-session xfce4-panel xfdesktop xfwm4 gnome-terminal`。
 | Wayland 下的桌面窗口与剪贴板（Hyprland） | — | — | ✅（虚拟机） |
 
 「—」表示尚未测试。重启/关机只应在可以重启的机器上使用。**未实测**：GNOME/KDE Wayland 下的窗口与剪贴板、
-H.265 与 4:4:4（目前只解码 H.264 4:2:0）、多显示器。日志只记录字段号、大小和状态，不记录键盘、剪贴板、文件内容、验证码或凭据。
+H.265 与 4:4:4、多显示器。日志只记录字段号、大小和状态，不记录键盘、剪贴板、文件内容、验证码或凭据。

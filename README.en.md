@@ -425,6 +425,9 @@ terminal emulator (`TERMINAL` selects one). From source: `sudo apt install libsd
   `assist CONNECT_ID` (the code is read from one stdin line, never an argument). See `uuremote-viewer --help`.
 - Ctrl+Alt+F in the desktop window opens the files window on the same connection. `UU_VIEWER_AUDIO=0` disables sound,
   `UU_VIEWER_CLIPBOARD=0` the clipboard, `UU_VIEWER_VIEW_ONLY=1` input; `UU_VIEWER_FFMPEG` selects the ffmpeg binary.
+- Desktop offers H.264 / H.265; the host chooses the codec. `UU_VIEWER_CODEC=h264` limits both SDP and decoder capabilities to H.264.
+  The default request stays 4:2:0; `UU_VIEWER_CHROMA=444` requests true color (4:4:4) after CONTROL opens. The host may fall back to
+  4:2:0, as reported by CaptureSettingSync. FFmpeg converts either chroma format to RGB24 for display. H.265 / 4:4:4 are **not tested live**.
 
 **Tested live** (author's setup, not full acceptance):
 | Feature | Official Windows host | Official Mac host | This project's Linux host |
@@ -439,5 +442,5 @@ terminal emulator (`TERMINAL` selects one). From source: `sudo apt install libsd
 | Reboot, shutdown | — | — | ✅ (VM) |
 | Wayland desktop window and clipboard (Hyprland) | — | — | ✅ (VM) |
 
-"—" = not tested yet. Only use reboot/shutdown on machines you can restart. **Not tested live**: GNOME/KDE Wayland windows and clipboard, H.265 and 4:4:4 (only H.264 4:2:0 is decoded), multiple monitors. Logs carry field
+"—" = not tested yet. Only use reboot/shutdown on machines you can restart. **Not tested live**: GNOME/KDE Wayland windows and clipboard, H.265 and 4:4:4, multiple monitors. Logs carry field
 numbers, sizes and states only, never keystrokes, clipboard or file contents, codes or credentials.

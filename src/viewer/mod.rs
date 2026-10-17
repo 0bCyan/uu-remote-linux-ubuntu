@@ -12,7 +12,7 @@ pub mod audio;
 pub mod input;
 pub mod desktop;
 #[cfg(feature="viewer-ffmpeg")] pub mod decoder;
-#[cfg(feature="viewer-sdl")] pub mod decoder_cli;
+#[cfg(any(test,feature="viewer-sdl"))] pub mod decoder_cli;
 #[cfg(uu_gtk)] pub mod ui;
 #[cfg(uu_gtk)] pub mod tools_ui;
 #[cfg(feature="viewer-sdl")] pub mod sdl;

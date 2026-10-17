@@ -52,13 +52,28 @@ impl Shape {
     }
     pub fn validate_session(&self)->Result<(),String> {
         self.validate()?;
-        // H264/420 receive only. streamer_data video_codec_capability is sent by the official Mac
-        // viewer (8 entries observed live), so H264/420 entries are allowed there too.
-        if self.decoders.iter().any(|d|d.codec!=1 || d.chroma!=1) || self.codecs.iter().any(|c|c.video_codec!=1 || c.chroma_sampling!=1)
-            || (self.capture_type==1 && (self.chroma!=1 || self.decoders.is_empty())) {
-            return Err("Sessions require H264/420 decoder and codec capabilities".into());
+        if self.codecs.iter().any(|c|![1,2].contains(&c.video_codec) || ![1,3].contains(&c.chroma_sampling))
+            || (self.capture_type==1 && self.decoders.is_empty()) {
+            return Err("Sessions require supported decoder and codec capabilities".into());
         }
         Ok(())
+    }
+    /// Advertise software decoding of both 8-bit chroma formats. Keep caller size/fps limits.
+    /// The explicit chroma request is sent on CONTROL, so initial capture stays 4:2:0.
+    pub fn video_preferences(&self,h264_only:bool)->Self {
+        let mut shape=self.clone();
+        if shape.capture_type==1 {
+            shape.chroma=1;
+            shape.decoders.clear();
+            for codec in if h264_only {&[1][..]}else{&[2,1][..]} {
+                let base=self.decoders.iter().find(|d|d.codec==*codec).or_else(||self.decoders.first());
+                if let Some(base)=base {for chroma in [1,3] {
+                    let mut d=base.clone();d.codec=*codec;d.chroma=chroma;shape.decoders.push(d);
+                }}
+            }
+        }
+        if h264_only {shape.decoders.retain(|d|d.codec==1);shape.codecs.retain(|c|c.video_codec==1);}
+        shape
     }
     pub fn connect_options(&self, device:&str) -> Result<Vec<u8>,String> {
         self.validate()?;
@@ -179,5 +194,56 @@ mod tests {
         let mut action=Vec::new();int(1,1,&mut action);bytes(2,br#"{"seq":7}"#,&mut action);
         let reply=envelope(99,3,&action); assert!(echo_matches(&reply,7)); assert!(!echo_matches(&reply,99));
         assert!(!echo_matches(&echo_request(7),7)); assert!(!echo_matches(&[255],7));
+    }
+}
+
+/// CaptureSettingRequest field 7 = ChromaFormat 3, wrapped in RPC 21/case 2.
+pub fn request_chroma444()->Vec<u8>{
+    let mut header=Vec::new();int(1,2_000_000,&mut header);
+    let mut setting=Vec::new();int(7,3,&mut setting);
+    let mut rpc=Vec::new();bytes(1,&header,&mut rpc);bytes(2,&setting,&mut rpc);
+    envelope(2_000_000,21,&rpc)
+}
+/// Message 18 is an encoder capability LIST, not the chosen codec; RTP's negotiated PT is authoritative.
+/// Message 25 reports actual encoded chroma, which may fall back to 4:2:0.
+pub fn media_control(data:&[u8])->(Option<u32>,Option<u32>){
+    let mut codecs=None;let mut chroma=None;
+    if let Ok(fields)=decode_wire(data){for field in fields {
+        if let WireValue::Bytes(body)=field.value {match field.number {
+            18=>{if let Ok(caps)=decode_wire(body){let mut mask=0;for cap in caps {if let (1,WireValue::Bytes(cap))=(cap.number,cap.value){
+                match super::tools::uint(cap,3){1=>mask|=1,2=>mask|=2,_=>{}}
+            }}codecs=Some(mask);}},
+            25=>{let value=super::tools::uint(body,3);if [1,3].contains(&value){chroma=Some(value as u32);}},
+            _=>{},
+        }}
+    }}(codecs,chroma)
+}
+
+#[cfg(test)] mod video_tests {
+    use super::*;
+    #[test] fn decoder_caps_cover_both_codecs_and_chroma_and_force_h264(){
+        let original:Shape=serde_json::from_str(include_str!("../../tests/fixtures/viewer/session-shape.json")).unwrap();
+        for force in [false,true] {
+            let s=original.video_preferences(force);s.validate_session().unwrap();assert_eq!(s.chroma,1);
+            let options=s.connect_options("synthetic-device").unwrap();
+            let mut caps=Vec::new();
+            for f in decode_wire(&options).unwrap(){if let (4,WireValue::Bytes(cap))=(f.number,f.value){
+                assert_eq!(super::super::tools::uint(cap,1),30);
+                assert_eq!(super::super::tools::uint(cap,3),1280);assert_eq!(super::super::tools::uint(cap,4),720);
+                caps.push((super::super::tools::uint(cap,2),super::super::tools::uint(cap,5)));
+            }}
+            assert_eq!(caps,if force{vec![(1,1),(1,3)]}else{vec![(2,1),(2,3),(1,1),(1,3)]});
+            assert!(s.video_preferences(force).connect_options("synthetic-device").unwrap()==options);
+        }
+    }
+    #[test] fn chroma_request_and_actual_sync_are_independent_of_encoder_list(){
+        let request=request_chroma444();let rpc=super::super::tools::blob(&request,21).unwrap();
+        let setting=super::super::tools::blob(rpc,2).unwrap();assert_eq!(super::super::tools::uint(setting,7),3);
+        assert_eq!(decode_wire(setting).unwrap().len(),1);
+        let mut caps=Vec::new();for codec in [1,2] {let mut cap=Vec::new();int(3,codec,&mut cap);bytes(1,&cap,&mut caps);}
+        let mut msg=envelope(1,18,&caps);let mut sync=Vec::new();int(3,1,&mut sync);bytes(25,&sync,&mut msg);
+        assert_eq!(media_control(&msg),(Some(3),Some(1)));
+        assert_eq!(media_control(&envelope(2,25,&[24,3])),(None,Some(3)));
+        assert_eq!(media_control(&[255]),(None,None));
     }
 }

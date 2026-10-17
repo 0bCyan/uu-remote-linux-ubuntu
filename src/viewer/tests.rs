@@ -130,7 +130,7 @@ async fn complete_session_uses_loopback_signaling_and_virtual_rtc_through_echo()
                             Some("offer")=> {
                                 let offered=body["sdp"].as_str().unwrap();
                                 assert!(offered.contains("H264/90000") && offered.contains("opus/48000"));
-                                assert!(!offered.contains("H265") && !offered.contains("VP8"));
+                                assert!(offered.contains("H265/90000") && !offered.contains("VP8"));
                                 assert_eq!(offered.matches("a=recvonly").count(),2);
                                 server_host.set_remote_description(RTCSessionDescription::offer(offered.into()).unwrap()).await.unwrap();
                                 let answer=server_host.create_answer(None).await.unwrap();let sdp=answer.sdp.clone();let mut gathered=server_host.gathering_complete_promise().await;server_host.set_local_description(answer).await.unwrap();
@@ -169,7 +169,7 @@ async fn complete_session_uses_loopback_signaling_and_virtual_rtc_through_echo()
         let heartbeat=super::input::Input::heartbeat();session.peer.send_input(&heartbeat).await.unwrap();assert_eq!(input_rx.recv().await.unwrap(),heartbeat);
         let packet=|seq,ts,marker,payload:&[u8]|webrtc::rtp::packet::Packet{header:webrtc::rtp::header::Header{version:2,sequence_number:seq,timestamp:ts,marker,..Default::default()},payload:bytes::Bytes::copy_from_slice(payload)};
         track.write_rtp(&packet(9,1,true,&[0x65,1])).await.unwrap();
-        loop {if let Some(au)=session.peer.desktop.units.pop(){assert_eq!(au,vec![0,0,0,1,0x65,1]);break}tokio::time::sleep(Duration::from_millis(10)).await;}
+        loop {if let Some(au)=session.peer.desktop.units.pop(){assert_eq!(au.codec,super::media::Codec::H264);assert_eq!(au.data,vec![0,0,0,1,0x65,1]);break}tokio::time::sleep(Duration::from_millis(10)).await;}
         track.write_rtp(&packet(10,2,false,&[0x7c,0x85,1])).await.unwrap();
         track.write_rtp(&packet(12,2,true,&[0x7c,0x45,3])).await.unwrap();
         loop {let (packets,_)=sender.read_rtcp().await.unwrap();if packets.iter().any(|p|p.as_any().is::<webrtc::rtcp::payload_feedbacks::picture_loss_indication::PictureLossIndication>()){break}}
@@ -220,7 +220,7 @@ async fn opus_and_video_tracks_are_received_independently_in_memory() {
         let video=Arc::new(TrackLocalStaticRTP::new(RTCRtpCodecCapability{mime_type:"video/H264".into(),clock_rate:90000,sdp_fmtp_line:"level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f".into(),..Default::default()},"video".into(),"test".into()));
         host.add_track(audio.clone() as Arc<dyn TrackLocal+Send+Sync>).await.unwrap();host.add_track(video.clone() as Arc<dyn TrackLocal+Send+Sync>).await.unwrap();
         let(tx,_rx)=mpsc::channel(256);
-        let peer=Peer::new(RTCConfiguration::default(),&shape(),"app","ice","host",tx,viewer_settings).await.unwrap();
+        let peer=Peer::new(RTCConfiguration::default(),&shape().video_preferences(false),"app","ice","host",tx,viewer_settings).await.unwrap();
         let mut gathered=peer.pc.gathering_complete_promise().await;peer.offer().await.unwrap();gathered.recv().await;
         let offer=peer.pc.local_description().await.unwrap();assert!(offer.sdp.contains("m=audio") && offer.sdp.contains("opus/48000/2"));
         host.set_remote_description(offer).await.unwrap();let answer=host.create_answer(None).await.unwrap();
@@ -233,7 +233,7 @@ async fn opus_and_video_tracks_are_received_independently_in_memory() {
             audio.write_rtp(&packet(&[0xf8,0xff,0xfe])).await.unwrap();video.write_rtp(&packet(&[0x65,1])).await.unwrap();
             tokio::time::sleep(Duration::from_millis(10)).await;
             if let Some(data)=peer.audio.pop(){assert_eq!(data,vec![0xf8,0xff,0xfe]);heard=true;}
-            if let Some(data)=peer.desktop.units.pop(){assert_eq!(data,vec![0,0,0,1,0x65,1]);seen=true;}
+            if let Some(data)=peer.desktop.units.pop(){assert_eq!(data.codec,super::media::Codec::H264);assert_eq!(data.data,vec![0,0,0,1,0x65,1]);seen=true;}
             if heard && seen {break}
         }
         assert!(heard && seen);peer.close().await;host.close().await.unwrap();router.lock().await.stop().await.unwrap();
@@ -286,4 +286,56 @@ async fn desktop_file_window_reattaches_without_replacing_peer(){
         assert_eq!(opened.load(Ordering::Relaxed),5);
         peer.close().await;host.close().await.unwrap();router.lock().await.stop().await.unwrap();
     }).await.expect("desktop file reuse timed out");
+}
+
+#[tokio::test]
+async fn hevc_track_uses_negotiated_payload_type_in_memory(){
+    tokio::time::timeout(Duration::from_secs(10),async {
+        use super::media::Codec;
+        use webrtc::{track::track_local::{track_local_static_rtp::TrackLocalStaticRTP,TrackLocal,TrackLocalWriter},
+            rtp_transceiver::rtp_codec::{RTCRtpCodecCapability,RTCRtpCodecParameters,RTPCodecType}};
+        let(viewer_settings,host_settings,router)=virtual_network().await;
+        // The host uses a different local PT; the answer binds its track to the viewer offer.
+        let mut engine=MediaEngine::default();
+        let capability=RTCRtpCodecCapability{mime_type:"video/H265".into(),clock_rate:90000,..Default::default()};
+        engine.register_codec(RTCRtpCodecParameters{capability:capability.clone(),payload_type:126,..Default::default()},RTPCodecType::Video).unwrap();
+        let host=Arc::new(APIBuilder::new().with_media_engine(engine).with_setting_engine(host_settings).build().new_peer_connection(RTCConfiguration::default()).await.unwrap());
+        let video=Arc::new(TrackLocalStaticRTP::new(capability,"video".into(),"test".into()));
+        host.add_track(video.clone() as Arc<dyn TrackLocal+Send+Sync>).await.unwrap();
+        host.on_data_channel(Box::new(|channel|Box::pin(async move {
+            if channel.label()=="CONTROL_DATA_CHANNEL" {
+                let weak=Arc::downgrade(&channel);
+                channel.on_open(Box::new(move||Box::pin(async move {
+                    if let Some(channel)=weak.upgrade(){
+                        let mut caps=Vec::new();for codec in [1,2]{let mut cap=Vec::new();wire::int(3,codec,&mut cap);wire::bytes(1,&cap,&mut caps);}
+                        channel.send(&bytes::Bytes::from(wire::envelope(2,18,&caps))).await.unwrap();
+                        // Model a host that declines 4:4:4 and encodes 4:2:0.
+                        channel.send(&bytes::Bytes::from(wire::envelope(3,25,&[24,1]))).await.unwrap();
+                    }
+                })));
+            }
+        })));
+        let(tx,_rx)=mpsc::channel(256);
+        let peer=Peer::new(RTCConfiguration::default(),&shape().video_preferences(false),"app","ice","host",tx,viewer_settings).await.unwrap();
+        let mut gathered=peer.pc.gathering_complete_promise().await;peer.offer().await.unwrap();gathered.recv().await;
+        host.set_remote_description(peer.pc.local_description().await.unwrap()).await.unwrap();
+        let answer=host.create_answer(None).await.unwrap();
+        assert!(answer.sdp.contains("H265/90000"));assert!(!answer.sdp.contains("H264/90000"));
+        let mut gathered=host.gathering_complete_promise().await;host.set_local_description(answer).await.unwrap();gathered.recv().await;
+        peer.pc.set_remote_description(host.local_description().await.unwrap()).await.unwrap();
+        while peer.pc.connection_state()!=webrtc::peer_connection::peer_connection_state::RTCPeerConnectionState::Connected {tokio::time::sleep(Duration::from_millis(10)).await;}
+        let mut au=vec![0,0,0,1,64,1,9,0,0,0,1,38,1];au.extend(vec![7;200]);
+        let payloads=crate::hevc::payload(80,&au).unwrap();let mut seq=0;let mut seen=false;
+        for timestamp in 0..100 {
+            for (i,payload) in payloads.iter().enumerate(){
+                video.write_rtp(&webrtc::rtp::packet::Packet{header:webrtc::rtp::header::Header{version:2,sequence_number:seq,timestamp:timestamp*3000,marker:i+1==payloads.len(),..Default::default()},payload:payload.clone()}).await.unwrap();seq=seq.wrapping_add(1);
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            if let Some(unit)=peer.desktop.units.pop(){assert_eq!(unit.codec,Codec::H265);assert_eq!(unit.data,au);seen=true;}
+            if seen && peer.observed.chroma.load(Ordering::Acquire)==1 {break}
+        }
+        assert!(seen);assert_eq!(peer.observed.encoder_codecs.load(Ordering::Acquire),3);
+        assert_eq!(peer.observed.chroma.load(Ordering::Acquire),1);
+        peer.close().await;host.close().await.unwrap();router.lock().await.stop().await.unwrap();
+    }).await.expect("in-memory H265 timed out");
 }

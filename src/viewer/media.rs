@@ -1,19 +1,32 @@
-//! Bounded RFC 6184 packetization-mode 1 receiver. No media contents in logs.
+//! Bounded RFC 6184 / RFC 7798 non-interleaved receivers (no DONL). No media contents in logs.
 use std::{collections::VecDeque, sync::{Arc, Mutex}};
 use std::time::{Duration,Instant};
+#[derive(Clone,Copy,Debug,Default,PartialEq,Eq)]
+pub enum Codec { #[default] H264, H265 }
+impl Codec {
+    pub fn from_mime(mime:&str)->Option<Self> {
+        if mime.eq_ignore_ascii_case("video/H264"){Some(Self::H264)}
+        else if mime.eq_ignore_ascii_case("video/H265"){Some(Self::H265)}else{None}
+    }
+    pub fn demuxer(self)->&'static str {match self {Self::H264=>"h264",Self::H265=>"hevc"}}
+}
+pub struct AccessUnit {pub codec:Codec,pub data:Vec<u8>}
 const MAX_AU: usize = 8 * 1024 * 1024;
 #[derive(Clone)]
 pub struct Packet { pub seq: u16, pub timestamp: u32, pub marker: bool, pub payload: Vec<u8> }
 #[derive(Default)]
 pub struct Output { pub units: Vec<Vec<u8>>, pub pli: bool }
 pub struct Receiver {
+    codec: Codec,
     next: Option<u16>, pending: Vec<Packet>, timestamp: Option<u32>,
-    au: Vec<u8>, fragment: Option<u8>, damaged: bool, gap_since:Option<Instant>, last_packet:Instant,
+    au: Vec<u8>, fragment: Option<u16>, damaged: bool, gap_since:Option<Instant>, last_packet:Instant,
 }
 impl Default for Receiver {
-    fn default() -> Self { Self { next: None, pending: Vec::new(), timestamp: None, au: Vec::new(), fragment: None, damaged: false, gap_since:None,last_packet:Instant::now() } }
+    fn default() -> Self { Self { codec: Codec::H264, next: None, pending: Vec::new(), timestamp: None, au: Vec::new(), fragment: None, damaged: false, gap_since:None,last_packet:Instant::now() } }
 }
 impl Receiver {
+    pub fn new(codec:Codec)->Self {Self{codec,..Self::default()}}
+    pub fn codec(&self)->Codec {self.codec}
     pub fn push(&mut self, p: Packet) -> Output {
         if p.payload.len()>65536 {return Output{units:Vec::new(),pli:true}}
         let next = *self.next.get_or_insert(p.seq);
@@ -67,6 +80,7 @@ impl Receiver {
         self.au.extend_from_slice(bytes); Ok(())
     }
     fn nal(&mut self, p: &[u8]) -> Result<(), ()> {
+        if self.codec==Codec::H265 {return self.hevc(p)}
         let h = *p.first().ok_or(())?;
         if h & 0x80 != 0 { return Err(()) }
         match h & 31 {
@@ -86,12 +100,45 @@ impl Receiver {
                 let header = (h & 0xe0) | kind;
                 if start {
                     if self.fragment.is_some() { return Err(()) }
-                    self.append(&[0,0,0,1,header])?; self.fragment = Some(header);
-                } else if self.fragment != Some(header) { return Err(()) }
+                    self.append(&[0,0,0,1,header])?; self.fragment = Some(u16::from(header));
+                } else if self.fragment != Some(u16::from(header)) { return Err(()) }
                 self.append(&p[2..])?;
                 if end { self.fragment = None; } Ok(())
             }
             _ => Err(()),
+        }
+    }
+    fn hevc_header(p:&[u8])->Result<u16,()> {
+        if p.len()<2 || p[0]&0x80!=0 || p[1]&7==0 {return Err(())}
+        Ok(u16::from_be_bytes([p[0],p[1]]))
+    }
+    fn hevc(&mut self,p:&[u8])->Result<(),()> {
+        Self::hevc_header(p)?;
+        match (p[0]>>1)&63 {
+            0..=47 if self.fragment.is_none()=>{self.append(&[0,0,0,1])?;self.append(p)},
+            48 if self.fragment.is_none()=>{
+                let mut rest=&p[2..];if rest.is_empty(){return Err(())}
+                while !rest.is_empty() {
+                    if rest.len()<2 {return Err(())}
+                    let n=u16::from_be_bytes([rest[0],rest[1]]) as usize;rest=&rest[2..];
+                    if n<2 || rest.len()<n {return Err(())}
+                    Self::hevc_header(&rest[..n])?;
+                    if (rest[0]>>1)&63>=48 {return Err(())}
+                    self.append(&[0,0,0,1])?;self.append(&rest[..n])?;rest=&rest[n..];
+                }Ok(())
+            },
+            49 if p.len()>3=>{
+                let f=p[2];let kind=f&63;let start=f&128!=0;let end=f&64!=0;
+                if kind>=48 || (start&&end){return Err(())}
+                // RFC 7798 4.4.3: preserve LayerId and TID, replacing only FU's NAL type.
+                let header=[(p[0]&0x81)|(kind<<1),p[1]];let key=u16::from_be_bytes(header);
+                if start {
+                    if self.fragment.is_some(){return Err(())}
+                    self.append(&[0,0,0,1])?;self.append(&header)?;self.fragment=Some(key);
+                }else if self.fragment!=Some(key){return Err(())}
+                self.append(&p[3..])?;if end{self.fragment=None;}Ok(())
+            },
+            _=>Err(()),
         }
     }
 }
@@ -134,5 +181,48 @@ mod tests {
             assert!(Receiver::default().push(p(1,1,true,&bytes)).pli);
         }
         let q=Latest::new(2);assert!(!q.push(1));q.push(2);assert!(q.push(3));assert_eq!(q.pop(),Some(2));assert_eq!(q.pop(),Some(3));
+    }
+}
+
+#[cfg(test)] mod hevc_tests {
+    use super::*;
+    fn packet(seq:u16,ts:u32,marker:bool,payload:Vec<u8>)->Packet {Packet{seq,timestamp:ts,marker,payload}}
+    fn sample()->Vec<u8>{
+        let mut au=vec![0,0,0,1,64,1,9,0,0,0,1,66,1,8,0,0,0,1,68,1,7,0,0,0,1,0x27,0x2b];
+        au.extend((0..2501).map(|i|(i%251+1)as u8));au
+    }
+    #[test] fn host_payloader_round_trip_single_fu_and_reorder(){
+        for mtu in [4,5,7,1190,9000] {
+            let au=sample();let payloads=crate::hevc::payload(mtu,&au).unwrap();let n=payloads.len();
+            let mut packets:Vec<_>=payloads.into_iter().enumerate().map(|(i,b)|packet(65534u16.wrapping_add(i as u16),10,i+1==n,b.to_vec())).collect();
+            // Start at the first sequence, then reorder adjacent packets across wraparound.
+            for i in (1..n.saturating_sub(1)).step_by(2){packets.swap(i,i+1);}
+            let mut r=Receiver::new(Codec::H265);let mut units=Vec::new();
+            for p in packets {let o=r.push(p);assert!(!o.pli);units.extend(o.units);}
+            assert_eq!(units,vec![au]);
+        }
+    }
+    #[test] fn aggregation_and_malformed_packets(){
+        let ap=vec![96,1,0,3,64,1,9,0,3,38,1,7];
+        let mut r=Receiver::new(Codec::H265);
+        assert_eq!(r.push(packet(0,0,true,ap)).units,vec![vec![0,0,0,1,64,1,9,0,0,0,1,38,1,7]]);
+        for payload in [vec![],vec![64],vec![128,1],vec![64,0],vec![96,1],vec![96,1,0,4,38,1,7],
+            vec![96,1,0,2,96,1],vec![98,1,0xc1,3],vec![98,1,0x41,3],vec![98,1,0xb0,3],vec![100,1,7]] {
+            let o=Receiver::new(Codec::H265).push(packet(1,1,true,payload));assert!(o.pli);assert!(o.units.is_empty());
+        }
+    }
+    #[test] fn loss_duplicates_incomplete_tail_and_header_mismatch(){
+        let payloads=crate::hevc::payload(1190,&sample()).unwrap();
+        let mut r=Receiver::new(Codec::H265);
+        // Parameter sets followed by a fragmented IDR; lose its middle fragment.
+        for (i,p) in payloads.iter().enumerate().take(4){r.push(packet(i as u16,1,false,p.to_vec()));}
+        let tail=packet(5,1,true,payloads[5].to_vec());
+        assert!(r.push(tail.clone()).units.is_empty());assert!(r.push(tail).units.is_empty());
+        let o=r.expire_at(Instant::now()+Duration::from_millis(50));assert!(o.pli);assert!(o.units.is_empty());
+        assert_eq!(r.push(packet(6,2,true,vec![38,1,9])).units.len(),1);
+        r.push(packet(7,3,false,vec![98,1,0x93,7]));
+        assert!(r.expire_at(Instant::now()+Duration::from_millis(201)).pli);
+        let mut r=Receiver::new(Codec::H265);r.push(packet(0,0,false,vec![98,1,0x93,7]));
+        let o=r.push(packet(1,0,true,vec![98,2,0x53,8]));assert!(o.pli);assert!(o.units.is_empty());
     }
 }
