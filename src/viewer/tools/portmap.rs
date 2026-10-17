@@ -13,13 +13,21 @@ impl Drop for Route {fn drop(&mut self){self.routes.lock().unwrap().remove(&self
 impl Drop for PortMap {fn drop(&mut self){self.worker.abort();for(_,r)in self.rules.lock().unwrap().drain(){let _=r.stop.send(true);}self.routes.lock().unwrap().clear();}}
 impl PortMap {
     pub fn new(io:Transport,mut rx:mpsc::Receiver<Packet>)->Self{
-        let session=rand::random::<u64>();let routes:Routes=Arc::new(Mutex::new(HashMap::new()));let route=routes.clone();
+        // The official Windows host answers every frame with session_id 1 whatever the viewer sent (observed),
+        // and this project's host echoes it; one port-mapping peer carries one session, so use 1.
+        let session=1u64;let routes:Routes=Arc::new(Mutex::new(HashMap::new()));let route=routes.clone();
         let(life,alive)=watch::channel(());
         let worker=tokio::spawn(async move{
             let _life=life;
             while let Some((channel,b))=rx.recv().await {
-                if channel!=FILE{continue}let Some(f)=blob(&b,27)else{continue};if uint(f,1)!=session{continue}
+                if channel!=FILE{continue}let Some(f)=blob(&b,27)else{continue};
                 let key=(uint(f,2),uint(f,3));let sender=route.lock().unwrap().get(&key).cloned();
+                // Diagnostics without payload: wire types per field and whether session/route matched.
+                if uint(f,1)!=session || sender.is_none() {
+                    let kinds=crate::protocol::decode_wire(f).map(|x|x.iter().map(|w|(w.number,match w.value{crate::protocol::WireValue::Varint(_)=>"varint",crate::protocol::WireValue::Bytes(_)=>"bytes",_=>"fixed"})).collect::<Vec<_>>()).unwrap_or_default();
+                    log::warn!("Port mapping frame unmatched: fields={kinds:?} session_match={} route_match={} type={}",uint(f,1)==session,sender.is_some(),uint(f,4));
+                    continue;
+                }
                 if let Some(tx)=sender {if tx.try_send((uint(f,4),blob(f,5).unwrap_or_default().to_vec())).is_err(){route.lock().unwrap().remove(&key);}}
             }
             route.lock().unwrap().clear();
@@ -51,7 +59,8 @@ impl PortMap {
                     let io=io.clone();let host=host.clone();let mut cancel=stop.clone();let mut transport_closed=disconnected.clone();
                     streams.spawn(async move {
                         let result=tokio::select!{r=forward(&io,session,id,stream,socket,rx,&host,target_port)=>r,_=cancel.changed()=>Ok(()),_=transport_closed.changed()=>Err("Forwarding transport closed".into())};
-                        if result.is_err(){guard.status.lock().unwrap().failures+=1;}
+                        // Reason only (fixed strings), never forwarded bytes or the target address.
+                        if let Err(reason)=&result{guard.status.lock().unwrap().failures+=1;log::warn!("Port mapping stream ended: {reason}");}
                         let _=io.send(FILE,frame(session,id,stream,1,&[])).await;drop(guard);
                     });
                 }
@@ -71,7 +80,8 @@ async fn forward(io:&Transport,session:u64,rule:u64,stream:u64,mut socket:TcpStr
     let syn=serde_json::json!({"version":1,"target_host":host,"target_port":port}).to_string();
     io.send(FILE,frame(session,rule,stream,0,syn.as_bytes())).await?;
     let ack=tokio::time::timeout(Duration::from_secs(12),rx.recv()).await.map_err(|_|"Forwarding SYN timeout")?.ok_or("Forwarding channel closed")?;
-    if ack.0!=3 || serde_json::from_slice::<serde_json::Value>(&ack.1).ok().and_then(|v|v["ok"].as_bool())!=Some(true){return Err("Forwarding target rejected".into())}
+    if ack.0!=3 {return Err(format!("Forwarding SYN answered with frame type {}",ack.0))}
+    if serde_json::from_slice::<serde_json::Value>(&ack.1).ok().and_then(|v|v["ok"].as_bool())!=Some(true){return Err("Forwarding target rejected".into())}
     let mut buf=vec![0;16*1024];
     loop {tokio::select!{
         r=socket.read(&mut buf)=>{let n=r.map_err(|_|"Forwarding read failed")?;if n==0{break}io.send(FILE,frame(session,rule,stream,2,&buf[..n])).await?;},
