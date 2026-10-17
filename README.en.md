@@ -455,7 +455,7 @@ assistance and ISO / JIS keyboards have not been tested live.
 | Remote assistance (ID + code) | — | — | ✅ (VM, guest host) |
 | Terminal session list (create, double-click reattach, end) | — | — | ✅ (VM) |
 | Reboot, shutdown | — | — | ✅ (VM) |
-| Wayland desktop window and clipboard | — | — | ✅ Hyprland, KDE; GNOME window works, clipboard unavailable (#37) |
+| Wayland desktop window and clipboard | — | — | ✅ Hyprland, KDE; GNOME window works; clipboard switched to SDL in v0.2.3 (#37, final revision not re-verified live) |
 
 "—" = not tested yet. Only use reboot/shutdown on machines you can restart. **Not tested live**: H.265 / 4:4:4 with official hosts, multiple monitors. Logs carry field
 numbers, sizes and states only, never keystrokes, clipboard or file contents, codes or credentials.
