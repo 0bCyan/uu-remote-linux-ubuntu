@@ -45,7 +45,7 @@
 | Lock state and auto unlock | Lock state is reported to the viewer; with "auto unlock" enabled in the client, the password is verified with PAM and the session is unlocked |
 | Lock after remote session | Stored on the host, so it still applies after reconnecting |
 | Mute host while controlled | Host speakers are muted while the viewer still hears the sound; the previous mute state is restored afterwards |
-| System actions | Lock, show desktop, task manager (system monitor), reboot, shut down |
+| System actions | Lock, show desktop, task manager (system monitor), reboot, shut down (via `systemctl`; needs polkit permission for the user, usually an active local graphical session; without it the action fails and is logged, no password dialog appears on the host) |
 | Port mapping | The official "port mapping" tool: forwards a local port on the viewer to an address reachable from the Linux host (e.g. 127.0.0.1:22); `UU_PORT_MAPPING=0` disables it |
 | Reconnects | Every tool window has its own connection; they do not disturb each other |
 | Headless servers | Goes online without a monitor with terminal, file transfer and port mapping; an Xvfb virtual desktop gives a full remote desktop (see below) |
@@ -435,7 +435,9 @@ terminal emulator (`TERMINAL` selects one). From source: `sudo apt install libsd
 | Port mapping, terminal | — | — | ✅ |
 | Clipboard (text, both ways), sound | — | — | ✅ (VM) |
 | Remote assistance (ID + code) | — | — | ✅ (VM, guest host) |
+| Terminal session list (create, double-click reattach, end) | — | — | ✅ (VM) |
+| Reboot, shutdown | — | — | ✅ (VM) |
+| Wayland desktop window and clipboard (Hyprland) | — | — | ✅ (VM) |
 
-"—" = not tested yet. **Not tested live**: reboot/shutdown (only try on a machine you can restart), terminal session list
-create/reattach, Wayland windows and clipboard, H.265 and 4:4:4 (only H.264 4:2:0 is decoded), multiple monitors. Logs carry field
+"—" = not tested yet. Only use reboot/shutdown on machines you can restart. **Not tested live**: GNOME/KDE Wayland windows and clipboard, H.265 and 4:4:4 (only H.264 4:2:0 is decoded), multiple monitors. Logs carry field
 numbers, sizes and states only, never keystrokes, clipboard or file contents, codes or credentials.

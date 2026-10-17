@@ -61,6 +61,8 @@ fn save(settings: &Settings) {
 #[derive(Default)]
 pub struct PeerActions { started: AtomicBool }
 
+/// Power actions pass --no-ask-password: without polkit permission (e.g. no active local session) systemctl
+/// would otherwise wait for an authentication dialog on the controlled screen; fail and log instead.
 fn quiet(program: &str, args: &[&str]) -> bool {
     Command::new(program).args(args).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null())
         .status().map(|s| s.success()).unwrap_or(false)
@@ -135,8 +137,8 @@ impl PeerActions {
                 let ok = detached("gnome-system-monitor", &[]) || detached("plasma-systemmonitor", &[]) || detached("xfce4-taskmanager", &[]);
                 log::info!("System action show_taskmgr: ok={}", ok); return false
             }
-            REBOOT_SYSTEM => { log::warn!("System action reboot_system requested by viewer"); log::info!("reboot ok={}", quiet("systemctl", &["reboot"])); return false }
-            SHUTDOWN_SYSTEM => { log::warn!("System action shutdown_system requested by viewer"); log::info!("poweroff ok={}", quiet("systemctl", &["poweroff"])); return false }
+            REBOOT_SYSTEM => { log::warn!("System action reboot_system requested by viewer"); log::info!("reboot ok={}", quiet("systemctl", &["--no-ask-password", "reboot"])); return false }
+            SHUTDOWN_SYSTEM => { log::warn!("System action shutdown_system requested by viewer"); log::info!("poweroff ok={}", quiet("systemctl", &["--no-ask-password", "poweroff"])); return false }
             _ => {}
         }
         let mut state = state().lock().unwrap();
