@@ -435,13 +435,14 @@ terminal emulator (`TERMINAL` selects one). From source: `sudo apt install libsd
 | Desktop video (H.264) | ✅ | ✅ | ✅ |
 | H.265, 4:4:4 true color | — | — | ✅ (VM, libx265) |
 | Keyboard, mouse | ✅ | — | ✅ |
-| File list / download / upload | ✅ list, download | — | ✅ |
-| Port mapping, terminal | — | — | ✅ |
-| Clipboard (text, both ways), sound | — | — | ✅ (VM) |
+| File list / download / upload | ✅ | — | ✅ |
+| Port mapping, terminal | ✅ (PowerShell terminal) | — | ✅ |
+| Clipboard (text) | host → viewer only; viewer → Windows not applied yet | — | ✅ both ways (VM) |
+| Sound | unconfirmed (no audio packets while the host is silent) | — | ✅ (VM) |
 | Remote assistance (ID + code) | — | — | ✅ (VM, guest host) |
 | Terminal session list (create, double-click reattach, end) | — | — | ✅ (VM) |
 | Reboot, shutdown | — | — | ✅ (VM) |
-| Wayland desktop window and clipboard (Hyprland) | — | — | ✅ (VM) |
+| Wayland desktop window and clipboard | — | — | ✅ Hyprland, KDE; GNOME window works, clipboard unavailable (#37) |
 
-"—" = not tested yet. Only use reboot/shutdown on machines you can restart. **Not tested live**: GNOME/KDE Wayland windows and clipboard (on GNOME the clipboard polling makes the Dock jump, see #37), H.265 / 4:4:4 with official hosts, multiple monitors. Logs carry field
+"—" = not tested yet. Only use reboot/shutdown on machines you can restart. **Not tested live**: H.265 / 4:4:4 with official hosts, multiple monitors. Logs carry field
 numbers, sizes and states only, never keystrokes, clipboard or file contents, codes or credentials.
