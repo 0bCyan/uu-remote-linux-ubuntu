@@ -1,4 +1,4 @@
-# uu-remote-linux · Unofficial Linux host for NetEase UU Remote
+# uu-remote-linux · Unofficial Linux host and viewer for NetEase UU Remote
 
 [简体中文](README.md) | **English**
 
@@ -7,6 +7,9 @@
 > NetEase UU Remote (网易 UU 远程) is a great remote-desktop tool, but there is no Linux version on its
 > official website. So, with the help of Claude and Codex, I wrote this open-source Linux host: install it,
 > and you can control your Linux machine from the official Mac / Windows / mobile UU Remote clients.
+> It now also ships an **experimental Linux viewer**, `uuremote-viewer`, that controls official Windows / Mac hosts or this
+> project's host from Linux (desktop, file transfer, terminal, port mapping, remote assistance; see
+> [below](#experimental-native-viewer-uuremote-viewer)).
 >
 > This is a personal hobby project. **It is not affiliated with NetEase and is not an official client.**
 > If NetEase considers this project infringing or inappropriate, please DM me on X

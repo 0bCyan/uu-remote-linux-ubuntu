@@ -1,4 +1,4 @@
-# uu-remote-linux · UU 远程 Linux 被控端（非官方）
+# uu-remote-linux · UU 远程 Linux 被控端 + 控制端（非官方）
 
 **简体中文** | [English](README.en.md)
 
@@ -6,6 +6,8 @@
 >
 > 网易 UU 远程非常好用，但官网一直没有 Linux 版本。于是我借助 Claude 和 Codex，写了这个开源的 Linux 被控端：
 > 装上之后，就能用官方的 Mac / Windows / 手机客户端远程控制你的 Linux 电脑。
+> 现在还附带一个**实验性 Linux 控制端** `uuremote-viewer`：在 Linux 上用 UU 账号远控官方 Windows / Mac 被控端或本项目主机
+> （桌面、文件传输、终端、端口映射、远程协助，详见[下文](#实验性原生控制端uuremote-viewer)）。
 >
 > 这是个人兴趣项目，**与网易无关，也不是官方客户端**。如果网易认为本项目侵权或有不妥，
 > 请在推特私信我 **[@ai_fengshou](https://x.com/ai_fengshou)**，我会第一时间自行下架。
