@@ -21,14 +21,14 @@ impl Cli {
     fn with_codec(codec:Codec,width:u32,height:u32)->Result<Self,String> {
         let ffmpeg=std::env::var("UU_VIEWER_FFMPEG").unwrap_or_else(|_|"ffmpeg".into());
         let filter=format!("scale={width}:{height}:force_original_aspect_ratio=decrease,pad={width}:{height}:(ow-iw)/2:(oh-ih)/2");
-        let mut child=Command::new(ffmpeg)
+        let passthrough=passthrough_args(&ffmpeg);
+        let mut child=Command::new(&ffmpeg)
             .args(["-hide_banner","-loglevel","error","-nostdin","-threads","1","-probesize","32","-analyzeduration","0",
                 "-fflags","nobuffer","-flags","low_delay","-f",codec.demuxer(),"-i","pipe:0","-an","-vf",&filter,
                 "-pix_fmt","rgb24",
                 // Raw H.264/H.265 carries no timestamps; constant-rate output dropped almost every frame of
                 // the official Mac host's stream (270 → 2). Pass frames through unchanged.
-                // -vsync 0 also supports Ubuntu 22.04's FFmpeg 4.4, which lacks -fps_mode.
-                "-vsync","0","-f","rawvideo","pipe:1"])
+                passthrough.0,passthrough.1,"-f","rawvideo","pipe:1"])
             .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null())
             .spawn().map_err(|e|format!("Start ffmpeg decoder: {e}"))?;
         let input=child.stdin.take().ok_or("ffmpeg stdin missing")?;
@@ -45,6 +45,23 @@ impl Cli {
         }).map_err(|e|format!("Decoder reader: {e}"))?;
         Ok(Self{child,input:Some(input),codec,frames,width,height})
     }
+}
+
+/// FFmpeg ≥ 5.1 has `-fps_mode`; FFmpeg 8+ removed `-vsync`, and Ubuntu 22.04's 4.4 lacks `-fps_mode`.
+/// Probe once per binary with a one-frame null run instead of parsing version strings.
+fn passthrough_args(ffmpeg:&str)->(&'static str,&'static str) {
+    static CACHE:std::sync::Mutex<Vec<(String,bool)>>=std::sync::Mutex::new(Vec::new());
+    let mut cache=CACHE.lock().unwrap_or_else(|e|e.into_inner());
+    let fps_mode=match cache.iter().find(|(name,_)|name==ffmpeg) {
+        Some(&(_,known))=>known,
+        None=>{
+            let ok=Command::new(ffmpeg).args(["-hide_banner","-loglevel","quiet","-nostdin","-f","lavfi","-i","color=s=16x16:d=0.04",
+                "-fps_mode","passthrough","-f","null","-"]).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null())
+                .status().is_ok_and(|s|s.success());
+            cache.push((ffmpeg.into(),ok));ok
+        }
+    };
+    if fps_mode {("-fps_mode","passthrough")} else {("-vsync","0")}
 }
 
 impl Decoder for Cli {
@@ -72,6 +89,16 @@ impl Drop for Cli { fn drop(&mut self) { let _=self.child.kill(); let _=self.chi
 #[cfg(test)] mod tests {
     use super::*;
     // Six synthetic red IDRs per fixture; no captured desktop or external encoder dependency.
+    #[cfg(unix)] #[test] fn passthrough_follows_ffmpeg_option_support(){
+        use std::os::unix::fs::PermissionsExt;
+        let dir=std::env::temp_dir().join(format!("uu-ffprobe-{}",std::process::id()));std::fs::create_dir_all(&dir).unwrap();
+        for (name,script,expected) in [("new","exit 0",("-fps_mode","passthrough")),("old","case \"$*\" in *-fps_mode*) exit 1;; esac",("-vsync","0"))]{
+            let path=dir.join(name);std::fs::write(&path,format!("#!/bin/sh\n{script}\n")).unwrap();
+            std::fs::set_permissions(&path,std::fs::Permissions::from_mode(0o755)).unwrap();
+            assert_eq!(super::passthrough_args(path.to_str().unwrap()),expected);
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
     #[test] fn ffmpeg_decodes_h264_and_hevc_420_and_444_to_rgb24(){
         match Command::new("ffmpeg").arg("-version").stdout(Stdio::null()).stderr(Stdio::null()).status(){
             Err(e) if e.kind()==std::io::ErrorKind::NotFound=>{eprintln!("skip: ffmpeg is not on PATH");return},
