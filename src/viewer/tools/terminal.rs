@@ -40,7 +40,9 @@ impl Terminal {
         let worker=tokio::spawn(async move {
             let mut decoder=Decoder::default();
             while let Some((channel,data))=rx.recv().await {
-                if channel==CONTROL {
+                // Terminal RPC answers (check_env) come on CONTROL or, from the official Mac host, on BINARY
+                // next to TERM frames (as this project's host does).
+                if channel==CONTROL || (channel==BINARY && !data.starts_with(b"TERM")) {
                     if let Some(r)=blob(&data,22) {if let (Some(h),Some(body))=(blob(r,1),blob(r,24)) {
                         if let Some(t)=p.lock().unwrap().remove(&(24,uint(h,1))) {let _=t.send(Ok(body.to_vec()));}
                     }}continue
@@ -85,7 +87,12 @@ impl Terminal {
         // "not implemented", not "unavailable"; go on and let OPEN report availability.
         match tokio::time::timeout(std::time::Duration::from_secs(3),self.request((24,id),CONTROL,wire::envelope(id,21,&r))).await{
             Err(_)=>Ok(()),
-            Ok(b)=>{let b=b?;if uint(&b,1)!=0 {return Err("Terminal environment unavailable".into())}Ok(())}
+            Ok(b)=>{let b=b?;let code=uint(&b,1);
+                if code!=0 {
+                    let message=blob(&b,2).map(|m|String::from_utf8_lossy(m).chars().take(80).collect::<String>()).unwrap_or_default();
+                    log::info!("Terminal check_env: code={code} message={message:?}");
+                    return Err("Terminal environment unavailable".into())
+                }Ok(())}
         }
     }
     pub async fn list_sessions(&self)->Result<Vec<Value>,String>{
