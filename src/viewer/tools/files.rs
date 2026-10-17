@@ -16,6 +16,19 @@ pub fn inflate(data:&[u8])->Result<Vec<u8>,String>{
     let mut out=Vec::new();flate2::read::ZlibDecoder::new(data).take(16*1024*1024+1).read_to_end(&mut out).map_err(|_|"Invalid directory compression")?;
     if out.len()>16*1024*1024{return Err("Directory expansion limit".into())}Ok(out)
 }
+/// Splits a remote target into (directory, file name). Windows hosts list paths with `\\` (C:\\Users\\...),
+/// Linux hosts with `/`; the directory keeps the host's own separator style. No directory means home.
+/// Download block limit. Our host sends 32 KiB blocks; the official Windows host sends larger ones
+/// (a 64 KiB file arrived as one block), bounded by the 256 KiB SCTP message size.
+const MAX_BLOCK:usize=256*1024;
+fn split_remote(remote:&str)->Option<(&str,&str)>{
+    let cut=remote.rfind(['/','\\']);
+    let (dir,name)=match cut{Some(i)=>(&remote[..i],&remote[i+1..]),None=>("",remote)};
+    if name.is_empty(){return None}
+    // "/x" keeps the root; "C:\\x" keeps "C:\\" (a bare drive letter is not a directory).
+    let dir=match cut{None=>"~/",Some(i) if dir.is_empty()||dir.ends_with(':')=>&remote[..i+1],_=>dir};
+    Some((dir,name))
+}
 fn safe(path:&str)->Result<PathBuf,String>{
     let normalized=path.replace('\\',"/");let p=Path::new(&normalized);
     if p.as_os_str().is_empty() || p.components().any(|c|!matches!(c,std::path::Component::Normal(_))) || normalized.contains(':') {return Err("Unsafe remote relative path".into())}Ok(p.to_owned())
@@ -58,11 +71,22 @@ impl Files {
         let mut rx=self.rx.lock().await;self.canceled.store(false,Ordering::Release);
         let mut file=tokio::fs::File::open(local).await.map_err(|_|"Cannot open upload file")?;
         let meta=file.metadata().await.map_err(|_|"Cannot stat upload file")?;if !meta.is_file(){return Err("Upload requires a regular file".into())}let size=meta.len();
-        let remote=Path::new(remote);let name=remote.file_name().and_then(|s|s.to_str()).ok_or("Invalid remote file name")?;safe(name)?;
-        let parent=remote.parent().and_then(|p|p.to_str()).filter(|p|!p.is_empty()).unwrap_or("~/");
+        let (parent,name)=split_remote(remote).ok_or("Invalid remote file name")?;safe(name)?;
         let task=self.next.fetch_add(1,Ordering::Relaxed);
-        let mut info=nested(1,name.as_bytes());wire::int(2,size,&mut info);
+        // GvPb_FileInfo {1 rel_path, 2 size, 3 modified_time (unix s)}; receive_request {.., 7 task_unique_id}.
+        // The official Windows host rejects (code 2) a request without the modified time / unique id.
+        let modified=meta.modified().ok().and_then(|t|t.duration_since(std::time::UNIX_EPOCH).ok()).map_or(0,|d|d.as_secs());
+        let mut info=nested(1,name.as_bytes());wire::int(2,size,&mut info);wire::int(3,modified,&mut info);
+        let now=std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
+        let unique=format!("{:08x}-{:04x}-4{:03x}-8{:03x}-{:012x}",now.as_secs() as u32,task&0xffff,(now.subsec_nanos()>>20)&0xfff,std::process::id()&0xfff,now.as_nanos()&0xffff_ffff_ffff);
         let mut body=id(task,0);wire::bytes(2,parent.as_bytes(),&mut body);wire::bytes(3,&info,&mut body);wire::int(4,1,&mut body);
+        // Official viewers with the list-compress feature send FileList{1 files} zlib-compressed in list_data (6);
+        // the official Windows host only registers files from there. Keep the inline copy for older hosts.
+        let mut list=Vec::new();wire::bytes(1,&info,&mut list);
+        let mut z=flate2::write::ZlibEncoder::new(Vec::new(),flate2::Compression::default());
+        std::io::Write::write_all(&mut z,&list).map_err(|_|"Cannot compress file list")?;
+        wire::bytes(6,&z.finish().map_err(|_|"Cannot compress file list")?,&mut body);
+        wire::bytes(7,unique.as_bytes(),&mut body);
         let result=async {
             let r=self.request(&mut rx,1,&body,1).await?;check(uint(&r,3))?;
             let mut ask=id(task,1);wire::int(3,size,&mut ask);let r=self.request(&mut rx,3,&ask,3).await?;check(uint(&r,3))?;
@@ -120,7 +144,7 @@ impl Files {
                     let block=uint(body,2);let chunk=blob(body,3).unwrap_or_default();
                     if let Some(d)=open.get_mut(&index){
                         let expected=files[index as usize-1].1;
-                        if chunk.len()>32*1024 || d.next.is_some_and(|n|block<n) || d.blocks.contains_key(&block)||d.blocks.len()>=32 {code=3}else{
+                        if chunk.len()>MAX_BLOCK || d.next.is_some_and(|n|block<n) || d.blocks.contains_key(&block)||d.blocks.len()>=32 {code=3}else{
                             d.blocks.insert(block,chunk.to_vec());
                             if d.next.is_none() && (block==0 || d.blocks.len()>=16) {d.next=d.blocks.keys().next().copied();}
                             while let Some(chunk)=d.next.and_then(|n|d.blocks.remove(&n)){
@@ -174,5 +198,16 @@ impl Files {
             if tokio::time::timeout(Duration::from_secs(3),cleanup).await.is_err(){self.poisoned.store(true,Ordering::Release);}
         }
         result
+    }
+}
+#[cfg(test)]
+mod split_tests{
+    #[test] fn remote_targets_keep_the_host_separator(){
+        assert_eq!(super::split_remote(r"C:\Users\Public\Downloads\a.bin"),Some((r"C:\Users\Public\Downloads","a.bin")));
+        assert_eq!(super::split_remote(r"C:\a.bin"),Some((r"C:\","a.bin")));
+        assert_eq!(super::split_remote("/tmp/a.bin"),Some(("/tmp","a.bin")));
+        assert_eq!(super::split_remote("/a.bin"),Some(("/","a.bin")));
+        assert_eq!(super::split_remote("a.bin"),Some(("~/","a.bin")));
+        assert_eq!(super::split_remote("/tmp/"),None);
     }
 }
