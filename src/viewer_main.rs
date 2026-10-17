@@ -89,10 +89,17 @@ async fn desktop_command(args:&[String],code:Option<String>)->Result<(),String> 
     }else{None};
     let creds=credentials()?;
     let api=Api::new(auth::UUAuthClient::new(creds.clone()),auth::BASE_URL);
+    #[cfg(feature="viewer-sdl")]
+    let account_connection=code.is_none();
     let room=match code {
         Some(code)=>api.join_share(&args[1],&code).await,
         None=>api.join(&args[1],force,true).await,
     }.map_err(|e|e.to_string())?;
+    #[cfg(feature="viewer-sdl")]
+    if let Some((window,_))=desktop.as_mut().filter(|_|!view_only){
+        let device=account_connection.then_some(args[1].as_str());
+        window.set_mac(api.target_is_mac(&room,device).await.map_err(|e|e.to_string())?);
+    }
     let options=Options{timeout:Duration::from_secs(12),legacy_prefix:legacy,ready_policy:policy};
     let mut session=Session::open(&room,&shape,&creds.device_id,&creds.client_id,options,Default::default()).await?;
     #[cfg(feature="viewer-sdl")]
