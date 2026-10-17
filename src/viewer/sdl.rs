@@ -1,18 +1,60 @@
 use super::{desktop::{Frame,FrameSink},input::{Input,Viewport},session::Session};
 use sdl2::{event::{Event,WindowEvent},mouse::MouseButton,pixels::PixelFormatEnum,rect::Rect};
-pub struct Window { canvas:sdl2::render::Canvas<sdl2::video::Window>, events:sdl2::EventPump, _sdl:sdl2::Sdl, frame:(u32,u32), focused:bool, files:bool, mac:bool }
+pub struct Window { canvas:sdl2::render::Canvas<sdl2::video::Window>, events:sdl2::EventPump, _sdl:sdl2::Sdl, frame:(u32,u32), focused:bool, files:bool, mac:bool,
+    clipboard:sdl2::clipboard::ClipboardUtil, clipboard_dirty:bool, clipboard_tx:tokio::sync::mpsc::Sender<super::clipboard::ClipboardRequest>, clipboard_requests:tokio::sync::mpsc::Receiver<super::clipboard::ClipboardRequest> }
 impl Window {
     pub fn new()->Result<Self,String>{
         let sdl=sdl2::init()?;let video=sdl.video()?;
         let window=video.window("Native viewer (experimental)",1280,720).position_centered().resizable().build().map_err(|_|"Window creation failed")?;
         let canvas=window.into_canvas().build().map_err(|_|"Renderer creation failed")?;
-        let events=sdl.event_pump()?;Ok(Self{canvas,events,_sdl:sdl,frame:(1920,1080),focused:true,files:false,mac:false})
+        let events=sdl.event_pump()?;let clipboard=video.clipboard();
+        let(clipboard_tx,clipboard_requests)=tokio::sync::mpsc::channel(16);
+        Ok(Self{canvas,events,_sdl:sdl,frame:(1920,1080),focused:true,files:false,mac:false,clipboard,clipboard_dirty:true,clipboard_tx,clipboard_requests})
     }
+    pub fn clipboard_bridge(&self)->super::clipboard::Bridge{super::clipboard::Bridge::sdl(self.clipboard_tx.clone())}
     pub fn set_mac(&mut self,mac:bool){self.mac=mac;}
     fn viewport(&self)->Viewport {Viewport::fit(self.canvas.window().size(),self.frame)}
+    fn poll_clipboard(&mut self){
+        // Use the existing SDL window; wl-paste creates a transient toplevel on GNOME every poll.
+        while let Ok(request)=self.clipboard_requests.try_recv(){
+            use super::clipboard::ClipboardRequest;
+            match request {
+                ClipboardRequest::Read(reply)=>{
+                    let result=if self.focused && std::mem::take(&mut self.clipboard_dirty) && self.clipboard.has_clipboard_text(){read_clipboard()}else{Ok(None)};
+                    let _=reply.send(result);
+                },
+                ClipboardRequest::Write(text,reply)=>{
+                    let result=if self.focused {
+                        self.clipboard_dirty=true;
+                        self.clipboard.set_clipboard_text(&text).map(|()|true).map_err(|_|())
+                    }else{Ok(false)};
+                    let _=reply.send(result);
+                },
+            }
+        }
+    }
     pub fn poll(&mut self,input:&mut Input)->(bool,Vec<serde_json::Value>){
         let viewport=self.viewport();
-        translate_actions(self.events.poll_iter(),input,viewport,&mut self.focused,&mut self.files)
+        let dirty=&mut self.clipboard_dirty;
+        let events=self.events.poll_iter().inspect(|event|{
+            if matches!(event,Event::ClipboardUpdate{..}|Event::Window{win_event:WindowEvent::FocusGained,..}){*dirty=true;}
+        });
+        translate_actions(events,input,viewport,&mut self.focused,&mut self.files)
+    }
+}
+fn clipboard_text(bytes:&[u8])->Option<String>{
+    if bytes.len()>super::clipboard::MAX_TEXT{return None}
+    std::str::from_utf8(bytes).ok().map(str::to_owned)
+}
+fn read_clipboard()->Result<Option<String>,()>{
+    // SDL2 0.37's String wrapper panics on invalid UTF-8; validate native bytes before copying.
+    // SDL still acquires the selection synchronously; the bridge timeout cannot interrupt it.
+    unsafe{
+        let data=sdl2::sys::SDL_GetClipboardText();
+        if data.is_null(){return Err(())}
+        let length=libc::strnlen(data,super::clipboard::MAX_TEXT+1);
+        let text=clipboard_text(std::slice::from_raw_parts(data.cast::<u8>(),length));
+        sdl2::sys::SDL_free(data.cast());Ok(text)
     }
 }
 fn translate(events:impl IntoIterator<Item=Event>,input:&mut Input,viewport:Viewport,focused:&mut bool)->(bool,Vec<serde_json::Value>){
@@ -87,6 +129,7 @@ pub async fn run(session:&mut Session,window:&mut Window,decoder:&mut dyn super:
             _=tick.tick()=>{
                 if let Some(playback)=audio.as_mut(){if playback.pump().is_err(){log::warn!("Viewer audio playback stopped");audio=None;}}
                 let (quit,messages)=window.poll(&mut input);
+                window.poll_clipboard();
                 requested|=std::mem::take(&mut window.files);
                 #[cfg(uu_gtk)] {
                     if files.as_ref().is_some_and(|f|f.is_finished()){
@@ -119,6 +162,52 @@ pub async fn run(session:&mut Session,window:&mut Window,decoder:&mut dyn super:
 
 #[cfg(test)] mod tests {
     use super::*;
+    #[tokio::test] async fn clipboard_requests_use_existing_window(){
+        if std::env::var_os("UU_VIEWER_CLIPBOARD_TEST_CHILD").is_none(){
+            let output=std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact","viewer::sdl::tests::clipboard_requests_use_existing_window","--test-threads=1"])
+                .env("SDL_VIDEODRIVER","dummy").env("UU_VIEWER_CLIPBOARD_TEST_CHILD","1").output().unwrap();
+            assert!(output.status.success(),"{}{}",String::from_utf8_lossy(&output.stdout),String::from_utf8_lossy(&output.stderr));return
+        }
+        let mut window=Window::new().unwrap();
+        let tx=window.clipboard_tx.clone();
+        use super::super::clipboard::ClipboardRequest;
+        for text in ["clipboard text\n",""]{
+            let(reply,rx)=tokio::sync::oneshot::channel();
+            tx.send(ClipboardRequest::Write(text.into(),reply)).await.unwrap();
+            window.poll_clipboard();assert_eq!(rx.await.unwrap(),Ok(true));
+            let(reply,rx)=tokio::sync::oneshot::channel();
+            tx.send(ClipboardRequest::Read(reply)).await.unwrap();
+            window.poll_clipboard();assert_eq!(rx.await.unwrap(),Ok((!text.is_empty()).then(||text.to_owned())));
+            let(reply,rx)=tokio::sync::oneshot::channel();
+            tx.send(ClipboardRequest::Read(reply)).await.unwrap();
+            window.poll_clipboard();assert_eq!(rx.await.unwrap(),Ok(None));
+        }
+        window.focused=false;window.clipboard_dirty=true;
+        let(reply,rx)=tokio::sync::oneshot::channel();
+        tx.send(ClipboardRequest::Read(reply)).await.unwrap();
+        window.poll_clipboard();assert_eq!(rx.await.unwrap(),Ok(None));assert!(window.clipboard_dirty);
+        let(reply,rx)=tokio::sync::oneshot::channel();
+        tx.send(ClipboardRequest::Write("background".into(),reply)).await.unwrap();
+        window.poll_clipboard();assert_eq!(rx.await.unwrap(),Ok(false));
+        window.focused=true;
+        let(reply,rx)=tokio::sync::oneshot::channel();
+        tx.send(ClipboardRequest::Read(reply)).await.unwrap();
+        window.poll_clipboard();assert_eq!(rx.await.unwrap(),Ok(None));
+        window.clipboard_dirty=false;
+        window._sdl.event().unwrap().push_event(Event::Window{timestamp:0,window_id:window.canvas.window().id(),win_event:WindowEvent::FocusGained}).unwrap();
+        window.poll(&mut Input::new(true));assert!(window.clipboard_dirty);
+        let bridge=window.clipboard_bridge();assert!(bridge.enabled);
+        drop(window);
+        assert!(tx.is_closed());drop(bridge);
+        let window=Window::new().unwrap();assert!(window.clipboard_bridge().enabled);
+    }
+    #[test] fn clipboard_text_rejects_invalid_or_large_data_and_keeps_empty_text(){
+        assert_eq!(clipboard_text(b""),Some(String::new()));
+        assert_eq!(clipboard_text(b"text\n"),Some("text\n".into()));
+        assert_eq!(clipboard_text(&[255]),None);
+        assert_eq!(clipboard_text(&vec![b'a';super::super::clipboard::MAX_TEXT+1]),None);
+    }
     #[test] fn file_shortcut_is_local_in_control_and_watch_modes(){
         use sdl2::keyboard::{Scancode as S,Mod as M};
         for watch in [false,true]{
