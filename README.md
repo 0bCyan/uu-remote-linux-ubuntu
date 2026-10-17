@@ -390,7 +390,7 @@ GNOME 与官方 Mac 被控端的双向剪贴板尚未验证通过；此修改不
   `~/.config/uuremote/config.json`（可用 `UU_CONFIG` 另指定），因此**不能用同一身份连接本机上的主机**；控制其他设备不受影响。
 - `uuremote-viewer ui`：启动窗口，列出账号下的设备，可进入桌面、只看模式、文件传输、终端、端口映射、重启/关机、远程协助。
 - 命令行：`connect DEVICE false - echo legacy [--view-only]`（桌面）、`files DEVICE ls|get|put …`、`terminal DEVICE [SESSION]`、
-  `terminal-ui DEVICE NAME`、`portmap DEVICE LOCAL_PORT HOST PORT`（只监听 127.0.0.1）、`power DEVICE reboot|shutdown`、
+  `terminal-ui DEVICE NAME`、`portmap DEVICE LOCAL_PORT HOST PORT`（只监听 127.0.0.1）、`power DEVICE reboot|shutdown`、`unbind DEVICE`（从账号删除设备，启动窗口「更多工具」里也有）、
   `assist CONNECT_ID`（验证码从 stdin 读取一行，不能作为参数传入）。`uuremote-viewer --help` 查看全部参数。
 - 桌面窗口中按 Ctrl+Alt+F 打开文件窗口（复用同一连接）。`UU_VIEWER_AUDIO=0` 关闭声音，`UU_VIEWER_CLIPBOARD=0` 关闭剪贴板，
   `UU_VIEWER_VIEW_ONLY=1` 只看不控，`UU_VIEWER_FFMPEG` 指定 ffmpeg 路径。

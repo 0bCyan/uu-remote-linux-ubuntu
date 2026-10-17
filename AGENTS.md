@@ -146,7 +146,7 @@ every 60 s.
 | `c_engine/x11_engine.c`, `c_engine/clipboard.c` | X11 capture/input/selection |
 | `c_engine/wayland_engine.c`, `c_engine/portal_engine.c` | Wayland and portal engines |
 | `src/assist.rs`, `c_engine/assist_window.c` | remote assistance (guest + account) and the unified GTK main window (assist + account/QR card) |
-| `src/viewer_main.rs`, `src/viewer/` | experimental viewer (`--features native-viewer,viewer-sdl`): cloud join, WebRTC offer side, SDL desktop window (ffmpeg CLI decode), files/terminal/portmap/power/assist tools, GTK launcher |
+| `src/viewer_main.rs`, `src/viewer/` | experimental viewer (`--features native-viewer,viewer-sdl`): cloud join, WebRTC offer side, SDL desktop window (ffmpeg CLI decode), files/terminal/portmap/power/assist tools, device removal (`POST /api/v1/device/{id}/unbind`, verified live; shared devices use `/api/v1/device/share/{id}/unbind`, strings only), GTK launcher |
 | `c_engine/viewer_window.c`, `c_engine/viewer_tools.c` | viewer GTK launcher and tool windows (files, port mapping, terminal list) |
 
 Diagnostic subcommands: `login [--no-gui]`, `unlock-check` (password on stdin, prints only accepted/rejected),

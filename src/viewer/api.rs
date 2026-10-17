@@ -42,6 +42,18 @@ impl std::fmt::Display for Error {
 }
 
 // Mirrors Windows 0x140b77cd0 / 0x140b7a6d0, not host RoomData.
+/// Treat the caller's device string as one opaque path segment, never a URL/query.
+fn path_segment(device: &str) -> Result<String, Error> {
+    if device.is_empty() || device=="." || device==".." { return Err(Error::InvalidDevice); }
+    Ok(device.bytes().map(|b|if b.is_ascii_alphanumeric() || b"-._~".contains(&b) {(b as char).to_string()}else{format!("%{b:02X}")}).collect())
+}
+fn parse_ack(status: u16, body: Value) -> Result<(), Error> {
+    let code = body.get("code").and_then(Value::as_i64).unwrap_or(-1);
+    if code == 1120 { return Err(Error::AuthenticationExpired); }
+    if status == 200 && code == 0 { return Ok(()); }
+    let msg = body.get("msg").and_then(Value::as_str).unwrap_or("").chars().take(120).collect();
+    Err(Error::Api(i32::try_from(code).unwrap_or(-1), msg))
+}
 pub fn parse_join(status: u16, value: Value) -> Result<JoinData, Error> {
     let code = value.get("code").and_then(Value::as_i64).and_then(|v| i32::try_from(v).ok()).ok_or(Error::InvalidResponse)?;
     let msg = value.get("msg").and_then(Value::as_str).ok_or(Error::InvalidResponse)?.chars().take(120).collect::<String>();
@@ -110,10 +122,7 @@ impl Api {
         Ok((status, response.json().await.map_err(|_| Error::InvalidResponse)?))
     }
     pub async fn join(&self, device: &str, force_join: bool, retry: bool) -> Result<JoinData, Error> {
-        // Treat the caller's device string as one opaque path segment, never a URL/query.
-        if device.is_empty() || device=="." || device==".." { return Err(Error::InvalidDevice); }
-        let encoded=device.bytes().map(|b|if b.is_ascii_alphanumeric() || b"-._~".contains(&b) {(b as char).to_string()}else{format!("%{b:02X}")}).collect::<String>();
-        let path = format!("/api/v1/room/join/by_device/{encoded}");
+        let path = format!("/api/v1/room/join/by_device/{}", path_segment(device)?);
         let mut retries = 0;
         loop {
             let result = match self.request(reqwest::Method::POST, &path, Some(json!({"force_join":force_join}))).await {
@@ -142,6 +151,15 @@ impl Api {
                 },
             }
         }
+    }
+    /// Remove a device from the account (official 「删除设备」). Paths from the Windows host strings
+    /// `/api/v1/device/%s/unbind` and `/api/v1/device/share/%s/unbind` (own vs. shared-with-me device).
+    /// POST verified live against an own device; the shared-device path is from strings only.
+    pub async fn unbind(&self, device: &str, shared: bool) -> Result<(), Error> {
+        let segment = path_segment(device)?;
+        let path = if shared { format!("/api/v1/device/share/{segment}/unbind") } else { format!("/api/v1/device/{segment}/unbind") };
+        let (status, body) = self.request(reqwest::Method::POST, &path, None).await?;
+        parse_ack(status, body)
     }
     /// Structure-only probe of the device list (status, JSON keys/types/lengths, never values).
     pub async fn devices_shape(&self, method: reqwest::Method) -> Result<String, Error> {
@@ -188,6 +206,15 @@ impl Api {
 
 #[cfg(test)]
 mod tests {
+    #[test] fn unbind_ack_and_device_segment(){
+        use super::*;
+        assert_eq!(parse_ack(200,json!({"code":0,"msg":"ok"})),Ok(()));
+        assert_eq!(parse_ack(422,json!({"code":1120})),Err(Error::AuthenticationExpired));
+        assert_eq!(parse_ack(200,json!({"code":5003,"msg":"no such device"})),Err(Error::Api(5003,"no such device".into())));
+        assert_eq!(parse_ack(404,json!({})),Err(Error::Api(-1,String::new())));
+        assert_eq!(path_segment("a/b?c").unwrap(),"a%2Fb%3Fc");
+        for bad in ["",".",".."]{assert_eq!(path_segment(bad),Err(Error::InvalidDevice));}
+    }
     use super::*;
     #[test]
     fn target_platform_matches_only_the_selected_device(){

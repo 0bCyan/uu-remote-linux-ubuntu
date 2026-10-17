@@ -427,7 +427,7 @@ GNOME-to-official-Mac bidirectional clipboard synchronization is still unverifie
   machine with the same identity**; other devices are fine.
 - `uuremote-viewer ui`: launcher listing your devices: desktop, view-only, files, terminal, port mapping, reboot/shutdown, assistance.
 - CLI: `connect DEVICE false - echo legacy [--view-only]` (desktop), `files DEVICE ls|get|put …`, `terminal DEVICE [SESSION]`,
-  `terminal-ui DEVICE NAME`, `portmap DEVICE LOCAL_PORT HOST PORT` (listens on 127.0.0.1 only), `power DEVICE reboot|shutdown`,
+  `terminal-ui DEVICE NAME`, `portmap DEVICE LOCAL_PORT HOST PORT` (listens on 127.0.0.1 only), `power DEVICE reboot|shutdown`, `unbind DEVICE` (remove a device from the account; also under "More tools" in the launcher),
   `assist CONNECT_ID` (the code is read from one stdin line, never an argument). See `uuremote-viewer --help`.
 - Ctrl+Alt+F in the desktop window opens the files window on the same connection. `UU_VIEWER_AUDIO=0` disables sound,
   `UU_VIEWER_CLIPBOARD=0` the clipboard, `UU_VIEWER_VIEW_ONLY=1` input; `UU_VIEWER_FFMPEG` selects the ffmpeg binary.

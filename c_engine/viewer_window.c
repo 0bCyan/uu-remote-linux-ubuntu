@@ -117,6 +117,15 @@ static void more_item(GtkButton *b, gpointer kind) {
         if (ok) { connect_kind(k); show_toast("正在发送电源指令…"); }
         return;
     }
+    if (!strcmp(k, "unbind")) {
+        GtkWidget *d = gtk_message_dialog_new(GTK_WINDOW(dialog), GTK_DIALOG_MODAL, GTK_MESSAGE_WARNING, GTK_BUTTONS_NONE,
+            "确定要从账号中删除该设备吗？");
+        gtk_message_dialog_format_secondary_text(GTK_MESSAGE_DIALOG(d), "删除后需要在该设备上重新登录才能再次远控。");
+        gtk_dialog_add_buttons(GTK_DIALOG(d), "取消", GTK_RESPONSE_CANCEL, "删除", GTK_RESPONSE_OK, NULL);
+        int ok = gtk_dialog_run(GTK_DIALOG(d)) == GTK_RESPONSE_OK; gtk_widget_destroy(d);
+        if (ok) { gtk_widget_destroy(dialog); connect_kind(k); show_toast("正在删除设备…"); }
+        return;
+    }
     gtk_widget_destroy(dialog);
     on_tool(NULL, kind);
 }
@@ -126,9 +135,9 @@ static void open_more(void) {
     GtkWidget *area = gtk_dialog_get_content_area(GTK_DIALOG(dialog)), *box = vbox(10);
     gtk_container_set_border_width(GTK_CONTAINER(box), 22);
     gtk_box_pack_start(GTK_BOX(box), label("更多工具", "h2"), FALSE, FALSE, 6);
-    const char *names[] = {"🗂   文件传输", "▶   观看模式", "⌨   终端", "⇄   端口映射", "⏻   远程开机", "↻   重启", "⏻   关机"};
-    const char *kinds[] = {"file", "watch", "terminal", "portmap", "wol", "reboot", "shutdown"};
-    for (int i = 0; i < 7; i++) {
+    const char *names[] = {"🗂   文件传输", "▶   观看模式", "⌨   终端", "⇄   端口映射", "⏻   远程开机", "↻   重启", "⏻   关机", "🗑   删除设备"};
+    const char *kinds[] = {"file", "watch", "terminal", "portmap", "wol", "reboot", "shutdown", "unbind"};
+    for (int i = 0; i < 8; i++) {
         GtkWidget *b = gtk_button_new(), *line = hbox(10); add_class(b, "cardbtn");
         gtk_box_pack_start(GTK_BOX(line), label(names[i], "devname"), TRUE, TRUE, 0);
         gtk_box_pack_end(GTK_BOX(line), label("›", "hint"), FALSE, FALSE, 0);

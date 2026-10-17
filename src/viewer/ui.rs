@@ -195,6 +195,15 @@ pub async fn run(credentials: impl Fn() -> Result<crate::auth::Credentials, Stri
                         Err(_) => toast("电源指令失败：无法启动会话进程"),
                     }
                 }
+                ["connect", id, "unbind"] => {
+                    if let Some(s)=sessions.remove(*id){s.stop().await;}
+                    let result=match credentials(){
+                        Ok(creds)=>super::api::Api::new(crate::auth::UUAuthClient::new(creds),crate::auth::BASE_URL).unbind(id,false).await.map_err(|e|e.to_string()),
+                        Err(e)=>Err(e),
+                    };
+                    match result {Ok(())=>toast("设备已从账号删除"),Err(e)=>toast(&format!("删除设备失败：{e}"))}
+                    next_refresh=Instant::now();
+                }
                 ["connect", _, kind] => log::info!("Viewer UI: {kind} is not supported yet"),
                 _ => {}
             }

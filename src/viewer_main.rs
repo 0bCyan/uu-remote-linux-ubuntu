@@ -13,7 +13,7 @@ use viewer::clipboard;
 #[cfg(test)] #[path="initialization.rs"] mod initialization;
 use viewer::{api::Api,rtc::ReadyPolicy,session::{Options,Session},wire::Shape};
 use std::time::Duration;
-const HELP:&str="Experimental native viewer.\n  uuremote-viewer ui   (GTK window: sign-in, devices, sessions) Desktop UI requires viewer-sdl (decodes with the ffmpeg CLI, or FFmpeg 6.x libraries with viewer-ffmpeg).\n  uuremote-viewer power DEVICE reboot|shutdown\n  uuremote-viewer terminal DEVICE [SESSION]\n  uuremote-viewer files DEVICE ls PATH | get REMOTE LOCAL | put LOCAL REMOTE\n  uuremote-viewer portmap DEVICE LOCAL_PORT HOST PORT\n  uuremote-viewer files-ui|portmap-ui|terminal-ui DEVICE NAME   (GTK tool windows)\n  uuremote-viewer login [--no-gui]\n  uuremote-viewer devices METHOD ARRAY_POINTER ID_POINTER NAME_POINTER\n  uuremote-viewer assist CONNECT_ID   (验证码从 stdin 读取一行)\n  uuremote-viewer connect DEVICE true|false SHAPE_JSON echo|manual raw|legacy [--view-only]\nVideo: UU_VIEWER_CODEC=h264 forces H.264; UU_VIEWER_CHROMA=444 requests true color (default 4:2:0).\nAudio: UU_VIEWER_AUDIO=0 disables playback. UU_VIEWER_VIEW_ONLY=1 disables desktop input.\nDevice-list method/JSON pointers and compatibility shape require verified operator configuration.\nQR login reuses the sibling uuremote-server login command. Never run login in a captured log.\nEcho readiness is transport observation only; no sendVideoTrack RPC is emitted.";
+const HELP:&str="Experimental native viewer.\n  uuremote-viewer ui   (GTK window: sign-in, devices, sessions) Desktop UI requires viewer-sdl (decodes with the ffmpeg CLI, or FFmpeg 6.x libraries with viewer-ffmpeg).\n  uuremote-viewer power DEVICE reboot|shutdown\n  uuremote-viewer unbind DEVICE [--shared]   (从账号删除设备 / remove a device from the account)\n  uuremote-viewer terminal DEVICE [SESSION]\n  uuremote-viewer files DEVICE ls PATH | get REMOTE LOCAL | put LOCAL REMOTE\n  uuremote-viewer portmap DEVICE LOCAL_PORT HOST PORT\n  uuremote-viewer files-ui|portmap-ui|terminal-ui DEVICE NAME   (GTK tool windows)\n  uuremote-viewer login [--no-gui]\n  uuremote-viewer devices METHOD ARRAY_POINTER ID_POINTER NAME_POINTER\n  uuremote-viewer assist CONNECT_ID   (验证码从 stdin 读取一行)\n  uuremote-viewer connect DEVICE true|false SHAPE_JSON echo|manual raw|legacy [--view-only]\nVideo: UU_VIEWER_CODEC=h264 forces H.264; UU_VIEWER_CHROMA=444 requests true color (default 4:2:0).\nAudio: UU_VIEWER_AUDIO=0 disables playback. UU_VIEWER_VIEW_ONLY=1 disables desktop input.\nDevice-list method/JSON pointers and compatibility shape require verified operator configuration.\nQR login reuses the sibling uuremote-server login command. Never run login in a captured log.\nEcho readiness is transport observation only; no sendVideoTrack RPC is emitted.";
 const DEFAULT_SHAPE:&str=r#"{"capture_type":1,"platform":3,"client_version":"4.42.0","width":1920,"height":1080,"fps":60,"chroma":1,
  "decoders":[{"fps":60,"codec":1,"width":3840,"height":2160,"chroma":1}],"display_modes":[[1920,1080,60]],
  "displays":[{"id":1,"fps":60,"type":0,"hdr":0}],
@@ -54,6 +54,10 @@ async fn run(args:&[String])->Result<(),String> {
                 println!("{}",serde_json::json!({"device":id,"name":name}));
             }
             Ok(())
+        }
+        Some("unbind") if (args.len()==2 || (args.len()==3 && args[2]=="--shared")) && !args[1].is_empty() => {
+            api()?.unbind(&args[1],args.len()==3).await.map_err(|e|format!("删除设备失败：{e}"))?;
+            println!("已从账号删除设备");Ok(())
         }
         Some("power")=>power_command(args).await,
         Some("terminal-local") if args.len()==2 || args.len()==3=>{
@@ -124,7 +128,7 @@ mod cli_tests {
     use super::*;
     #[tokio::test]
     async fn invalid_commands_never_fall_through_to_login_or_host_service() {
-        for args in [vec!["invalid"],vec!["power"],vec!["power","device","logout"],vec!["power","device","reboot","extra"],vec!["login","--invalid"],vec!["connect"],vec!["assist"],vec!["assist","id","forbidden-code-argument"],vec!["terminal"],vec!["terminal","device","extra"],vec!["terminal","device","0"],vec!["terminal","device","4294967296"],vec!["terminal-ui","device"],vec!["files","device","bad","path"],vec!["portmap","device","bad","host","80"],vec!["portmap","device","8000","host","0"],vec!["devices","DELETE","/data","/id","/name"]] {
+        for args in [vec!["invalid"],vec!["power"],vec!["power","device","logout"],vec!["power","device","reboot","extra"],vec!["login","--invalid"],vec!["connect"],vec!["assist"],vec!["assist","id","forbidden-code-argument"],vec!["terminal"],vec!["terminal","device","extra"],vec!["terminal","device","0"],vec!["terminal","device","4294967296"],vec!["terminal-ui","device"],vec!["files","device","bad","path"],vec!["portmap","device","bad","host","80"],vec!["portmap","device","8000","host","0"],vec!["devices","DELETE","/data","/id","/name"],vec!["unbind"],vec!["unbind",""],vec!["unbind","device","--other"],vec!["unbind","device","--shared","extra"]] {
             assert!(run(&args.into_iter().map(str::to_owned).collect::<Vec<_>>()).await.is_err());
         }
     }
