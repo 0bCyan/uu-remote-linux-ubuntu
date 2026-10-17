@@ -119,7 +119,9 @@ fn unlock_with(password: &str) -> UnlockResult {
     if Command::new("loginctl").args(["unlock-session", &session]).status().map(|s| !s.success()).unwrap_or(true) {
         return UnlockResult::NoPermission;
     }
-    let _ = crate::capture::keep_display_awake(); // a blanked monitor would keep the stream black
+    if let Err(error) = crate::capture::keep_display_awake() {
+        log::warn!("Display wake after auto unlock failed: {error}");
+    }
     // Post-unlock confirmation like the official host: the lock screen must actually go away.
     for _ in 0..100 { // GNOME takes ~3 s to drop the shield after logind's Unlock
         if session_locked(&session) == Some(false) { return UnlockResult::Success; }
@@ -134,23 +136,26 @@ type Sequence = std::sync::Arc<std::sync::atomic::AtomicU64>;
 fn now() -> u64 { std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs() }
 
 /// Message 15 SystemStateChange { 1: SecureDesktopState } on CONTROL.
-pub async fn send_state(channel: &Channel, sequence: &Sequence, locked: bool) {
+pub async fn send_state(channel: &Channel, sequence: &Sequence, locked: bool) -> bool {
     let seq = sequence.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let message = crate::initialization::encode_secure_desktop(seq, now(), locked, false, supported());
-    if let Err(e) = channel.send(&bytes::Bytes::from(message)).await { log::warn!("Secure desktop state send failed: {e}"); }
+    match channel.send(&bytes::Bytes::from(message)).await {
+        Ok(_) => {
+            log::info!("Secure desktop state sent: locked={} auto_unlock={}", locked, supported());
+            true
+        }
+        Err(e) => { log::warn!("Secure desktop state send failed: {e}"); false }
+    }
 }
 
 /// Reports the lock state to one desktop viewer: now, then on every change, until it closes.
-pub async fn report_states(channel: Channel, sequence: Sequence) {
+pub async fn report_states(channel: Channel, sequence: Sequence, mut state: watch::Receiver<Option<bool>>) {
     use webrtc::data_channel::data_channel_state::RTCDataChannelState;
-    let mut state = watch_locked();
     let mut sent = None;
     loop {
         let locked = *state.borrow_and_update();
         if let Some(locked) = locked.filter(|l| sent != Some(*l)) {
-            send_state(&channel, &sequence, locked).await;
-            log::info!("Secure desktop state sent: locked={} auto_unlock={}", locked, supported());
-            sent = Some(locked);
+            if send_state(&channel, &sequence, locked).await { sent = Some(locked); }
         }
         tokio::select! {
             changed = state.changed() => if changed.is_err() { return; },
