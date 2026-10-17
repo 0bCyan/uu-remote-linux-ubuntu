@@ -143,7 +143,8 @@ pub fn echo_request_seq(data:&[u8]) -> Option<u64> {
     let fields=decode_wire(data).ok()?;
     let seq=fields.iter().find_map(|f|match (f.number,&f.value){(1,WireValue::Varint(v))=>Some(*v),_=>None})?;
     fields.iter().find_map(|f|match (f.number,&f.value) {
-        (3,WireValue::Bytes(action))=>decode_wire(action).ok()?.iter().any(|f|f.number==1 && f.value==WireValue::Varint(0)).then_some(seq),
+        // proto3 omits the default action 0, so a SimpleAction without field 1 is an echo request too.
+        (3,WireValue::Bytes(action))=>decode_wire(action).ok()?.iter().find_map(|f|match (f.number,&f.value){(1,WireValue::Varint(v))=>Some(*v),_=>None}).unwrap_or(0).eq(&0).then_some(seq),
         _=>None,
     })
 }

@@ -57,7 +57,9 @@ impl Terminal {
                     if let Some(event)=event {if tx.try_send(event).is_err(){overflow=true;break}}
                     let key=if f.kind==OPEN_RESP {(OPEN_RESP,0)}else{(f.kind,f.session as u64)};
                     let payload=if f.kind==OPEN_RESP {
-                        serde_json::from_slice::<Value>(&f.payload).ok().filter(Value::is_object).map(|mut v|{v["session_id"]=json!(f.session);v.to_string().into_bytes()}).unwrap_or(f.payload)
+                        // Our host puts the new session in the frame header; the official Windows host answers with header 0,
+                        // so only a nonzero header overrides the JSON body.
+                        serde_json::from_slice::<Value>(&f.payload).ok().filter(Value::is_object).map(|mut v|{if f.session!=0{v["session_id"]=json!(f.session);}v.to_string().into_bytes()}).unwrap_or(f.payload)
                     }else{f.payload};
                     if let Some(t)=p.lock().unwrap().remove(&key){let _=t.send(Ok(payload));}
                 }
@@ -79,8 +81,12 @@ impl Terminal {
     }
     pub async fn check_env(&self)->Result<(),String>{
         let id=self.rpc.fetch_add(1,Ordering::Relaxed);let mut r=nested(1,&ints(&[(1,id)]));wire::bytes(28,&[],&mut r);
-        let b=self.request((24,id),CONTROL,wire::envelope(id,21,&r)).await?;
-        if uint(&b,1)!=0 {return Err("Terminal environment unavailable".into())}Ok(())
+        // The official Windows host's rpc_main.proto has no check_env (requests end at 25): no answer means
+        // "not implemented", not "unavailable"; go on and let OPEN report availability.
+        match tokio::time::timeout(std::time::Duration::from_secs(3),self.request((24,id),CONTROL,wire::envelope(id,21,&r))).await{
+            Err(_)=>Ok(()),
+            Ok(b)=>{let b=b?;if uint(&b,1)!=0 {return Err("Terminal environment unavailable".into())}Ok(())}
+        }
     }
     pub async fn list_sessions(&self)->Result<Vec<Value>,String>{
         let id=self.next.fetch_add(1,Ordering::Relaxed);
@@ -94,10 +100,16 @@ impl Terminal {
         self.open_session(id,cols,rows).await
     }
     async fn open_session(&self,id:u32,cols:u16,rows:u16)->Result<u32,String>{
-        // Host TerminalConn handles OPEN(nonzero) as reattachment.
-        let b=self.request((OPEN_RESP,0),BINARY,encode(OPEN,id,json!({"cols":cols.max(1),"rows":rows.max(1)}).to_string().as_bytes())).await?;
+        // Host TerminalConn handles OPEN(nonzero) as reattachment. The official Windows host rejects an OPEN
+        // without "option" ("terminal open: missing 'option' field", kError 1004); "none" is its plain mode.
+        let b=self.request((OPEN_RESP,0),BINARY,encode(OPEN,id,json!({"cols":cols.max(1),"rows":rows.max(1),"option":"none"}).to_string().as_bytes())).await?;
         let v:Value=serde_json::from_slice(&b).map_err(|_|"Invalid terminal open response")?;
-        if v["code"].as_i64()!=Some(0){return Err("Terminal open rejected".into())}v["session_id"].as_u64().and_then(|n|u32::try_from(n).ok()).filter(|n|*n!=0).ok_or("Invalid terminal session id".into())
+        if v["code"].as_i64()!=Some(0){return Err("Terminal open rejected".into())}
+        let id=v["session_id"].as_u64().or_else(||v["session_id"].as_str().and_then(|s|s.parse().ok())).and_then(|n|u32::try_from(n).ok()).filter(|n|*n!=0);
+        // The official Windows host answers {"code":0,"message"} with header 0 and keeps one terminal per
+        // connection addressed as session 0 (it then prints "[terminal] resumed existing session").
+        if id.is_none(){log::info!("Terminal open response without a session id: keys={:?}; using session 0",v.as_object().map(|o|o.keys().collect::<Vec<_>>()));}
+        Ok(id.unwrap_or(0))
     }
     pub async fn write(&self,id:u32,data:&[u8])->Result<(),String>{for b in data.chunks(16*1024){self.io.send(BINARY,encode(STDIN,id,b)).await?}Ok(())}
     pub async fn resize(&self,id:u32,cols:u16,rows:u16)->Result<(),String>{self.io.send(BINARY,encode(RESIZE,id,json!({"cols":cols.max(1),"rows":rows.max(1)}).to_string().as_bytes())).await}
