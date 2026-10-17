@@ -658,6 +658,9 @@ int uu_viewer_ui_start(void) {
 /// Lines of "id\tname\tplatform\tonline\tcurrent".
 void uu_viewer_ui_set_devices(const char *tsv) {
     pthread_mutex_lock(&d_lock);
+    /* A refresh (every 30 s) must keep the open device page usable: re-select by id, not reset. */
+    char keep[sizeof devices[0].id] = "";
+    if (selected >= 0 && selected < device_count) snprintf(keep, sizeof keep, "%s", devices[selected].id);
     device_count = 0;
     char *copy = strdup(tsv ? tsv : ""), *save = NULL;
     for (char *line = strtok_r(copy, "\n", &save); line && device_count < 64; line = strtok_r(NULL, "\n", &save)) {
@@ -670,6 +673,7 @@ void uu_viewer_ui_set_devices(const char *tsv) {
     }
     free(copy);
     selected = -1;
+    for (int i = 0; keep[0] && i < device_count; i++) if (!strcmp(devices[i].id, keep)) { selected = i; break; }
     pthread_mutex_unlock(&d_lock);
     if (init_state == 1) g_idle_add(apply_devices, NULL);
 }
@@ -699,7 +703,8 @@ static int replace_result;
 static gboolean confirm_replace(gpointer d) {
     (void)d;
     GtkWidget *dialog = gtk_message_dialog_new(GTK_WINDOW(window), GTK_DIALOG_MODAL | GTK_DIALOG_DESTROY_WITH_PARENT,
-        GTK_MESSAGE_QUESTION, GTK_BUTTONS_OK_CANCEL, "打开后将断开当前与该设备的连接，继续吗？");
+        GTK_MESSAGE_QUESTION, GTK_BUTTONS_NONE, "打开后将断开当前与该设备的连接，继续吗？");
+    gtk_dialog_add_buttons(GTK_DIALOG(dialog), "取消", GTK_RESPONSE_CANCEL, "继续", GTK_RESPONSE_OK, NULL);
     int accepted = gtk_dialog_run(GTK_DIALOG(dialog)) == GTK_RESPONSE_OK;
     gtk_widget_destroy(dialog);
     pthread_mutex_lock(&init_lock); replace_result = accepted; pthread_cond_signal(&init_cond); pthread_mutex_unlock(&init_lock);
