@@ -9,14 +9,16 @@ struct Viewer {
     pc: Arc<RTCPeerConnection>,
     channels: HashMap<String, Arc<RTCDataChannel>>,
     messages: Messages,
+    router: Arc<Mutex<webrtc::util::vnet::router::Router>>,
 }
 
 async fn connect(input: Arc<InputInjector>, desktop: bool,
     portal: Option<Arc<crate::desktop_session::PortalDesktop>>, labels: &[&str]) -> (WebRtcSession, Viewer) {
+    let (host_setting, viewer_setting, router) = crate::test_network::virtual_network().await;
     let screen = Arc::new(ScreenCapture::unavailable("synthetic locked desktop".into()));
     let host = WebRtcSession::new(screen, input, crate::signaling::SignalingClient::disconnected(),
-        desktop, crate::session_ice::SessionIce::local(), portal).await.unwrap();
-    let pc = Arc::new(APIBuilder::new().build().new_peer_connection(RTCConfiguration::default()).await.unwrap());
+        desktop, crate::session_ice::SessionIce::virtual_net(host_setting), portal).await.unwrap();
+    let pc = Arc::new(APIBuilder::new().with_setting_engine(viewer_setting).build().new_peer_connection(RTCConfiguration::default()).await.unwrap());
     let (tx, messages) = mpsc::unbounded_channel();
     let mut channels = HashMap::new();
     for label in labels {
@@ -41,7 +43,7 @@ async fn connect(input: Arc<InputInjector>, desktop: bool,
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
     }).await.expect("local SCTP channels did not open");
-    (host, Viewer { pc, channels, messages })
+    (host, Viewer { pc, channels, messages, router })
 }
 
 fn body(message: &[u8], number: u32) -> Option<&[u8]> {
@@ -206,6 +208,9 @@ async fn locked_control_unlock_requests_and_tools_work_without_a_video_frame() {
         terminal_viewer.pc.close().await.unwrap();
         file_viewer.pc.close().await.unwrap();
         port_viewer.pc.close().await.unwrap();
+        for router in [&viewer.router, &terminal_viewer.router, &file_viewer.router, &port_viewer.router] {
+            router.lock().await.stop().await.unwrap();
+        }
         echo.abort();
         drop(lock);
     }).await.expect("locked bootstrap/tool regression exceeded deadline");

@@ -7,13 +7,20 @@ use webrtc::peer_connection::{configuration::RTCConfiguration,policy::ice_transp
 pub struct SessionIce {
     servers: Vec<RTCIceServer>,
     relay_only: bool,
+    #[cfg(test)]
+    pub(crate) setting_engine: Option<webrtc::api::setting_engine::SettingEngine>,
 }
 
 impl SessionIce {
     #[cfg(test)]
     pub fn local() -> Self {
         // A supplied empty URL list disables the public STUN defaults in local peer tests.
-        Self { servers: vec![RTCIceServer::default()], relay_only: false }
+        Self { servers: vec![RTCIceServer::default()], ..Default::default() }
+    }
+
+    #[cfg(test)]
+    pub fn virtual_net(setting_engine: webrtc::api::setting_engine::SettingEngine) -> Self {
+        Self { setting_engine: Some(setting_engine), ..Self::local() }
     }
 
     pub fn from_header(header:&Value)->Self {

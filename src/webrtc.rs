@@ -78,6 +78,8 @@ impl WebRtcSession {
             webrtc::interceptor::registry::Registry::new(), &mut m,
         ).map_err(|e| format!("Register RTP/RTCP interceptors failed: {}", e))?;
         let mut se = webrtc::api::setting_engine::SettingEngine::default();
+        #[cfg(test)]
+        if let Some(setting) = &transport.setting_engine { se = setting.clone(); }
         se.set_answering_dtls_role(DTLSRole::Server)
             .map_err(|e| format!("Configure DTLS answer role failed: {}", e))?;
         se.set_ice_multicast_dns_mode(webrtc::ice::mdns::MulticastDnsMode::Disabled);

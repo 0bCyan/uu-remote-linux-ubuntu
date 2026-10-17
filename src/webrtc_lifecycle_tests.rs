@@ -13,15 +13,17 @@ struct Viewer {
     pc: Arc<RTCPeerConnection>,
     channels: HashMap<String, Arc<RTCDataChannel>>,
     messages: Messages,
+    router: Arc<Mutex<webrtc::util::vnet::router::Router>>,
 }
 
 async fn connect(desktop: bool, portal: Option<Arc<crate::desktop_session::PortalDesktop>>)
     -> (WebRtcSession, Viewer) {
     let input = Arc::new(InputInjector::without_desktop());
+    let (host_setting, viewer_setting, router) = crate::test_network::virtual_network().await;
     let screen = Arc::new(ScreenCapture::unavailable("synthetic pending desktop".into()));
     let host = WebRtcSession::new(screen, input, crate::signaling::SignalingClient::disconnected(),
-        desktop, crate::session_ice::SessionIce::local(), portal).await.unwrap();
-    let pc = Arc::new(APIBuilder::new().build().new_peer_connection(RTCConfiguration::default()).await.unwrap());
+        desktop, crate::session_ice::SessionIce::virtual_net(host_setting), portal).await.unwrap();
+    let pc = Arc::new(APIBuilder::new().with_setting_engine(viewer_setting).build().new_peer_connection(RTCConfiguration::default()).await.unwrap());
     let (tx, messages) = mpsc::unbounded_channel();
     let mut channels = HashMap::new();
     for label in ["CONTROL_DATA_CHANNEL"] {
@@ -46,7 +48,7 @@ async fn connect(desktop: bool, portal: Option<Arc<crate::desktop_session::Porta
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
     }).await.expect("local SCTP channels did not open");
-    (host, Viewer { pc, channels, messages })
+    (host, Viewer { pc, channels, messages, router })
 }
 
 fn body(message: &[u8], number: u32) -> Option<&[u8]> {
@@ -137,6 +139,7 @@ async fn ready_without_portal_session_does_not_advertise_clipboard() {
             "Echo was re-sent without an established clipboard capability");
         viewer.pc.close().await.unwrap();
         host.pc.close().await.unwrap();
+        viewer.router.lock().await.stop().await.unwrap();
     }).await.expect("clipboard capability regression exceeded deadline");
 }
 
@@ -201,6 +204,7 @@ async fn pending_portal_answers_echo_immediately_and_defers_capture_settings() {
 
         viewer.pc.close().await.unwrap();
         host.pc.close().await.unwrap();
+        viewer.router.lock().await.stop().await.unwrap();
     }).await.expect("pending-Portal lifecycle regression exceeded deadline");
 }
 
@@ -220,5 +224,6 @@ async fn tool_peer_applies_capture_settings_without_a_desktop() {
         assert_eq!((varint_of(sync, 5), varint_of(sync, 6)), (Some(1280), Some(720)));
         viewer.pc.close().await.unwrap();
         host.pc.close().await.unwrap();
+        viewer.router.lock().await.stop().await.unwrap();
     }).await.expect("tool capture-setting regression exceeded deadline");
 }
