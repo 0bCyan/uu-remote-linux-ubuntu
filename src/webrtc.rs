@@ -1071,6 +1071,16 @@ impl WebRtcSession {
                                             });}
 
                                         },
+                                        Ok(crate::control_protocol::ControlMessage::Unsupported(v)) => {
+                                            // Action name and key names only, never values (an IME text event would carry typed text).
+                                            static UNSUPPORTED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+                                            if UNSUPPORTED.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 16 {
+                                                let action = v.get("action").and_then(serde_json::Value::as_str)
+                                                    .filter(|a| a.len() <= 40 && a.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')).unwrap_or("?");
+                                                let keys: Vec<&str> = v.as_object().map(|o| o.keys().map(String::as_str).take(12).collect()).unwrap_or_default();
+                                                log::info!("Unsupported CONTROL input: action={action} keys={keys:?}");
+                                            }
+                                        },
                                         _ => {}
                                     }
                                 } else if channel_name.contains("STREAMER") {

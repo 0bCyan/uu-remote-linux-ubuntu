@@ -248,6 +248,14 @@ impl InputInjector {
             if AUDIT.fetch_add(1,std::sync::atomic::Ordering::Relaxed) < 8 {
                 log::info!("Desktop keyboard injection outcome: result={result}");
             }
+            // KP_0..KP_9 type digits only with NumLock on (#46); record the server's NumLock state, not the key.
+            static NUMPAD: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+            if (0x60..=0x6f).contains(&key) && is_press && self.backend==crate::desktop_backend::DesktopBackend::X11
+                && NUMPAD.fetch_add(1,std::sync::atomic::Ordering::Relaxed) < 4 {
+                let (mut x,mut y,mut mask)=(0,0,0u32);
+                let state=unsafe { x11_pointer_state(&mut x,&mut y,&mut mask) };
+                log::info!("Desktop numpad key: result={result} numlock={}", state==0 && mask & 0x10 != 0);
+            }
             if result == 0 {
                 let mut held=self.held.lock().unwrap();
                 if is_press {held.keys.insert(symbol);} else {held.keys.remove(&symbol);}

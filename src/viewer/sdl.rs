@@ -163,6 +163,8 @@ pub async fn run(session:&mut Session,window:&mut Window,decoder:&mut dyn super:
 
 #[cfg(test)] mod tests {
     use super::*;
+    // macOS: SDL video must start on the main thread, which the test harness does not use; CI runs it on Linux.
+    #[cfg_attr(target_os="macos",ignore)]
     #[tokio::test] async fn clipboard_requests_use_existing_window(){
         if std::env::var_os("UU_VIEWER_CLIPBOARD_TEST_CHILD").is_none(){
             let output=std::process::Command::new(std::env::current_exe().unwrap())
