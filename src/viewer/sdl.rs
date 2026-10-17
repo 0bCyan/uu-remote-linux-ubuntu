@@ -20,6 +20,7 @@ impl Window {
             use super::clipboard::ClipboardRequest;
             match request {
                 ClipboardRequest::Read(reply)=>{
+                    if self.clipboard_dirty {log::debug!("Viewer clipboard read: focused={} has_text={}",self.focused,self.clipboard.has_clipboard_text());}
                     let result=if self.focused && std::mem::take(&mut self.clipboard_dirty) && self.clipboard.has_clipboard_text(){read_clipboard()}else{Ok(None)};
                     let _=reply.send(result);
                 },

@@ -5,11 +5,37 @@ use crate::protocol::{decode_wire,WireValue};
 use std::collections::BTreeMap;
 
 const UNICODE_TEXT:u64=13;
+/// The official Mac host offers its pasteboard text as format id 0 named `public.utf8-plain-text` (observed live).
+const MAC_TEXT:&str="public.utf8-plain-text";
+#[derive(Clone,Copy,PartialEq,Eq,Debug)]
+enum TextFormat {Windows,Mac}
+impl TextFormat {
+    fn of(format:&[u8])->Option<Self>{
+        if number(format,1)==Ok(UNICODE_TEXT){return Some(Self::Windows)}
+        let named=|n|text_field(format,n).is_ok_and(|s|s==MAC_TEXT);
+        (named(2)||named(3)).then_some(Self::Mac)
+    }
+    fn id(self)->u64{match self{Self::Windows=>UNICODE_TEXT,Self::Mac=>0}}
+    fn name(self)->&'static str{match self{Self::Windows=>"CF_UNICODETEXT",Self::Mac=>MAC_TEXT}}
+    fn encode(self,text:&str)->Vec<u8>{match self{Self::Windows=>encode_windows(text),Self::Mac=>text.as_bytes().to_vec()}}
+    fn decode(self,data:&[u8])->Result<String,&'static str>{
+        match self{
+            Self::Windows=>decode_windows(data),
+            Self::Mac=>{
+                let data=data.strip_suffix(&[0]).unwrap_or(data);
+                if data.len()>MAX_TEXT{return Err("clipboard text exceeds limit");}
+                let text=std::str::from_utf8(data).map_err(|_|"invalid UTF-8 clipboard text")?;
+                if text.contains('\0'){return Err("embedded NUL in clipboard text");}
+                Ok(text.to_owned())
+            }
+        }
+    }
+}
 const BLOCK_BYTES:usize=0x20000;
 const MAX_BYTES:usize=MAX_TEXT*2+2;
 pub struct ResultMessages {pub messages:Vec<(u32,Vec<u8>)>,pub text:Option<String>}
 impl Default for ResultMessages {fn default()->Self{Self{messages:Vec::new(),text:None}}}
-struct Pending {key:String, count:Option<usize>, blocks:BTreeMap<usize,Vec<u8>>}
+struct Pending {key:String, format:TextFormat, count:Option<usize>, blocks:BTreeMap<usize,Vec<u8>>}
 #[derive(Default)]
 pub struct State {local:Option<String>, pending:Option<Pending>}
 pub fn format_ids(rpc:&[u8])->Vec<u64>{
@@ -62,12 +88,15 @@ fn decode_windows(data:&[u8])->Result<String,&'static str>{
     if text.len()>MAX_TEXT{return Err("clipboard text exceeds limit");}Ok(text)
 }
 impl State{
-    pub fn offer(&mut self,id:u64,text:String)->Result<Vec<u8>,&'static str>{
+    pub fn offer(&mut self,id:u64,text:String)->Result<Vec<u8>,&'static str>{self.offer_formats(id,text,&[TextFormat::Windows])}
+    /// Viewer offers: Windows hosts pick CF_UNICODETEXT, the official Mac host its UTF-8 type.
+    pub fn offer_any_host(&mut self,id:u64,text:String)->Result<Vec<u8>,&'static str>{self.offer_formats(id,text,&[TextFormat::Windows,TextFormat::Mac])}
+    fn offer_formats(&mut self,id:u64,text:String,formats:&[TextFormat])->Result<Vec<u8>,&'static str>{
         if text.len()>MAX_TEXT{return Err("clipboard text exceeds limit");}
         if text.contains('\0')||encode_windows(&text).len()>MAX_BYTES{return Err("clipboard encoded text exceeds limit");}
         self.local=Some(text);
-        let mut format=Vec::new();int(1,UNICODE_TEXT,&mut format);string(2,"CF_UNICODETEXT",&mut format);
-        let mut list=Vec::new();nested(1,&format,&mut list);
+        let mut list=Vec::new();
+        for kind in formats {let mut format=Vec::new();int(1,kind.id(),&mut format);string(2,kind.name(),&mut format);nested(1,&format,&mut list);}
         Ok(request(id,1,&list))
     }
     pub fn request(&mut self,rpc:&[u8],next:&mut impl FnMut()->u64)->Result<ResultMessages,&'static str>{
@@ -78,22 +107,30 @@ impl State{
         if let Some(list)=bytes(clip,1)?{
             out.messages.push((22,response(h,1,&[])));
             let fields=decode_wire(list).map_err(|_|"invalid clipboard format list")?;
-            let supports_text=fields.iter().filter(|f|f.number==1).any(|f|match f.value{WireValue::Bytes(format)=>number(format,1)==Ok(UNICODE_TEXT),_=>false});
+            let offered:Vec<TextFormat>=fields.iter().filter(|f|f.number==1).filter_map(|f|match f.value{WireValue::Bytes(format)=>TextFormat::of(format),_=>None}).collect();
+            let chosen=if offered.contains(&TextFormat::Windows){Some(TextFormat::Windows)}else{offered.first().copied()};
+            let supports_text=chosen.is_some();
             self.pending=None;
-            if supports_text{
+            if !supports_text{
+                // Format ids/names only (never data), to learn non-Windows peers' text formats.
+                let formats:Vec<(u64,String)>=fields.iter().filter(|f|f.number==1).filter_map(|f|match f.value{WireValue::Bytes(format)=>Some(format),_=>None})
+                    .take(8).map(|format|(number(format,1).unwrap_or(u64::MAX),decode_wire(format).ok().and_then(|x|x.into_iter().find_map(|y|match (y.number,y.value){(n,WireValue::Bytes(s)) if n!=1=>std::str::from_utf8(s).ok().map(|s|s.chars().take(48).collect()),_=>None})).unwrap_or_default())).collect();
+                log::info!("Clipboard offer without a supported text format: formats={formats:?}");
+            }
+            if let Some(format)=chosen{
                 let id=next();
                 let epoch=std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs() as u32;
                 let key=format!("{epoch:08x}-0000-4000-8000-{:012x}",id & 0xffffffffffff);
-                let mut ask=Vec::new();int(1,UNICODE_TEXT,&mut ask);string(2,&key,&mut ask);string(3,"CF_UNICODETEXT",&mut ask);
-                self.pending=Some(Pending{key,count:None,blocks:BTreeMap::new()});
+                let mut ask=Vec::new();int(1,format.id(),&mut ask);string(2,&key,&mut ask);string(3,format.name(),&mut ask);
+                self.pending=Some(Pending{key,format,count:None,blocks:BTreeMap::new()});
                 out.messages.push((21,request(id,2,&ask)));
             }
         }else if let Some(ask)=bytes(clip,2)?{
             let key=text_field(ask,2)?;
             if key.len()>256||key.is_empty(){return Err("invalid clipboard block key");}
-            let available=number(ask,1)?==UNICODE_TEXT&&self.local.is_some();
-            let mut confirm=Vec::new();int(1,if available{1}else{2},&mut confirm);string(2,key,&mut confirm);
-            let data=if available{Some(encode_windows(self.local.as_ref().unwrap()))}else{None};
+            let format=if number(ask,1)?==UNICODE_TEXT{Some(TextFormat::Windows)}else if text_field(ask,3).is_ok_and(|s|s==MAC_TEXT){Some(TextFormat::Mac)}else{None};
+            let data=format.zip(self.local.as_ref()).map(|(format,text)|format.encode(text));
+            let mut confirm=Vec::new();int(1,if data.is_some(){1}else{2},&mut confirm);string(2,key,&mut confirm);
             if let Some(data)=&data{int(3,data.chunks(BLOCK_BYTES).len() as u64,&mut confirm);}
             out.messages.push((22,response(h,2,&confirm)));
             if let Some(data)=data{
@@ -144,13 +181,37 @@ impl State{
             else if (1..=count).all(|i|pending.blocks.contains_key(&i)){1}
             else{return Ok(None);};
         let data:Vec<u8>=(first..first+count).flat_map(|i|pending.blocks[&i].iter().copied()).collect();
-        self.pending=None;decode_windows(&data).map(Some)
+        let format=pending.format;self.pending=None;format.decode(&data).map(Some)
     }
 }
 
 #[cfg(test)]
 mod tests{
     use super::*;
+    #[test] fn mac_utf8_text_round_trips_both_directions(){
+        // Mac host offer: format list {1 id 0, 2 "public.utf8-plain-text"} (observed live).
+        let mut mac=Vec::new();int(1,0,&mut mac);string(2,MAC_TEXT,&mut mac);
+        let mut list=Vec::new();nested(1,&mac,&mut list);
+        let mut viewer=State::default();let mut id=200;let mut next=||{id+=1;id};
+        let asked=viewer.request(&request(7,1,&list),&mut next).unwrap();
+        assert_eq!(asked.messages.len(),2);
+        let ask_rpc=&asked.messages[1].1;let clip=bytes(ask_rpc,9).unwrap().unwrap();let ask=bytes(clip,2).unwrap().unwrap();
+        assert_eq!(number(ask,1),Ok(0));assert_eq!(text_field(ask,3),Ok(MAC_TEXT));
+        let key=text_field(ask,2).unwrap().to_owned();
+        let mut confirm=Vec::new();int(1,1,&mut confirm);string(2,&key,&mut confirm);int(3,1,&mut confirm);
+        assert_eq!(viewer.response(&response(header(ask_rpc).unwrap(),2,&confirm)).unwrap(),None);
+        let mut block=Vec::new();string(1,&key,&mut block);int(2,0,&mut block);nested(3,"中文 text\n".as_bytes(),&mut block);
+        assert_eq!(viewer.request(&request(8,3,&block),&mut next).unwrap().text.as_deref(),Some("中文 text\n"));
+        // Viewer offer lists both formats; a Mac-style ask gets UTF-8 bytes back.
+        let offer=viewer.offer_any_host(9,"hi".into()).unwrap();
+        assert_eq!(format_ids(&offer),vec![13,0]);
+        let mut ask=Vec::new();int(1,0,&mut ask);string(2,"k",&mut ask);string(3,MAC_TEXT,&mut ask);
+        let out=viewer.request(&request(10,2,&ask),&mut next).unwrap();
+        let data=bytes(bytes(bytes(&out.messages[1].1,9).unwrap().unwrap(),3).unwrap().unwrap(),3).unwrap().unwrap();
+        assert_eq!(data,b"hi");
+        // Host-side offers are unchanged: CF_UNICODETEXT only.
+        assert_eq!(format_ids(&State::default().offer(1,"hi".into()).unwrap()),vec![13]);
+    }
     #[test]
     fn desktop_clipboard_negotiates_and_buffers_unicode_until_confirmation(){
         let text="UU-test-中文🙂\n".repeat(900);

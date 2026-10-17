@@ -111,7 +111,7 @@ impl SyncState {
     /// ignores the other form.
     fn local(&mut self,value:String)->Result<Option<Vec<Vec<u8>>>,&'static str>{
         if self.last.as_ref()==Some(&value){return Ok(None)}
-        let id=self.next();let payload=self.rich.offer(id,value.clone())?;
+        let id=self.next();let payload=self.rich.offer_any_host(id,value.clone())?;
         let rich=wire::envelope(self.next(),21,&payload);
         let text=wire::envelope(self.next(),21,&crate::clipboard_protocol::text_request(self.next(),&value));
         self.last=Some(value);Ok(Some(vec![rich,text]))

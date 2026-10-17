@@ -195,7 +195,8 @@ impl Peer {
                             if state.chroma.swap(chroma,Ordering::AcqRel)!=chroma {log::info!("Viewer capture sync: chroma={chroma}");}
                         }
                         let count=state.control_messages.fetch_add(1,Ordering::Relaxed);
-                        if wire::echo_matches(&message.data,1) {state.clipboard_supported.store(wire::echo_clipboard_supported(&message.data),Ordering::Release);state.echo_received.store(true,Ordering::Release);}
+                        if wire::echo_matches(&message.data,1) {let supported=wire::echo_clipboard_supported(&message.data);
+                            if state.clipboard_supported.swap(supported,Ordering::AcqRel)!=supported || !state.echo_received.load(Ordering::Acquire) {log::info!("Viewer echo: clipboard_supported={supported}");}state.echo_received.store(true,Ordering::Release);}
                         if let Some(request)=wire::echo_request_seq(&message.data) {
                             if let Some(control)=control_for_echo.upgrade() {let _=control.send(&bytes::Bytes::from(wire::echo_response_with_clipboard(1_000_000+request,request,clipboard_enabled))).await;}
                         }
