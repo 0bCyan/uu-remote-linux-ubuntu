@@ -225,6 +225,7 @@ Optional launcher icon:
 ```sh
 install -Dm644 contrib/desktop/uu-remote-linux.svg ~/.local/share/icons/hicolor/scalable/apps/uu-remote-linux.svg
 install -Dm644 contrib/desktop/uu-remote-linux.desktop ~/.local/share/applications/uu-remote-linux.desktop
+install -Dm644 contrib/desktop/uu-remote-linux-viewer.desktop ~/.local/share/applications/uu-remote-linux-viewer.desktop
 ```
 
 Verified with the official Mac viewer: guest connections, wrong-code rejection, code rotation, switching assistance off,

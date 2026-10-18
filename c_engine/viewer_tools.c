@@ -474,6 +474,7 @@ static gboolean show_window(gpointer d) {
 static void *ui_thread(void *d) {
     (void)d;
     if (!gtk_init_check(NULL, NULL)) { pthread_mutex_lock(&init_lock); init_state = -1; pthread_cond_signal(&init_cond); pthread_mutex_unlock(&init_lock); return NULL; }
+    gtk_window_set_default_icon_name("uu-remote-linux"); // same taskbar icon as the host (#13)
     // Light palette in CSS; keep a dark system theme from making unstyled text white on white (#43).
     g_object_set(gtk_settings_get_default(), "gtk-theme-name", "Adwaita", "gtk-application-prefer-dark-theme", FALSE, NULL);
     show_window(NULL); gtk_main(); return NULL;

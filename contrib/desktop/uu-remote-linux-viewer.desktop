@@ -1,0 +1,14 @@
+[Desktop Entry]
+Type=Application
+Name=UU 远程 Linux 控制端
+Name[en]=UU Remote Linux Viewer
+GenericName=Remote desktop viewer
+Comment=非官方 UU 远程控制端（实验性）：远控你的 Windows / Mac / Linux 设备
+Comment[en]=Unofficial NetEase UU Remote viewer (experimental)
+Exec=uuremote-viewer ui
+Icon=uu-remote-linux
+Terminal=false
+Categories=Network;RemoteAccess;
+Keywords=remote;desktop;viewer;UU;远程;控制;
+StartupNotify=false
+StartupWMClass=uuremote-viewer

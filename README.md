@@ -199,6 +199,7 @@ X11 默认继续用 XTest，因为它能正确处理网络延迟下按住不放�
 ```sh
 install -Dm644 contrib/desktop/uu-remote-linux.svg ~/.local/share/icons/hicolor/scalable/apps/uu-remote-linux.svg
 install -Dm644 contrib/desktop/uu-remote-linux.desktop ~/.local/share/applications/uu-remote-linux.desktop
+install -Dm644 contrib/desktop/uu-remote-linux-viewer.desktop ~/.local/share/applications/uu-remote-linux-viewer.desktop
 ```
 
 验证情况：访客身份下的连接、错误验证码拒绝、用完换码、关闭后不可连接、登录与退出登录的切换，已用官方 Mac 客户端实测通过。
