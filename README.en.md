@@ -353,8 +353,14 @@ capability lists; the official Mac viewer lists H265 first in its SDP). The firs
 synthetic frame and announces encoder support with CodecNegotiation. `hevc_nvenc`, `libx265` and explicit
 `UU_VIDEO_ENCODER=vaapi` (`hevc_vaapi`); hardware failure falls back to software HEVC, then to H.264.
 `UU_VIDEO_CODEC=h264` forces H.264. 8-bit; true color 4:4:4 uses hevc_nvenc `rext` / libx265 `main444-8`.
-Verified with the official Mac viewer on an RTX 3090 (hevc_nvenc, including 4:4:4); libx265, hevc_vaapi and
-other viewers are not hardware-verified.
+Verified with the official Mac viewer on an RTX 3090 (hevc_nvenc, including 4:4:4) and with the official Android
+viewer on Intel Alder Lake-P (iHD): 2560x1440 fully hardware-encoded, 58 fps decoded at about 10 ms. libx265 is
+still not verified against a real viewer.
+
+HEVC access units are split on RFC 7798 picture boundaries instead of AUDs: `hevc_vaapi` with `-aud 1` writes an
+AUD only at IRAPs and drops every other picture from the bitstream, so an AUD-based reader turns a whole GOP into
+one "frame" and the IRAP gate then rejects all of them: the connection stalls at "transferring" while the host
+sends about 12 kbit/s. `UU_VIDEO_CODEC=h265` selects H.265 explicitly for A/B diagnosis.
 
 ### VAAPI (opt-in / 显式启用)
 

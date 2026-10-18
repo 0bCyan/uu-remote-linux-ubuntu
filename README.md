@@ -314,7 +314,12 @@ flowchart LR
 中优先列出 H.265）。首次桌面连接会用合成帧探测实际编码能力，并通过 CodecNegotiation 告知客户端。支持 `hevc_nvenc`、
 `libx265`、显式 `UU_VIDEO_ENCODER=vaapi` 的 `hevc_vaapi`；硬件失败先回落软件 HEVC，再回落 H.264。
 `UU_VIDEO_CODEC=h264` 强制使用 H.264。8-bit；真彩 4:4:4 使用 hevc_nvenc `rext` / libx265 `main444-8`。
-已用官方 Mac 客户端在 RTX 3090（hevc_nvenc，含 4:4:4）实机验收；libx265、hevc_vaapi 及其他客户端尚未实机验证。
+已用官方 Mac 客户端在 RTX 3090（hevc_nvenc，含 4:4:4）实机验收；`hevc_vaapi` 配官方 Android 客户端也已实机验收
+（Intel Alder Lake-P / iHD，2560×1440 全程硬件编码，客户端 58 fps 解码、约 10 ms 延迟）；`libx265` 仍未经控制端验收。
+
+HEVC 的访问单元按 RFC 7798 的图片边界切分，不依赖 AUD：`hevc_vaapi` 带 `-aud 1` 时只在 IRAP 处写 AUD，并把其余
+画面从码流里丢掉，读取端按 AUD 切分就会把整个 GOP 当成一帧，再被 IRAP 门控全部拒绝——对外表现为连接停在
+「正在传输画面」，而主机侧只有约 12 kbit/s。`UU_VIDEO_CODEC=h265` 可显式选中 H.265，便于对照排查。
 
 ### VAAPI 硬件编码（显式启用）
 

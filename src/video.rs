@@ -94,16 +94,57 @@ fn nal_offsets_for(bytes: &[u8], kind: u8, codec: VideoCodec) -> Vec<usize> {
         let matches = match codec {
             VideoCodec::H264 => header < bytes.len() && bytes[header] & 31 == kind,
             // HEVC has a two-byte header: forbidden_zero_bit=0, temporal_id_plus1 != 0.
-            VideoCodec::H265 => header + 1 < bytes.len() && bytes[header] & 128 == 0
-                && bytes[header + 1] & 7 != 0 && (bytes[header] >> 1) & 63 == kind,
+            VideoCodec::H265 => hevc_nal_kind(bytes, header) == Some(kind),
         };
         if matches { result.push(i); }
         i += prefix;
     }
     result
 }
-fn aud_offsets_for(bytes: &[u8], codec: VideoCodec) -> Vec<usize> {
-    nal_offsets_for(bytes, if codec == VideoCodec::H265 { 35 } else { 9 }, codec)
+
+/// Validated HEVC NAL unit type from the two-byte header (`None` when it is incomplete or the
+/// forbidden bit is set or temporal_id_plus1 is zero).
+fn hevc_nal_kind(bytes: &[u8], header: usize) -> Option<u8> {
+    (header + 1 < bytes.len() && bytes[header] & 128 == 0 && bytes[header + 1] & 7 != 0)
+        .then(|| (bytes[header] >> 1) & 63)
+}
+
+/// Access-unit starts for H.265, independent of where the encoder puts its AUDs. VAAPI writes an
+/// AUD only at IRAPs, so splitting on AUD alone groups a whole GOP into one "frame" (and that
+/// frame then fails the IRAP gate, so nothing is sent). RFC 7798 §3.1 puts the boundary at the
+/// first NAL after a VCL NAL that is either non-VCL (AUD/VPS/SPS/PPS/SEI) or starts a picture
+/// (first_slice_segment_in_pic_flag), which also keeps multi-slice pictures in one unit.
+fn hevc_au_offsets(bytes: &[u8]) -> Vec<usize> {
+    let mut result = Vec::new();
+    let mut previous_vcl = false;
+    let mut first = true;
+    let mut i = 0;
+    while i + 3 < bytes.len() {
+        let prefix = if bytes[i..].starts_with(&[0, 0, 0, 1]) { 4 }
+            else if bytes[i..].starts_with(&[0, 0, 1]) { 3 } else { i += 1; continue };
+        let header = i + prefix;
+        if let Some(kind) = hevc_nal_kind(bytes, header) {
+            let vcl = kind < 32;
+            let starts_picture = vcl && bytes.get(header + 2).is_some_and(|byte| byte & 0x80 != 0);
+            // RFC 7798 / H.265 7.4.2.4.4: only these non-VCL types may open the next access unit.
+            // Suffix SEI (40), filler (38) and end of sequence/bitstream (36, 37) stay with the
+            // picture they follow.
+            let opens_unit = matches!(kind, 32..=35 | 39 | 41..=44 | 48..=55);
+            if first || (previous_vcl && (opens_unit || starts_picture)) { result.push(i); }
+            // Trailing NALs (suffix SEI, filler, end markers) do not end "after a VCL NAL".
+            if vcl || opens_unit { previous_vcl = vcl; }
+            first = false;
+        }
+        i += prefix;
+    }
+    result
+}
+
+fn au_offsets_for(bytes: &[u8], codec: VideoCodec) -> Vec<usize> {
+    match codec {
+        VideoCodec::H264 => nal_offsets_for(bytes, 9, codec),
+        VideoCodec::H265 => hevc_au_offsets(bytes),
+    }
 }
 fn is_independent_frame_for(bytes: &[u8], codec: VideoCodec) -> bool {
     match codec {
@@ -114,7 +155,7 @@ fn is_independent_frame_for(bytes: &[u8], codec: VideoCodec) -> bool {
     }
 }
 #[cfg(test)]
-fn aud_offsets(bytes: &[u8]) -> Vec<usize> { aud_offsets_for(bytes, VideoCodec::H264) }
+fn aud_offsets(bytes: &[u8]) -> Vec<usize> { au_offsets_for(bytes, VideoCodec::H264) }
 fn is_independent_frame(bytes: &[u8]) -> bool { is_independent_frame_for(bytes, VideoCodec::H264) }
 
 #[derive(Debug)]
@@ -178,10 +219,17 @@ fn vaapi_options(settings: &VideoSettings, gop: &str) -> Vec<String> {
     let (maxrate, buffer) = rate_args(settings, Encoder::Vaapi);
     // QVBR is not uniformly available on Intel/AMD drivers. VBR + qmin sets a quality
     // floor while retaining the viewer's bitrate cap; unsupported drivers fall back to CPU.
-    ["-c:v", Encoder::Vaapi.name_for(settings.codec), "-profile:v", profile_for(settings.codec, true), "-g", gop, "-bf", "0",
-        "-rc_mode", "VBR", "-b:v", &settings.max_kbps().map_or("16M".into(), |k| format!("{}k",k*3/4)),
-        "-maxrate", &maxrate, "-bufsize", &buffer, "-qmin", &settings.cq().to_string(), "-async_depth", "1", "-aud", "1"]
-        .into_iter().map(str::to_owned).collect()
+    let mut options: Vec<String> = ["-c:v", Encoder::Vaapi.name_for(settings.codec), "-profile:v", profile_for(settings.codec, true),
+        "-g", gop, "-bf", "0", "-rc_mode", "VBR", "-b:v", &settings.max_kbps().map_or("16M".into(), |k| format!("{}k",k*3/4)),
+        "-maxrate", &maxrate, "-bufsize", &buffer, "-qmin", &settings.cq().to_string(), "-async_depth", "1"]
+        .into_iter().map(str::to_owned).collect();
+    // h264_vaapi writes an AUD per picture and the reader splits access units on it. hevc_vaapi
+    // does not: with `-aud 1` it writes an AUD only at IRAPs and drops every other picture from
+    // the bitstream (a 90-frame clip encoded to 3 IDRs and no P-frames), so HEVC leaves AUD off
+    // and hevc_au_offsets() splits pictures by their own boundaries. Parameter sets are still
+    // repeated in-band ahead of every IDR.
+    if settings.codec == VideoCodec::H264 { options.extend(["-aud".into(), "1".into()]); }
+    options
 }
 
 fn profile_for(codec: VideoCodec, vaapi: bool) -> &'static str {
@@ -665,7 +713,7 @@ async fn read_encoder_with(
         pending.extend_from_slice(&chunk[..count]);
         // A chunk can include the next AUD, so split before enforcing the bound.
         loop {
-            let aud = aud_offsets_for(&pending, settings.codec);
+            let aud = au_offsets_for(&pending, settings.codec);
             if aud.len() < 2 { break; }
             let next = aud[1];
             if next > MAX_ACCESS_UNIT { return Err("Encoder access unit exceeds limit".into()); }
@@ -700,7 +748,16 @@ fn probe_settings() -> Result<VideoSettings,String> {
         None=>crate::capture_setting::QUALITY_AUTO,
         Some(v)=>v.parse::<u64>().ok().filter(|q|(1..=5).contains(q)).ok_or("UU_PROBE_QUALITY must be 1-5")?,
     };
-    Ok(VideoSettings {fps,quality,..VideoSettings::default()})
+    Ok(VideoSettings {fps,quality,codec:probe_codec(),..VideoSettings::default()})
+}
+
+/// The probe follows `UU_VIDEO_CODEC` so the HEVC path can be measured at all (H.264 otherwise),
+/// and its first access unit is then checked against that codec instead of always H.264.
+fn probe_codec() -> VideoCodec {
+    match std::env::var("UU_VIDEO_CODEC").ok().as_deref().map(str::to_ascii_lowercase).as_deref() {
+        Some("h265") | Some("hevc") => VideoCodec::H265,
+        _ => VideoCodec::H264,
+    }
 }
 
 fn probe_input_command(spec:&FfmpegSpec,input:&std::ffi::OsStr,loop_input:bool,settings:&VideoSettings,
@@ -714,7 +771,7 @@ fn probe_input_command(spec:&FfmpegSpec,input:&std::ffi::OsStr,loop_input:bool,s
     command.args(scale_options(settings,encoder));
     command.args(encoder_options(settings,encoder,&gop_frames(settings.fps,false).to_string(),None));
     command.args(timing_args(timing,settings.fps));
-    command.args(["-frames:v",&wanted.to_string(),"-f","h264","pipe:1"]);
+    command.args(["-frames:v",&wanted.to_string(),"-f",if settings.codec==VideoCodec::H265 {"hevc"} else {"h264"},"pipe:1"]);
     command
 }
 
@@ -763,10 +820,10 @@ pub async fn probe_input(input:OsString,path:Option<String>)->Result<(),String> 
             let n=stdout.read(&mut chunk).await.map_err(|e|format!("Encoder read: {e}"))?;
             pending.extend_from_slice(&chunk[..n]);
             loop {
-                let aud=aud_offsets_for(&pending,settings.codec);
+                let aud=au_offsets_for(&pending,settings.codec);
                 let end=if aud.len()>1 { aud[1] } else if n==0 && !pending.is_empty() { pending.len() } else { break; };
                 if end>MAX_ACCESS_UNIT { return Err("Encoder access unit exceeds limit".into()); }
-                if count==0 && !is_independent_frame(&pending[..end]) { return Err("Video probe did not begin with IDR".into()); }
+                if count==0 && !is_independent_frame_for(&pending[..end], settings.codec) { return Err("Video probe did not begin with IDR".into()); }
                 if let Some(file)=file.as_mut() { file.write_all(&pending[..end]).map_err(|e|e.to_string())?; }
                 bytes+=end; count+=1;
                 pending.drain(..end);
@@ -801,7 +858,7 @@ pub async fn probe(size:(u32,u32),display:String,portal:Option<Arc<crate::portal
     tokio::time::timeout(Duration::from_secs(15+wanted/30),async {
         while count<wanted {
             let frame=rx.recv().await.ok_or("Video probe encoder ended")?;
-            if count==0 && !is_independent_frame(&frame.data) { return Err("Video probe did not begin with IDR".to_owned()); }
+            if count==0 && !is_independent_frame_for(&frame.data, settings.codec) { return Err("Video probe did not begin with IDR".to_owned()); }
             if let Some(file)=file.as_mut() { file.write_all(&frame.data).map_err(|e|e.to_string())?; }
             bytes+=frame.data.len(); count+=1;
         }
@@ -1235,7 +1292,7 @@ mod tests {
     #[test]
     fn hevc_annex_b_boundaries_and_irap_use_two_byte_headers() {
         let bytes = [0,0,0,1,70,1,80,0,0,1,64,1,42,0,0,1,38,1,42,0,0,1,70,1,80];
-        assert_eq!(aud_offsets_for(&bytes, VideoCodec::H265), vec![0,19]);
+        assert_eq!(au_offsets_for(&bytes, VideoCodec::H265), vec![0,19]);
         assert!(is_independent_frame_for(&bytes[..19], VideoCodec::H265));
         for kind in 16..=21 {
             assert!(is_independent_frame_for(&[0,0,1,kind << 1,1,42], VideoCodec::H265));
@@ -1245,6 +1302,27 @@ mod tests {
         assert!(!is_independent_frame_for(&[0,0,1,38,0,42], VideoCodec::H265));
         assert!(!is_independent_frame_for(&[0,0,1,166,1,42], VideoCodec::H265));
         assert!(!is_independent_frame_for(&[0,0,1,38,1,42,0,0,1,2,1,42], VideoCodec::H265));
+    }
+    #[test]
+    fn hevc_access_units_do_not_depend_on_aud_placement() {
+        // VAAPI writes an AUD only at IRAPs: AUD VPS SPS PPS IDR, then one P per picture.
+        let vaapi = [0,0,0,1,70,1,0x80, 0,0,0,1,64,1,0x42, 0,0,0,1,66,1,0x42,
+            0,0,0,1,68,1,0x42, 0,0,0,1,38,1,0x80, 0,0,0,1,2,1,0x80, 0,0,0,1,2,1,0x80];
+        assert_eq!(hevc_au_offsets(&vaapi), vec![0, 35, 42]);
+        // x265/nvenc style: an AUD in front of every picture.
+        let with_aud = [0,0,0,1,70,1,0x80, 0,0,0,1,64,1,0x42, 0,0,0,1,38,1,0x80,
+            0,0,0,1,70,1,0x80, 0,0,0,1,2,1,0x80, 0,0,0,1,70,1,0x80, 0,0,0,1,2,1,0x80];
+        assert_eq!(hevc_au_offsets(&with_aud), vec![0, 21, 35]);
+        // A picture split over several slices stays one access unit.
+        let multi_slice = [0,0,0,1,38,1,0x80, 0,0,0,1,38,1,0x00, 0,0,0,1,2,1,0x80];
+        assert_eq!(hevc_au_offsets(&multi_slice), vec![0, 14]);
+        // Truncated/invalid NALs must not invent boundaries. An invalid header is skipped, and
+        // the first valid NAL after it still opens the first unit.
+        assert_eq!(hevc_au_offsets(&[0,0,1,70]), Vec::<usize>::new());
+        assert_eq!(hevc_au_offsets(&[0,0,1,128,1,0x80]), Vec::<usize>::new());
+        assert_eq!(hevc_au_offsets(&[0,0,1,128,1,0x80, 0,0,1,2,1,0x80]), vec![6]);
+        // A suffix SEI (40) after a picture stays in that picture's unit; the next slice opens the next one.
+        assert_eq!(hevc_au_offsets(&[0,0,1,0x26,1,0x80, 0,0,1,0x50,1,0x05, 0,0,1,0x02,1,0x80]), vec![0, 12]);
     }
     #[tokio::test]
     async fn hevc_dependency_gate_recovers_only_at_irap_after_overflow() {
@@ -1278,6 +1356,8 @@ mod tests {
         for pair in [["-c:v", "hevc_vaapi"], ["-profile:v", "main"], ["-bf", "0"], ["-bufsize", "500k"]] {
             assert!(vaapi.windows(2).any(|window| window == pair));
         }
+        // hevc_vaapi with -aud drops every non-IRAP picture, so H.265 must not ask for AUDs.
+        assert!(!vaapi.iter().any(|option| option == "-aud"));
         assert_eq!(Encoder::Nvenc.name_for(VideoCodec::H265), "hevc_nvenc");
         assert_eq!(Encoder::Cpu.name_for(VideoCodec::H264), "libx264");
     }
@@ -1289,3 +1369,4 @@ mod tests {
         assert!(!is_independent_frame(&[0,0,0,1,9,48,0,0,1,1,154]));
     }
 }
+
