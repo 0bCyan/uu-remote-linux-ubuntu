@@ -1041,6 +1041,21 @@ impl WebRtcSession {
                         if let Ok(txt) = std::str::from_utf8(&msg.data) {
                             log::debug!("DataChannel [{}] received UTF-8 data: {} bytes", channel_name, txt.len());
                             if let Ok(val) = serde_json::from_str::<serde_json::Value>(txt) {
+                                if !channel_name.contains("CONTROL") {
+                                    // Input JSON on another channel (mobile input-method text was missing from CONTROL, #13/#46):
+                                    // record action names only, once per name, and accept text_input wherever it arrives.
+                                    if let Some(action) = val.get("action").and_then(serde_json::Value::as_str) {
+                                        static SEEN: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+                                        let mut seen = SEEN.lock().unwrap();
+                                        if seen.len() < 32 && action.len() <= 40 && action.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_') && !seen.iter().any(|s| s == action) {
+                                            seen.push(action.to_owned());
+                                            log::info!("JSON action on {} channel: action={}", if channel_name.contains("STREAMER") {"STREAMER"} else if channel_name.contains("TEXT") {"TEXT"} else {"other"}, action);
+                                        }
+                                    }
+                                    if let Ok(crate::control_protocol::ControlMessage::Input(crate::control_protocol::ControlInput::TextInput {text})) = crate::control_protocol::decode_control(&msg.data) {
+                                        if let Some(session)=message_input_session.as_ref() { session.with_input(|| input_worker.text_input(&text)); }
+                                    }
+                                }
                                 if channel_name.contains("CONTROL") {
                                     match crate::control_protocol::decode_control(&msg.data) {
                                         Ok(crate::control_protocol::ControlMessage::Input(event)) => {
@@ -1051,7 +1066,7 @@ impl WebRtcSession {
                                             static RECEIPTS: [std::sync::atomic::AtomicUsize; 3] = [const { std::sync::atomic::AtomicUsize::new(0) }; 3];
                                             let (slot, kind) = match &event {
                                                 ControlInput::MouseButton {..} | ControlInput::MouseClick {..} => (0, "button"),
-                                                ControlInput::Keyboard {..} | ControlInput::KeyboardClick {..} => (1, "keyboard"),
+                                                ControlInput::Keyboard {..} | ControlInput::KeyboardClick {..} | ControlInput::TextInput {..} => (1, "keyboard"),
                                                 _ => (2, "motion"),
                                             };
                                             if RECEIPTS[slot].fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 16 {
@@ -1063,6 +1078,7 @@ impl WebRtcSession {
                                                 ControlInput::MouseRelative {dx,dy} => input_worker.mouse_relative(*dx,*dy),
                                                 ControlInput::MouseScroll {dx,dy} => input_worker.mouse_scroll(*dx,*dy),
                                                 ControlInput::Keyboard {key, pressed} => input_worker.windows_key_event(*key, *pressed),
+                                                ControlInput::TextInput {text} => input_worker.text_input(text),
                                                 ControlInput::KeyboardClick {key} => {input_worker.windows_key_event(*key, true);input_worker.windows_key_event(*key, false);},
                                                 ControlInput::MouseButton {button,pressed} => input_worker.wire_mouse_button(*button,*pressed),
                                                 ControlInput::MouseClick {button} => {input_worker.wire_mouse_button(*button,true);input_worker.wire_mouse_button(*button,false);},

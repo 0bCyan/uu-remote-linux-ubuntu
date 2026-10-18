@@ -15,6 +15,9 @@ pub enum ControlInput {
     MouseAbsolute { x: f64, y: f64 },
     MouseRelative { dx: i32, dy: i32 },
     MouseScroll { dx: i32, dy: i32 },
+    /// Official Windows host `text_input {content}` (KeyboardMouseRunner::execTextInput): text typed by the
+    /// mobile clients' own input method. Never logged.
+    TextInput { text: String },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -58,6 +61,11 @@ pub fn decode_control(data: &[u8]) -> Result<ControlMessage, String> {
         "mouse_move_relative" => ControlInput::MouseRelative {
             dx: integer(&v, "delta_x")?, dy: integer(&v, "delta_y")?,
         },
+        "text_input" => {
+            let text = v.get("content").and_then(Value::as_str).ok_or("CONTROL field content must be a string")?;
+            if text.len() > 16 * 1024 { return Err("text_input content exceeds 16 KiB".into()); }
+            ControlInput::TextInput { text: text.to_owned() }
+        }
         "mouse_scroll" => ControlInput::MouseScroll {
             dx: integer(&v, "delta_x")?, dy: integer(&v, "delta_y")?,
         },
@@ -137,6 +145,9 @@ mod tests {
     #[test]
     fn does_not_invent_actions_for_unknown_json() {
         assert!(matches!(decode_control(br#"{"action":"unverified"}"#).unwrap(), ControlMessage::Unsupported(_)));
+        assert_eq!(decode_control("{\"action\":\"text_input\",\"content\":\"你好 a\"}".as_bytes()).unwrap(),
+            ControlMessage::Input(ControlInput::TextInput { text: "你好 a".into() }));
+        assert!(decode_control(br#"{"action":"text_input"}"#).is_err());
     }
 }
 

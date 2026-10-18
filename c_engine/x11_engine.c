@@ -3,6 +3,7 @@
  * Zero-Wine dependency, zero-overhead, thread-safe.
  */
 #include <stdio.h>
+#include <unistd.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/shm.h>
@@ -216,6 +217,54 @@ int x11_key_symbol(unsigned long symbol, int is_press) {
     if (!is_press) track_injected_key(code, 0);
     XFlush(g_display);
     return 0;
+}
+
+/* Type UTF-8 text the way xdotool does: bind each character's keysym to a spare (unmapped) keycode, press it,
+ * then restore the keycode. Works for CJK text from mobile input methods. Never logs the text. */
+int x11_type_utf8(const char *text) {
+    if (!g_display || !text) return -1;
+    int min_kc = 0, max_kc = 0, per = 0;
+    XDisplayKeycodes(g_display, &min_kc, &max_kc);
+    KeySym *map = XGetKeyboardMapping(g_display, (KeyCode)min_kc, max_kc - min_kc + 1, &per);
+    if (!map) return -2;
+    int spare = 0;
+    for (int kc = max_kc; kc >= min_kc && !spare; kc--) {
+        int empty = 1;
+        for (int i = 0; i < per; i++) if (map[(kc - min_kc) * per + i] != NoSymbol) { empty = 0; break; }
+        if (empty) spare = kc;
+    }
+    XFree(map);
+    if (!spare) return -3;
+    int typed = 0;
+    const unsigned char *p = (const unsigned char *)text;
+    while (*p) {
+        unsigned cp; int n;
+        if (*p < 0x80) { cp = *p; n = 1; }
+        else if ((*p & 0xE0) == 0xC0 && (p[1] & 0xC0) == 0x80) { cp = ((p[0] & 0x1F) << 6) | (p[1] & 0x3F); n = 2; }
+        else if ((*p & 0xF0) == 0xE0 && (p[1] & 0xC0) == 0x80 && (p[2] & 0xC0) == 0x80) { cp = ((p[0] & 0x0F) << 12) | ((p[1] & 0x3F) << 6) | (p[2] & 0x3F); n = 3; }
+        else if ((*p & 0xF8) == 0xF0 && (p[1] & 0xC0) == 0x80 && (p[2] & 0xC0) == 0x80 && (p[3] & 0xC0) == 0x80) { cp = ((p[0] & 0x07) << 18) | ((p[1] & 0x3F) << 12) | ((p[2] & 0x3F) << 6) | (p[3] & 0x3F); n = 4; }
+        else { p++; continue; }
+        p += n;
+        KeySym sym;
+        if (cp == '\n') sym = 0xff0d;          /* Return */
+        else if (cp == '\t') sym = 0xff09;     /* Tab */
+        else if (cp < 0x20 || cp == 0x7f || (cp >= 0x80 && cp < 0xa0)) continue;
+        else if (cp < 0x100) sym = cp;         /* Latin-1 keysyms equal the code point */
+        else sym = 0x1000000 | cp;             /* Unicode keysym */
+        KeySym syms[2] = { sym, sym };
+        XChangeKeyboardMapping(g_display, spare, 2, syms, 1);
+        XSync(g_display, False);
+        usleep(8000);                          /* let clients see the MappingNotify before the key */
+        XTestFakeKeyEvent(g_display, spare, True, CurrentTime);
+        XTestFakeKeyEvent(g_display, spare, False, CurrentTime);
+        XSync(g_display, False);
+        usleep(8000);
+        typed++;
+    }
+    KeySym none[2] = { NoSymbol, NoSymbol };
+    XChangeKeyboardMapping(g_display, spare, 2, none, 1);
+    XSync(g_display, False);
+    return typed;
 }
 
 int x11_key_event(int keycode, int is_press) {

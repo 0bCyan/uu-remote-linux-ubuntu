@@ -10,9 +10,12 @@ extern "C" {
     fn x11_key_event(keycode: libc::c_int, is_press: libc::c_int) -> libc::c_int;
     fn x11_release_all() -> libc::c_int;
     fn x11_terminal_shortcut_state() -> libc::c_int;
+    fn x11_type_utf8(text: *const libc::c_char) -> libc::c_int;
 }
 #[cfg(not(target_os = "linux"))]
 unsafe fn x11_terminal_shortcut_state() -> libc::c_int { 0 }
+#[cfg(not(target_os = "linux"))]
+unsafe fn x11_type_utf8(_: *const libc::c_char) -> libc::c_int { 0 }
 
 #[cfg(not(target_os = "linux"))]
 unsafe fn x11_mouse_move(_: libc::c_int, _: libc::c_int) -> libc::c_int { 0 }
@@ -356,6 +359,20 @@ impl InputInjector {
         if self.backend==crate::desktop_backend::DesktopBackend::Portal {return self.portal_result("keyboard", Err("Portal input session is not bound".into()));}
         if self.backend==crate::desktop_backend::DesktopBackend::Wayland { crate::wayland::key(symbol,pressed) }
         else { unsafe { x11_key_symbol(symbol as libc::c_ulong,i32::from(pressed)) } }
+    }
+    /// Mobile input-method text (`text_input`). X11 only for now; other backends log once.
+    pub fn text_input(&self, text: &str) {
+        let _serial=self.serial.lock().unwrap();
+        let Ok(c_text)=std::ffi::CString::new(text.replace('\0',"")) else { return };
+        if self.backend==crate::desktop_backend::DesktopBackend::X11 {
+            let typed=unsafe { x11_type_utf8(c_text.as_ptr()) };
+            log::info!("Desktop text input: chars={} result={}", text.chars().count(), typed);
+        } else {
+            static WARNED:std::sync::atomic::AtomicBool=std::sync::atomic::AtomicBool::new(false);
+            if !WARNED.swap(true,std::sync::atomic::Ordering::Relaxed) {
+                log::warn!("Mobile text input is not supported on the {:?} backend yet", self.backend);
+            }
+        }
     }
     pub fn key_event(&self, keycode: i32, is_press: bool) {
         let _serial=self.serial.lock().unwrap();

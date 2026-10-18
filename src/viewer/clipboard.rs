@@ -95,7 +95,8 @@ impl CommandBackend {
     }
 }
 #[derive(Default)]
-struct SyncState {last:Option<String>,assembly:text::Assembly,rich:rich::State,seq:u64}
+// target_mac: Some(true) official Mac host, Some(false) Windows-type host (official or this project), None unknown.
+struct SyncState {last:Option<String>,assembly:text::Assembly,rich:rich::State,seq:u64,target_mac:Option<bool>}
 impl SyncState {
     async fn apply(&mut self,backend:&Backend,value:String)->Result<(),()>{
         if backend.write(&value).await? {
@@ -114,7 +115,10 @@ impl SyncState {
         let id=self.next();let payload=self.rich.offer_any_host(id,value.clone())?;
         let rich=wire::envelope(self.next(),21,&payload);
         let text=wire::envelope(self.next(),21,&crate::clipboard_protocol::text_request(self.next(),&value));
-        self.last=Some(value);Ok(Some(vec![rich,text]))
+        self.last=Some(value);
+        // Live-verified: the official Windows host writes case-10 text, then a rich format list replaces it with a
+        // placeholder it never asks us to render (paste is empty). The Mac host only takes the rich offer.
+        Ok(Some(match self.target_mac {Some(true)=>vec![rich],Some(false)=>vec![text],None=>vec![rich,text]}))
     }
     fn receive(&mut self,data:&[u8])->Result<(Vec<Vec<u8>>,Option<String>),&'static str>{
         if data.len()>MAX_TEXT*2+1024{return Err("clipboard message exceeds limit")}
@@ -151,23 +155,24 @@ impl SyncState {
 async fn send(channel:&RTCDataChannel,message:Vec<u8>)->Result<(),()>{
     tokio::time::timeout(Duration::from_secs(2),channel.send(&bytes::Bytes::from(message))).await.map_err(|_|())?.map_err(|_|())?;Ok(())
 }
-pub struct Bridge {backend:Option<Backend>,pub enabled:bool,tx:Option<mpsc::Sender<Vec<u8>>>,task:Option<tokio::task::JoinHandle<()>>}
+pub struct Bridge {backend:Option<Backend>,pub enabled:bool,tx:Option<mpsc::Sender<Vec<u8>>>,task:Option<tokio::task::JoinHandle<()>>,target_mac:Option<bool>}
 impl Bridge {
     pub fn new(desktop:bool)->Self{
         let backend=if desktop{Backend::detect()}else{None};let enabled=backend.is_some();
-        Self{backend,enabled,tx:None,task:None}
+        Self{backend,enabled,tx:None,task:None,target_mac:None}
     }
     #[cfg(feature="viewer-sdl")]
     pub fn sdl(tx:mpsc::Sender<ClipboardRequest>)->Self{
         let backend=(std::env::var("UU_VIEWER_CLIPBOARD").as_deref()!=Ok("0")).then_some(Backend::Sdl(tx));
-        Self{enabled:backend.is_some(),backend,tx:None,task:None}
+        Self{enabled:backend.is_some(),backend,tx:None,task:None,target_mac:None}
     }
+    pub fn set_target_mac(&mut self,mac:Option<bool>){self.target_mac=mac;}
     pub fn start(&mut self,channel:&Arc<RTCDataChannel>,control:&Arc<RTCDataChannel>,observed:Arc<Observed>){
-        let Some(backend)=self.backend.take() else{return};
+        let Some(backend)=self.backend.take() else{return};let target_mac=self.target_mac;
         let (tx,mut rx)=mpsc::channel::<Vec<u8>>(16);self.tx=Some(tx);
         let channel=Arc::downgrade(channel);let control=Arc::downgrade(control);
         self.task=Some(tokio::spawn(async move{
-            let mut state=SyncState::default();let mut tick=tokio::time::interval(POLL);
+            let mut state=SyncState{target_mac,..SyncState::default()};let mut tick=tokio::time::interval(POLL);
             let mut retries=0;let mut last_probe=std::time::Instant::now();
             tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             loop {
@@ -324,6 +329,16 @@ impl Drop for Bridge{fn drop(&mut self){self.stop();}}
         }
         if reverse && received.is_some(){viewer.last=Some(value.clone());assert!(viewer.local(value).unwrap().is_none());}
         (received,unavailable)
+    }
+    #[test] fn local_change_follows_target_platform(){
+        for (mac,kinds) in [(Some(true),vec![9]),(Some(false),vec![10]),(None,vec![9,10])]{
+            let mut viewer=SyncState{target_mac:mac,..SyncState::default()};
+            let cases:Vec<u32>=viewer.local("text".into()).unwrap().unwrap().iter().map(|m|{
+                let rpc=decode_wire(m).unwrap().into_iter().find_map(|f|match (f.number,f.value){(21,WireValue::Bytes(b))=>Some(b.to_vec()),_=>None}).unwrap();
+                decode_wire(&rpc).unwrap().iter().map(|f|f.number).find(|n|*n!=1).unwrap()
+            }).collect();
+            assert_eq!(cases,kinds,"{mac:?}");
+        }
     }
     #[test] fn local_change_also_sends_windows_text_change_request(){
         let mut viewer=SyncState::default();
