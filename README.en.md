@@ -10,6 +10,8 @@
 > It now also ships an **experimental Linux viewer**, `uuremote-viewer`, that controls official Windows / Mac hosts or this
 > project's host from Linux (desktop, file transfer, terminal, port mapping, remote assistance; see
 > [below](#experimental-native-viewer-uuremote-viewer)).
+> Desktop-less **Synology / NAS** boxes can run it in Docker: [deployment guide](docs/deploy-nas-docker.md#english), image
+> [`ghcr.io/vallierdev/uu-remote-linux`](https://github.com/VallierDev/uu-remote-linux/pkgs/container/uu-remote-linux).
 >
 > This is a personal hobby project. **It is not affiliated with NetEase and is not an official client.**
 > If NetEase considers this project infringing or inappropriate, please DM me on X
@@ -237,7 +239,8 @@ starts at boot without a login. The viewer's remote desktop keeps showing "conne
 Log in once with `uuremote-server login --no-gui` (QR in the terminal).
 
 **Synology / NAS (Docker)**: run headless mode in a container on a desktop-less NAS (file transfer, terminal, port
-mapping): image `ghcr.io/vallierdev/uu-remote-linux`, see [docker/README.md](docker/README.md). Verified on Synology DSM 7.3 (x86_64).
+mapping): image [`ghcr.io/vallierdev/uu-remote-linux`](https://github.com/VallierDev/uu-remote-linux/pkgs/container/uu-remote-linux),
+see the [NAS deployment guide](docs/deploy-nas-docker.md#english). Verified on Synology DSM 7.3 (x86_64).
 
 **Paste files from a Mac terminal**: when using Ghostty over UU's SSH port mapping,
 the optional [Mac SSH paste companion](contrib/macos-ssh/README.md) uploads files
