@@ -1,7 +1,10 @@
 # Unofficial UU Remote Linux host in a container, for NAS boxes (Synology DSM, etc.) without a desktop.
 # Headless mode: file transfer, terminal and port mapping; no remote desktop. Uses the published release binary.
 FROM ubuntu:24.04
-ARG VERSION=v0.2.7
+ARG VERSION=v0.2.8
+LABEL org.opencontainers.image.source="https://github.com/VallierDev/uu-remote-linux" \
+      org.opencontainers.image.description="Unofficial UU Remote Linux host, headless (file transfer, terminal, port mapping)" \
+      org.opencontainers.image.licenses="GPL-3.0"
 RUN apt-get update \
  && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
       ca-certificates curl bash libx11-6 libxext6 libxtst6 libxfixes3 libgtk-3-0 \
