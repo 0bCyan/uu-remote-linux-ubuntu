@@ -236,6 +236,9 @@ service and run `loginctl enable-linger $USER`, so the systemd user manager (wit
 starts at boot without a login. The viewer's remote desktop keeps showing "connecting" in this mode; that is expected.
 Log in once with `uuremote-server login --no-gui` (QR in the terminal).
 
+**Synology / NAS (Docker)**: run headless mode in a container on a desktop-less NAS (file transfer, terminal, port
+mapping): image `ghcr.io/vallierdev/uu-remote-linux`, see [docker/README.md](docker/README.md). Verified on Synology DSM 7.3 (x86_64).
+
 **Paste files from a Mac terminal**: when using Ghostty over UU's SSH port mapping,
 the optional [Mac SSH paste companion](contrib/macos-ssh/README.md) uploads files
 copied in Finder before inserting their remote paths. Text and mouse reports pass

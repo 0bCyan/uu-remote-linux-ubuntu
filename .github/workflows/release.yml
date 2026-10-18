@@ -6,6 +6,7 @@ on:
 
 permissions:
   contents: write
+  packages: write
 
 jobs:
   release:
@@ -37,3 +38,23 @@ jobs:
           files: |
             uu-remote-linux-*.tar.gz
             uu-remote-linux-*.tar.gz.sha256
+
+  # Headless NAS image (docker/), built from the release tarball published by the job above.
+  docker:
+    needs: release
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/build-push-action@v6
+        with:
+          context: docker
+          build-args: VERSION=${{ github.ref_name }}
+          push: true
+          tags: |
+            ghcr.io/vallierdev/uu-remote-linux:${{ github.ref_name }}
+            ghcr.io/vallierdev/uu-remote-linux:latest

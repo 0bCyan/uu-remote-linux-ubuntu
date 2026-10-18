@@ -209,6 +209,9 @@ install -Dm644 contrib/desktop/uu-remote-linux.desktop ~/.local/share/applicatio
 再执行 `loginctl enable-linger $USER`，这样开机后不用登录，systemd 用户服务（以及 `XDG_RUNTIME_DIR`、用户 D-Bus）也会自动启动。
 无头模式下控制端点「远程桌面」会一直显示正在连接，这是正常的。首次登录用 `uuremote-server login --no-gui` 在终端里扫码。
 
+**群晖 / NAS（Docker）**：没有桌面的 NAS 可以用容器运行无头模式（文件传输、终端、端口映射），
+镜像 `ghcr.io/vallierdev/uu-remote-linux`，步骤见 [docker/README.md](docker/README.md)。已在群晖 DSM 7.3（x86_64）上实测三项功能。
+
 **Mac 终端粘贴文件**：使用 Ghostty 通过 UU 端口映射连接 SSH 时，可安装
 [Mac SSH 粘贴助手](contrib/macos-ssh/README.md)。在 Finder 复制文件后按 Command-V，
 助手先通过同一个 SSH 别名上传文件，再插入服务器路径；普通文本和鼠标报告正常透传。

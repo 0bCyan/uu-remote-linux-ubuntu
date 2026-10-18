@@ -1,0 +1,13 @@
+# docker compose up -d   (first run: log in once, see README.md in this directory)
+services:
+  uu-remote:
+    image: ghcr.io/vallierdev/uu-remote-linux:latest
+    build: .
+    container_name: uu-remote
+    # Host networking gives WebRTC direct UDP paths; bridge mode also works but falls back to relays more often.
+    network_mode: host
+    restart: unless-stopped
+    volumes:
+      - ./config:/config
+      # Folder offered to file transfer and the terminal (change to your share, e.g. /volume1/homes/you).
+      - ./data:/data
