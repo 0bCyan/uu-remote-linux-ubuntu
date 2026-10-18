@@ -250,6 +250,7 @@ systemctl --user restart uuremote-native.service
 | `UU_INPUT_BACKEND` | `auto`（默认，Wayland 下可用时用 uinput）/ `uinput` / `native` |
 | `UU_TERMINAL_SHORTCUTS=0` | 关闭终端窗口里的 Ctrl+V 粘贴转换 |
 | `UU_VIDEO_ENCODER` | `cpu` 强制 CPU；`vaapi` 显式启用 Intel/AMD 硬编；`nvenc` 强制 NVENC；未设置时检测到 NVIDIA 驱动才用 NVENC，否则用 CPU |
+| `UU_VAAPI_BUFFER_MS` | VAAPI 的 VBV 缓冲（10–1000 ms，仅 `UU_VIDEO_ENCODER=vaapi` 时生效）；高分辨率下关键帧被压糊时用它换稳定画质 |
 | `UU_FFMPEG_ROOT` | 使用指定目录下的 FFmpeg |
 | `UU_AUDIO=0` | 关闭声音转发；`UU_AUDIO_SOURCE` 指定 PulseAudio 采集源 |
 | `UU_LOGIN_WINDOW=0` | 凭证缺失时不自动弹出登录窗口 |
@@ -322,6 +323,12 @@ flowchart LR
 失败会明确警告并回退 libx264。外部 FFmpeg 和 `--features inproc-av` 均先转 NV12 再上传硬件帧。
 VBR 使用控制端码率预设及 CQ 对应的最小 QP，无 B 帧、async depth=1，并保留现有 GOP/VFR 规则。
 Intel 核显（UHD 770，iHD 驱动）已实机验收：默认的外部 FFmpeg 管线用官方 Mac 控制端测试了各档画质、帧率、缩放和重连，全程硬件编码、无回退，CPU 占用比 libx264 低约 40%。**AMD 显卡和 `--features inproc-av` 管线的 VAAPI 尚未实机验证。**
+
+高分辨率下 VAAPI 的默认 VBV 缓冲（100–500 kbit）会把关键帧压得过狠：2560×1440 H.264 VAAPI、30M
+上限、静止画面上实测首个 IDR 只有 59,910 字节，画面每隔一个 GOP 糊一下再慢慢恢复。设
+`UU_VAAPI_BUFFER_MS=250`（按 `码率上限 × 毫秒 / 1000` 放大 VBV）后首个 IDR 为 142,397 字节，
+最低帧 Y-SSIM 从 0.9492 升到 0.9933，平均码率没有上升。默认不启用，未设置或超出 10–1000 ms
+仍用原缓冲；代价是关键帧变大，弱网下可能出现瞬时排队，建议从 250 ms 试起。
 
 ### 静音运行与虚拟声卡
 

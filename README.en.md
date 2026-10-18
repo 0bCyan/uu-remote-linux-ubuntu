@@ -280,6 +280,7 @@ Common environment variables:
 | `UU_INPUT_BACKEND` | `auto` (default: uinput on Wayland when accessible) / `uinput` / `native` |
 | `UU_TERMINAL_SHORTCUTS=0` | Disable the Ctrl+V paste rewrite in terminal windows |
 | `UU_VIDEO_ENCODER` | `cpu`: libx264; `vaapi`: opt-in Intel/AMD; `nvenc`: force NVENC; unset: NVENC only when an NVIDIA driver is loaded, else CPU |
+| `UU_VAAPI_BUFFER_MS` | VAAPI VBV buffer in ms (10-1000, VAAPI only); raise it when keyframes are squeezed into a blur at high resolution |
 | `UU_FFMPEG_ROOT` | Use FFmpeg from this prefix |
 | `UU_AUDIO=0` | Disable sound; `UU_AUDIO_SOURCE` picks the PulseAudio source |
 | `UU_REMOTE_ASSIST=0` | Disable remote assistance (no guest assistance before sign-in either) |
@@ -365,6 +366,13 @@ AUD and the existing GOP/VFR timing. Unsupported device/driver/initialization fa
 with a warning. Accepted on Intel UHD 770 (iHD) with the default FFmpeg process pipeline and the official Mac
 viewer (presets, fps, scaling, reconnect; no fallback, ~40% less CPU than libx264). AMD and the `inproc-av`
 VAAPI path are not hardware-verified.
+
+The default VAAPI VBV buffer (100-500 kbit) squeezes keyframes hard at high resolution: on a 2560x1440
+H.264 VAAPI stream capped at 30 Mbit/s the first IDR measured 59,910 bytes and the picture blurred at
+every GOP before sharpening back. `UU_VAAPI_BUFFER_MS=250` (buffer = bitrate cap x ms/1000) restored that
+first IDR to 142,397 bytes and raised the worst-frame Y-SSIM from 0.9492 to 0.9933 without raising the
+average bitrate. Off by default; unset or out of the 10-1000 ms range keeps the old buffer. Larger
+keyframes can queue briefly on a weak link, so start at 250 ms.
 
 ### Virtual audio / 虚拟声卡
 
