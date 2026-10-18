@@ -177,9 +177,26 @@ impl WebRtcSession {
                     tokio::spawn(async move {
                     let ctx = ctx.lock().await.clone();
                     if let (Some(client), Some(ice)) = (&ctx.client_id, ctx.ice_id.as_ref().and_then(|v| v.as_str())) {
-                        let payload = crate::capability::device_capability(client, ice, 0, crate::video::display_fps() as i32, 5, hevc);
+                        let encoder = crate::video::Encoder::requested();
+                        let codec_impl = if encoder == crate::video::Encoder::Nvenc { crate::capability::CODEC_IMPL_NVENC } else { 5 };
+                        let payload = crate::capability::device_capability(client, ice, 0, crate::video::display_fps() as i32, codec_impl,
+                            hevc, crate::video::full_chroma_available());
                         if let Err(e) = sig.emit_event(crate::capability::FORWARD_SETTING_EVENT, payload).await {
                             log::error!("Device capability notification failed: {}", e);
+                        }
+                        let capture_impl = match crate::desktop_backend::detect() {
+                            Ok(crate::desktop_backend::DesktopBackend::Portal) => "PipeWire",
+                            Ok(crate::desktop_backend::DesktopBackend::Wayland) => "Wayland",
+                            _ => "X11",
+                        };
+                        let encoder_impl = match encoder {
+                            crate::video::Encoder::Nvenc => "NVIDIA NVENC",
+                            crate::video::Encoder::Vaapi => "VAAPI",
+                            crate::video::Encoder::Cpu => "Software",
+                        };
+                        if let Err(e) = sig.emit_event(crate::capability::FORWARD_SETTING_EVENT,
+                            crate::capability::sender_para_info(client, ice, capture_impl, encoder_impl)).await {
+                            log::error!("Sender parameter notification failed: {}", e);
                         }
                         if let Some(control) = ctx.app_control_id.as_ref().and_then(|v| v.as_str()) {
                             if let Err(e) = sig.emit_event(crate::capability::ICE_FINISHED_EVENT,

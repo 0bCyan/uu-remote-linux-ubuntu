@@ -27,21 +27,49 @@ pub fn h264_device_capability(
     fps: i32,
     codec_impl: i32,
 ) -> Value {
-    device_capability(client_id, ice_id, display_id, fps, codec_impl, false)
+    device_capability(client_id, ice_id, display_id, fps, codec_impl, false, false)
 }
 
-pub fn device_capability(client_id: &str, ice_id: &str, display_id: i32, fps: i32, codec_impl: i32, hevc: bool) -> Value {
-    let mut codecs = vec![json!({"video_codec": VIDEO_CODEC_H264, "chroma_sampling": 1,
-        "codec_impl": codec_impl, "bit_depth": 8})];
-    // Official VideoCodecCapability::SerializeJson uses the same fields for CodecType H265=2.
-    if hevc { codecs.push(json!({"video_codec": 2, "chroma_sampling": 1, "codec_impl": codec_impl, "bit_depth": 8})); }
+/// Shape of the official Windows host's `forward_setting` (observed from a live 4.37 host):
+/// `{client_id, data: {device_capability: {display_info, ice_id, video_codec_capability}, type}}`.
+/// The payload sits under `data.device_capability` with `type` beside it. The earlier flat shape
+/// (`type` at the top, fields directly in `data`) was not recognised by the iPhone client, which
+/// then kept quality and chroma locked at their defaults (#49). Only 8-bit and the chroma formats
+/// the encoder really produces are listed; the first entry carries the maximum size as officially.
+pub fn device_capability(client_id: &str, ice_id: &str, display_id: i32, fps: i32, codec_impl: i32, hevc: bool, full_chroma: bool) -> Value {
+    let mut codecs = Vec::new();
+    for codec in [VIDEO_CODEC_H264].into_iter().chain(hevc.then_some(2)) {
+        for chroma in [1].into_iter().chain(full_chroma.then_some(3)) {
+            let (width, height) = if codecs.is_empty() { (3840, 2160) } else { (0, 0) };
+            codecs.push(json!({"video_codec": codec, "chroma_sampling": chroma, "codec_impl": codec_impl,
+                "bit_depth": 8, "width": width, "height": height}));
+        }
+    }
     json!({
         "client_id": client_id,
-        "type": "device_capability",
         "data": {
-            "display_info": [{"id": display_id, "fps": fps, "type": 0, "hdr": 0}],
-            "video_codec_capability": codecs,
-            "ice_id": ice_id
+            "device_capability": {
+                "display_info": [{"id": display_id, "fps": fps, "type": 0, "hdr": -1}],
+                "video_codec_capability": codecs,
+                "ice_id": ice_id
+            },
+            "type": "device_capability"
+        }
+    })
+}
+
+/// Official `sender_para_info` (capture and encoder names; the Windows host sends "DXGI" /
+/// "NVIDIA NVENC") for the single video track.
+pub fn sender_para_info(client_id: &str, ice_id: &str, capture_impl: &str, encoder_impl: &str) -> Value {
+    json!({
+        "client_id": client_id,
+        "data": {
+            "sender_para_info": {
+                "capture_impl": capture_impl, "encoder_impl": encoder_impl, "ice_id": ice_id,
+                "sender_media_infos": [{"capture_impl": capture_impl, "encoder_impl": encoder_impl, "video_track_index": 0}],
+                "video_track_index": 0
+            },
+            "type": "sender_para_info"
         }
     })
 }
@@ -51,12 +79,20 @@ mod tests {
     use super::*;
 
     #[test]
-    fn hevc_capability_uses_official_codec_enum_and_420_only() {
-        let payload = device_capability("client-example", "ice-example", 0, 60, 5, true);
-        assert_eq!(payload["data"]["video_codec_capability"], json!([
-            {"video_codec":1,"chroma_sampling":1,"codec_impl":5,"bit_depth":8},
-            {"video_codec":2,"chroma_sampling":1,"codec_impl":5,"bit_depth":8}]));
-        assert_eq!(device_capability("c", "i", 0, 60, 5, false)["data"]["video_codec_capability"].as_array().unwrap().len(), 1);
+    fn capability_uses_the_official_nested_shape_and_real_formats() {
+        let payload = device_capability("client-example", "ice-example", 0, 60, 5, true, true);
+        assert_eq!(payload["data"]["type"], "device_capability");
+        assert!(payload.get("type").is_none());
+        let caps = &payload["data"]["device_capability"]["video_codec_capability"];
+        assert_eq!(caps.as_array().unwrap().len(), 4);
+        assert_eq!(caps[0], json!({"video_codec":1,"chroma_sampling":1,"codec_impl":5,"bit_depth":8,"width":3840,"height":2160}));
+        assert_eq!(caps[3], json!({"video_codec":2,"chroma_sampling":3,"codec_impl":5,"bit_depth":8,"width":0,"height":0}));
+        assert_eq!(payload["data"]["device_capability"]["display_info"][0]["hdr"], -1);
+        let h264_420 = device_capability("c", "i", 0, 60, 5, false, false);
+        assert_eq!(h264_420["data"]["device_capability"]["video_codec_capability"].as_array().unwrap().len(), 1);
+        let sender = sender_para_info("c", "i", "X11", "NVIDIA NVENC");
+        assert_eq!(sender["data"]["type"], "sender_para_info");
+        assert_eq!(sender["data"]["sender_para_info"]["sender_media_infos"][0]["encoder_impl"], "NVIDIA NVENC");
     }
 
     #[test]
@@ -71,15 +107,15 @@ mod tests {
     #[test]
     fn device_capability_uses_object_data_and_string_ice_id() {
         let payload = h264_device_capability("client-example", "ice-example", 11, 60, 0);
-        assert_eq!(payload["type"], "device_capability");
-        assert!(payload["data"].is_object());
-        assert_eq!(payload["data"]["ice_id"], "ice-example");
-        let display = &payload["data"]["display_info"][0];
+        let capability = &payload["data"]["device_capability"];
+        assert!(capability.is_object());
+        assert_eq!(capability["ice_id"], "ice-example");
+        let display = &capability["display_info"][0];
         assert_eq!(display.as_object().unwrap().len(), 4);
         assert_eq!(display["id"], 11);
         assert_eq!(display["fps"], 60);
-        let codec = &payload["data"]["video_codec_capability"][0];
-        assert_eq!(codec.as_object().unwrap().len(), 4);
+        let codec = &capability["video_codec_capability"][0];
+        assert_eq!(codec.as_object().unwrap().len(), 6);
         assert_eq!(codec["video_codec"], 1);
         assert_eq!(codec["codec_impl"], 0);
         assert_eq!(codec["bit_depth"], 8);
