@@ -80,7 +80,7 @@ The GNOME Wayland Portal/EIS path has been checked for video and mouse/keyboard 
 real hardware, please [open an issue](../../issues) with your distribution, desktop, GPU and the relevant lines from
 `journalctl --user -u uuremote-native.service`.
 
-Wayland limits: single screen, fixed resolution. The native Hyprland backend now pipelines two shm screencopy buffers and passes the viewer's requested fps to both capture pacing and the encoder. Actual fps remains limited by the compositor, rendering and readback (the old serial path measured about 16–22 fps at 2560x1600; the pipeline is VM-measured only, not a hardware guarantee). The portal backend does not support dynamic resolution; see below for GNOME wake and lock recovery; the clipboard syncs while the viewer's remote window has focus. On the first connection the desktop asks for "Remote Desktop / Screen Sharing"
+Wayland limits: captures one screen by default; Hyprland can enable monitor switching as described below. Resolution is fixed. The native Hyprland backend now pipelines two shm screencopy buffers and passes the viewer's requested fps to both capture pacing and the encoder. Actual fps remains limited by the compositor, rendering and readback (the old serial path measured about 16–22 fps at 2560x1600; the pipeline is VM-measured only, not a hardware guarantee). The portal backend does not support dynamic resolution; see below for GNOME wake and lock recovery; the clipboard syncs while the viewer's remote window has focus. On the first connection the desktop asks for "Remote Desktop / Screen Sharing"
 permission; the permission is remembered once granted.
 
 Scaled GNOME desktops using native Portal input use EIS on the same authorized session when `ConnectToEIS` and a screen `mapping_id` are available. Each axis is mapped using the matched region and actual frame dimensions, with no fixed resolution or scale factor. This avoids scaled-coordinate rejection by `NotifyPointerMotionAbsolute`. Portal builds require libei >= 1.1. Missing EIS support retains the legacy input path and its existing scaling limitations; other initialization failures are reported and trigger session recovery. After a successful EIS connection, all input uses EIS. Capture alone and uinput do not initialize EIS; missing optional logical dimensions do not block capture. Keyboard input uses the existing Windows VK to evdev mapping. Recovery keeps the encoder frame dimensions fixed but accepts logical-size changes after scaling. On GNOME, a display-change notification enables earlier recovery when previously streaming Portal capture remains paused without a valid format for a 200 ms grace after both conditions are present. Healthy renegotiation cancels the early check; repeated notifications do not postpone the same interruption. The five-second fallback remains without a related notification. Static video and valid-format pauses do not trigger recovery. Tested while connected on Ubuntu 26.04, GNOME Wayland, one 3840x2160 display: 200% -> 166.67% -> 200%, with continuously updating video and full-screen pointer control after recovery. Switching briefly freezes and goes black before recovering; five seconds is the fallback threshold, not total recovery time. See [#35](../../pull/35) for timing measurements and validation limits. Lock recovery still needs hardware acceptance testing; multi-monitor support, live resolution changes, and rotation/reflection transforms are outside this fix's scope. Capture settings remain at protocol version 4: advertised resolutions use pixel coordinates and DPR 1; Portal logical dimensions are used only for local input mapping.
@@ -103,11 +103,19 @@ failure falls back to SHM. The virgl VM verified fallback only: successful impor
 mapping and hardware acceleration remain unverified. This is not zero-copy VAAPI;
 `UU_VIDEO_ENCODER=vaapi` still uploads CPU frames through FFmpeg.
 
+### Hyprland monitor switching (experimental)
+
+Native Wayland absolute pointer motion now targets the captured output by default, fixing multi-monitor click offsets. uinput may still handle keyboard, buttons and relative motion.
+
+Set `UU_WAYLAND_MULTISCREEN=1` to select physical monitors from the phone client. `UU_WAYLAND_OUTPUT` chooses the initial output. Capture and absolute pointer targeting switch together across different resolutions, scales and desktop positions.
+
+Switching reuses one video track and pauses input until the new source sends a frame. Capture/encoder failure or a first-frame timeout requests restoration of the previous source. The inventory uses `hyprctl` and supports unrotated outputs; restart the host after monitor hotplug or layout changes. Phone-side switching and clicks were tested on Omarchy / Hyprland with 2560×1440 at 125% and 1920×1080 at 133.33%.
+
 ## Not implemented / not supported
 
 | Feature | Status |
 |---|---|
-| Switching between multiple monitors | In progress |
+| Switching between multiple monitors | Experimental on native Hyprland Wayland; see above |
 | True color (4:4:4) | Supported (v0.1.15): the default FFmpeg pipeline with NVENC / libx264 encodes H.264 High 4:4:4; VAAPI and `inproc-av` stay 4:2:0 and report that to the client |
 | HDR | Not implemented |
 | Super screen / virtual display | Not implemented |
@@ -301,6 +309,8 @@ Common environment variables:
 |---|---|
 | `UU_CONFIG` | Config file path (default `~/.config/uuremote/config.json`) |
 | `UU_DESKTOP_BACKEND` | `auto` / `x11` / `wayland` / `portal` / `kms` (experimental feature) / `none` (headless) |
+| `UU_WAYLAND_MULTISCREEN=1` | Enable Hyprland physical monitor switching (off by default) |
+| `UU_WAYLAND_OUTPUT` | Initial native Wayland output name, e.g. `HDMI-A-1` |
 | `UU_INPUT_BACKEND` | `auto` (default: uinput on Wayland when accessible) / `uinput` / `native` |
 | `UU_TERMINAL_SHORTCUTS=0` | Disable the Ctrl+V paste rewrite in terminal windows |
 | `UU_VIDEO_ENCODER` | `cpu`: libx264; `vaapi`: opt-in Intel/AMD; `nvenc`: force NVENC; unset: NVENC only when an NVIDIA driver is loaded, else CPU |

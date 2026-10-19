@@ -391,11 +391,14 @@ impl WebRtcSession {
             });
         }
 
+        // Settings arrive on CONTROL or TEXT; serialize both queues for this peer.
+        let settings_serial=Arc::new(Mutex::new(()));
         // 监听 DataChannel
         pc.on_data_channel(Box::new(move |d: Arc<RTCDataChannel>| {
             let label = d.label().to_string();
             log::info!("New DataChannel received: {}", label);
 
+            let peer_settings_serial=settings_serial.clone();
             let input_inst = input_clone.clone();
             let channel_input_session=input_session.clone();
             let screen = control_capture.clone();
@@ -445,7 +448,7 @@ impl WebRtcSession {
                     });
                 }
                 let (capture_tx, mut capture_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(16);
-                if label == "CONTROL_DATA_CHANNEL" {
+                if matches!(label.as_str(),"CONTROL_DATA_CHANNEL"|"TEXT_DATA_CHANNEL") {
                     let settings = channel_video_settings.clone();
                     let track = peer_video_track.clone();
                     let response_tx = outbound.clone();
@@ -453,6 +456,8 @@ impl WebRtcSession {
                     let manager = portal_desktop.clone();
                     let channel = Arc::downgrade(&d);
                     let initial_screen = screen.clone();
+                    let switch_owner=channel_input_session.clone();
+                    let settings_serial=peer_settings_serial.clone();
                     tokio::spawn(async move {
                         let mut health = tokio::time::interval(std::time::Duration::from_millis(100));
                         loop {
@@ -467,6 +472,36 @@ impl WebRtcSession {
                                     continue;
                                 }
                             };
+                            let _serial=settings_serial.lock().await;
+                            if desktop && switch_owner.as_ref().is_none_or(|owner|!owner.is_current()) {continue;}
+                            let reject=|reason:&str| {
+                                if let Some(response)=crate::capture_setting::rejected_request(&request,reason) {
+                                    let ts=std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
+                                    let _=response_tx.send(crate::initialization::envelope(sequence.fetch_add(1,std::sync::atomic::Ordering::Relaxed),ts,22,&response));
+                                }
+                            };
+                            let source_before=crate::wayland::selected();
+                            let settings_before=*settings.borrow();
+                            if desktop && !crate::wayland::outputs().is_empty() {
+                                if let Some(id)=crate::wayland::requested_output(&request) {
+                                    if crate::wayland::source(id).is_none() {reject("Unknown screen");continue;}
+                                    if id!=source_before {
+                                        let mut changed=false;
+                                        if let Some(owner)=&switch_owner {owner.with_current(|| {
+                                            owner.release_input();
+                                            match crate::wayland::select(id) {
+                                                Ok(())=>{
+                                                    let (source_id,source_generation)=crate::wayland::selection();
+                                                    settings.send_modify(|s|{s.source_id=source_id;s.source_generation=source_generation;s.output=None;});
+                                                    changed=true;
+                                                },
+                                                Err(error)=>{log::warn!("Screen switch rejected: {}",error);reject(&error);},
+                                            }
+                                        });}
+                                        if !changed {continue;}
+                                    }
+                                }
+                            }
                             let active_screen = if desktop {
                                 if let Some(manager) = &manager {
                                     loop {
@@ -492,6 +527,33 @@ impl WebRtcSession {
                             let input_size = if active_screen.init_error.is_none() {
                                 (active_screen.width, active_screen.height)
                             } else { (1920, 1080) };
+                            let input_size=crate::wayland::input_size(input_size);
+                            let source_changed=source_before!=crate::wayland::selected();
+                            if source_changed {
+                                let target=crate::wayland::selection();
+                                let deadline=tokio::time::Instant::now()+std::time::Duration::from_secs(10);
+                                while crate::wayland::selection()==target && !crate::wayland::input_ready()
+                                    && !crate::wayland::switch_failed() && tokio::time::Instant::now()<deadline {
+                                    if channel.upgrade().is_none_or(|c|c.ready_state()!=webrtc::data_channel::data_channel_state::RTCDataChannelState::Open)
+                                        || switch_owner.as_ref().is_none_or(|owner|!owner.is_current()) {return;}
+                                    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                                }
+                                if switch_owner.as_ref().is_none_or(|owner|!owner.is_current()) || crate::wayland::selection()!=target {continue;}
+                                if !crate::wayland::input_ready() {
+                                    if let Some(owner)=&switch_owner {owner.with_current(|| {
+                                        if crate::wayland::selection()==target && crate::wayland::select(source_before).is_ok() {
+                                            let (source_id,source_generation)=crate::wayland::selection();
+                                            settings.send_replace(crate::capture_setting::VideoSettings {source_id,source_generation,..settings_before});
+                                        }
+                                    });}
+                                    log::warn!("Screen switch failed; previous source requested");
+                                    reject("Screen switch failed; restoring previous screen");
+                                    continue;
+                                }
+                                let ts=std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
+                                if let Ok(message)=crate::capture_setting::screen_sources(sequence.fetch_add(1,std::sync::atomic::Ordering::Relaxed),ts,input_size,None,"Linux desktop") {let _=response_tx.send(message);}
+                                if let Ok(message)=crate::initialization::encode_capture_change(sequence.fetch_add(1,std::sync::atomic::Ordering::Relaxed),ts,0,crate::wayland::selected() as i32,"Linux desktop") {let _=response_tx.send(message);}
+                            }
                             let Ok(fields) = crate::protocol::decode_wire(&request) else { continue; };
                             use crate::protocol::WireValue;
                             let Some(rpc) = fields.iter().find_map(|f| match (f.number, &f.value) {
@@ -501,10 +563,14 @@ impl WebRtcSession {
                             let before = *settings.borrow();
                             let output_before = before.output;
                             let revision = track.revision();
-                            let Some(response) = crate::capture_setting::handle_rpc_with_codecs(
+                            let apply=|| crate::capture_setting::handle_rpc_with_codecs(
                                 &rpc_fields, &settings, input_size,
                                 track.supports(crate::capture_setting::VideoCodec::H264),
-                                track.supports(crate::capture_setting::VideoCodec::H265)) else { continue; };
+                                track.supports(crate::capture_setting::VideoCodec::H265));
+                            let response=if let Some(owner)=&switch_owner {
+                                let mut response=None;owner.with_current(||response=apply());response
+                            } else {apply()};
+                            let Some(response)=response else {continue;};
                             let codec_changed = settings.borrow().codec != before.codec;
                             if desktop && codec_changed && !track.wait_for_applied(revision, &settings).await {
                                 log::warn!("Codec switch did not produce a transmitted frame; success reply withheld");
@@ -645,7 +711,7 @@ impl WebRtcSession {
                                     .duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
                                 let message = crate::initialization::encode_capture_change(
                                     sequence.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
-                                    timestamp, 0, 0, "Linux desktop").expect("desktop capture type");
+                                    timestamp, 0, crate::wayland::selected() as i32, "Linux desktop").expect("desktop capture type");
                                 if let Err(error) = channel.send(&bytes::Bytes::from(message)).await {
                                     log::error!("CONTROL desktop selection failed: {error}");
                                     return;
@@ -733,9 +799,9 @@ impl WebRtcSession {
                             } else { crate::system_metrics::Permission::Reject };
                             // Without a desktop (headless/portal before consent) the port-mapping tool still waits
                             // for ScreenSources/CaptureChange and aborts otherwise: tool peers get a nominal screen.
-                            let screen_size=if screen.init_error.is_none() { (screen.width, screen.height) } else { (1920, 1080) };
+                            let screen_size=crate::wayland::input_size(if screen.init_error.is_none() { (screen.width, screen.height) } else { (1920, 1080) });
                             let messages = [
-                                (8, crate::initialization::encode_capture_change(next_seq(), timestamp, 0, 0, "Linux desktop")),
+                                (8, crate::initialization::encode_capture_change(next_seq(), timestamp, 0, crate::wayland::selected() as i32, "Linux desktop")),
                                 (13, Ok(crate::initialization::envelope(next_seq(), timestamp, 13, &init_actions.metrics_payload(desktop_sound, desktop_permission)))),
                                 (26, Ok(crate::initialization::envelope(next_seq(), timestamp, 26,
                                     &crate::system_metrics::remote_download_path(&home)))),
@@ -822,11 +888,12 @@ impl WebRtcSession {
                     let capture_requests = capture_tx.clone();
 
                     Box::pin(async move {
-                        let input_size = (screen.width, screen.height);
+                        let input_size = crate::wayland::input_size((screen.width, screen.height));
                         if let Some(term) = &terminal_worker {
                             if crate::terminal::is_frame(&msg.data) { term.handle(&msg.data); return; }
                         }
-                        if channel_name == "CONTROL_DATA_CHANNEL" && is_capture_setting_message(&msg.data) {
+                        if matches!(channel_name.as_str(),"CONTROL_DATA_CHANNEL"|"TEXT_DATA_CHANNEL")
+                            && (is_capture_setting_message(&msg.data) || (!crate::wayland::outputs().is_empty() && crate::wayland::requested_output(&msg.data).is_some())) {
                             // Back-pressure like the old inline handler instead of dropping the latest setting.
                             if capture_requests.send(msg.data.to_vec()).await.is_err() {
                                 log::warn!("Capture setting queue closed; request dropped");
@@ -1070,7 +1137,7 @@ impl WebRtcSession {
                                         }
                                     }
                                     if let Ok(crate::control_protocol::ControlMessage::Input(crate::control_protocol::ControlInput::TextInput {text})) = crate::control_protocol::decode_control(&msg.data) {
-                                        if let Some(session)=message_input_session.as_ref() { session.with_input(|| input_worker.text_input(&text)); }
+                                        if let Some(session)=message_input_session.as_ref() { session.with_input(|| {if crate::wayland::input_ready() {input_worker.text_input(&text);}}); }
                                     }
                                 }
                                 if channel_name.contains("CONTROL") {
@@ -1078,6 +1145,7 @@ impl WebRtcSession {
                                         Ok(crate::control_protocol::ControlMessage::Input(event)) => {
                                             if screen.backend == crate::desktop_backend::DesktopBackend::Portal
                                                 && (screen.init_error.is_some() || !desktop_ready || *lock_for_message.borrow() != Some(false)) { return; }
+                                            if !crate::wayland::input_ready() {return;}
                                             use crate::control_protocol::ControlInput;
                                             // Separate receipt budgets keep motion floods from hiding clicks.
                                             static RECEIPTS: [std::sync::atomic::AtomicUsize; 3] = [const { std::sync::atomic::AtomicUsize::new(0) }; 3];
@@ -1090,8 +1158,9 @@ impl WebRtcSession {
                                                 log::info!("CONTROL input received: kind={}", kind);
                                             }
                                             if let Some(session)=message_input_session.as_ref() {session.with_input(|| {
+                                            if !crate::wayland::input_ready() {return;}
                                             match &event {
-                                                ControlInput::MouseAbsolute {x,y} => input_worker.mouse_absolute_normalized(*x,*y,input_size),
+                                                ControlInput::MouseAbsolute {x,y} => input_worker.mouse_absolute_normalized(*x,*y,crate::wayland::input_size(input_size)),
                                                 ControlInput::MouseRelative {dx,dy} => input_worker.mouse_relative(*dx,*dy),
                                                 ControlInput::MouseScroll {dx,dy} => input_worker.mouse_scroll(*dx,*dy),
                                                 ControlInput::Keyboard {key, pressed} => input_worker.windows_key_event(*key, *pressed),

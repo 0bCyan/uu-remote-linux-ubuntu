@@ -77,8 +77,8 @@ pub struct Screen<'a> {
 }
 impl Screen<'_> {
     fn encode(&self) -> Result<Vec<u8>, String> {
-        if self.id < 0 || self.fps <= 0 || self.video_track_index < 0 {
-            return Err("Screen id/track must be nonnegative and fps positive".into());
+        if self.id < 0 || self.fps <= 0 || self.video_track_index < -1 {
+            return Err("Screen id must be nonnegative, track >= -1 and fps positive".into());
         }
         if !self.dpr.is_finite() || self.dpr <= 0.0 {
             return Err("Screen dpr must be positive and finite".into());
@@ -118,7 +118,7 @@ pub fn encode_screen_sources(seq: u64, timestamp: u64, screens: &[Screen<'_>], c
     let mut tracks = std::collections::HashSet::new();
     let mut payload = Vec::new();
     for screen in screens {
-        if !ids.insert(screen.id) || !tracks.insert(screen.video_track_index) {
+        if !ids.insert(screen.id) || (screen.video_track_index >= 0 && !tracks.insert(screen.video_track_index)) {
             return Err("Screen ids and video track indices must be unique".into());
         }
         bytes(1, &screen.encode()?, &mut payload);
@@ -293,5 +293,16 @@ mod tests {
         assert_eq!(number(&p, 1).unwrap_or(0), 0);
         assert_eq!(number(&p, 2), Some(1));
         assert!(encode_capture_change(1, 2, 4, 1, "").is_err());
+    }
+}
+
+#[cfg(test)]
+mod inactive_track_tests {
+    use super::*;
+    #[test]
+    fn multiple_inactive_screens_share_minus_one_but_active_track_is_unique() {
+        let screen=|id,track| Screen {id,fps:60,resolution:WinRect {left:0,top:0,width:1920,height:1080,pixel_width:1920,pixel_height:1080},primary:id==0,dpr:1.0,display_name:"test",video_track_index:track,screen_type:0,builtin_screen_type:0,scaled:&[],current:None};
+        assert!(encode_screen_sources(1,2,&[screen(0,0),screen(1,-1),screen(2,-1)],0).is_ok());
+        assert!(encode_screen_sources(1,2,&[screen(0,0),screen(1,0)],0).is_err());
     }
 }

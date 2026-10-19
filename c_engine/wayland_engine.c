@@ -571,6 +571,33 @@ end:
     if(result!=0) reset();
     pthread_mutex_unlock(&lock); return result;
 }
+/* Switch the pointer binding and main-process capture atomically; encoder subprocesses
+   select their own output via UU_WAYLAND_OUTPUT. Keyboard identity stays unchanged. */
+int uu_wl_select_output(const char *name,uint32_t expected_w,uint32_t expected_h) {
+    pthread_mutex_lock(&lock); int result=-1;
+    if(!initialized || !name || sync_display()!=0) goto end;
+    unsigned target;
+    for(target=0;target<output_count;target++) if(!strcmp(outputs[target].name,name)) break;
+    if(target==output_count || outputs[target].transform!=WL_OUTPUT_TRANSFORM_NORMAL) goto end;
+    uint32_t w=outputs[target].width,h=outputs[target].height;
+    if(w!=expected_w || h!=expected_h || !w || !h || w>16384 || h>16384 || (uint64_t)w*h*4>256*1024*1024) goto end;
+    struct zwlr_virtual_pointer_v1 *next=zwlr_virtual_pointer_manager_v1_create_virtual_pointer_with_output(pointer_manager,seat,outputs[target].handle);
+    if(!next) goto end;
+    if(sync_display()!=0) {zwlr_virtual_pointer_v1_destroy(next);goto end;}
+    for(unsigned i=0;i<2;i++) { frame_clear(&frames[i]); dma_clear(&frames[i]); shm_clear(&frames[i]); }
+    pending=0;
+    if(pointer) zwlr_virtual_pointer_v1_destroy(pointer);
+    pointer=next; selected=target; width=w; height=h;
+    if(power) { zwlr_output_power_v1_destroy(power); power=NULL; }
+    power_failed=0;
+    if(power_manager) {
+        power=zwlr_output_power_manager_v1_get_output_power(power_manager,outputs[selected].handle);
+        zwlr_output_power_v1_add_listener(power,&power_listener,NULL);
+    }
+    result=0;
+end:
+    pthread_mutex_unlock(&lock); return result;
+}
 int uu_wl_wake(void) {
     pthread_mutex_lock(&lock); int result=-1;
     /* Output power management is optional; missing it must not block screencopy. */

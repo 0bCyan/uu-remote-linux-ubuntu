@@ -40,6 +40,8 @@ impl VideoCodec {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct VideoSettings {
+    pub source_id: usize,
+    pub source_generation: u64,
     pub fps: u32,
     pub codec: VideoCodec,
     pub quality: u64,
@@ -52,7 +54,7 @@ pub struct VideoSettings {
 }
 
 impl Default for VideoSettings {
-    fn default() -> Self { Self { codec: VideoCodec::H264, fps: 60, quality: QUALITY_AUTO, custom_mbps: 0, output: None, chroma: CHROMA_420 } }
+    fn default() -> Self { let (source_id,source_generation)=crate::wayland::selection(); Self { source_id,source_generation, codec: VideoCodec::H264, fps: 60, quality: QUALITY_AUTO, custom_mbps: 0, output: None, chroma: CHROMA_420 } }
 }
 
 /// Selectable smaller stream sizes with the desktop's aspect ratio (even dimensions).
@@ -180,9 +182,37 @@ fn apply_rpc(rpc: &[WireField], settings: &watch::Sender<VideoSettings>, native:
     Some(out)
 }
 
+/// CaptureSettingResponse.errors (Error fields 1 code / 2 message, rpc_main.proto).
+pub fn rejected_request(data:&[u8],reason:&str)->Option<Vec<u8>> {
+    let outer=decode_wire(data).ok()?;
+    let rpc=decode_wire(message(&outer,21)?).ok()?;
+    message(&rpc,2)?;
+    let mut error=Vec::new();
+    put_varint(1,(-1i64) as u64,&mut error);
+    put_bytes(2,reason.as_bytes(),&mut error);
+    let mut errors=Vec::new();put_bytes(1,&error,&mut errors);
+    let mut response=Vec::new();
+    put_bytes(1,message(&rpc,1).unwrap_or(&[]),&mut response);
+    put_bytes(2,&errors,&mut response);
+    Some(response)
+}
+
 /// Message 7 ScreenSources in pixels for capture-setting v4: native, choices, current size.
 pub fn screen_sources(seq: u64, timestamp: u64, native: (u32, u32), output: Option<(u32, u32)>, name: &str) -> Result<Vec<u8>, String> {
     use crate::initialization::{Screen, WinRect};
+    let outputs=crate::wayland::outputs();
+    if !outputs.is_empty() {
+        let current=crate::wayland::selected();
+        let choices:Vec<Vec<(i32,i32)>>=outputs.iter().map(|m|scaled_sizes((m.width,m.height)).into_iter().map(|(w,h)|(w as i32,h as i32)).collect()).collect();
+        let screens:Vec<Screen<'_>>=outputs.iter().enumerate().map(|(id,m)| Screen {
+            id:id as i32, fps:m.fps,
+            resolution:WinRect {left:0,top:0,width:m.width as i32,height:m.height as i32,pixel_width:m.width as i32,pixel_height:m.height as i32},
+            primary:id==0,dpr:1.0,display_name:&m.name,video_track_index:if id==current {0} else {-1},
+            screen_type:0,builtin_screen_type:if m.name.starts_with("eDP") {1} else {2},scaled:&choices[id],
+            current:if id==current {output.map(|(w,h)|(w as i32,h as i32))} else {None},
+        }).collect();
+        return crate::initialization::encode_screen_sources(seq,timestamp,&screens,current as i32);
+    }
     let (w, h) = (native.0 as i32, native.1 as i32);
     let scaled: Vec<(i32, i32)> = scaled_sizes(native).into_iter().map(|(w, h)| (w as i32, h as i32)).collect();
     // DPI_SCALE starts at version 5; the observed v4 request uses fields 5/6 as pixels.
@@ -248,7 +278,7 @@ mod tests {
         put_varint(18, 30, &mut body);
         let request = rpc(77, 2, &body);
         let response = handle_rpc(&decode_wire(&request).unwrap(), &tx, (1920, 1080)).unwrap();
-        assert_eq!(*rx.borrow(), VideoSettings { codec: VideoCodec::H264, fps: 30, quality: QUALITY_GENERAL, custom_mbps: 0, output: None, chroma: CHROMA_420 });
+        assert_eq!(*rx.borrow(), VideoSettings { source_id:0,source_generation:0, codec: VideoCodec::H264, fps: 30, quality: QUALITY_GENERAL, custom_mbps: 0, output: None, chroma: CHROMA_420 });
         assert_eq!(rx.borrow().max_kbps(), Some(2_000));
         let fields = decode_wire(&response).unwrap();
         assert_eq!(message(&fields, 1), Some(&[8u8, 77][..]));
@@ -468,5 +498,24 @@ mod codec_tests {
         handle_rpc_with_codecs(&rpc(1), &tx, (1920,1080), true, true).unwrap();
         assert_eq!(rx.borrow().codec, VideoCodec::H265);
         assert_eq!(preferred_codec(true, false), VideoCodec::H264);
+    }
+}
+
+#[cfg(test)]
+mod screen_error_tests {
+    use super::*;
+    #[test]
+    fn failed_switch_returns_correlated_error_not_success() {
+        let header=[10,4,b't',b'e',b's',b't'];
+        let mut rpc=Vec::new();put_bytes(1,&header,&mut rpc);put_bytes(2,&[32,99],&mut rpc);
+        let request=crate::initialization::envelope(1,2,21,&rpc);
+        let response=rejected_request(&request,"Unknown screen").unwrap();
+        let fields=decode_wire(&response).unwrap();
+        assert_eq!(message(&fields,1),Some(header.as_slice()));
+        let result=decode_wire(message(&fields,2).unwrap()).unwrap();
+        let error=decode_wire(message(&result,1).unwrap()).unwrap();
+        assert_eq!(number(&error,1),Some(u64::MAX));
+        assert_eq!(message(&error,2),Some(b"Unknown screen".as_slice()));
+        assert!(rejected_request(b"invalid","failure").is_none());
     }
 }

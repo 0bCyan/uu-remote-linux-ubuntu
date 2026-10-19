@@ -160,11 +160,19 @@ fn is_independent_frame(bytes: &[u8]) -> bool { is_independent_frame_for(bytes, 
 
 #[derive(Debug)]
 struct CompleteFrame {
+    source_id: usize,
+    source_generation: u64,
     codec: VideoCodec,
     sequence: u64,
     completed_at: Instant,
     data: Vec<u8>,
     _permit: Option<OwnedSemaphorePermit>,
+}
+
+impl CompleteFrame {
+    fn matches(&self,settings:&VideoSettings)->bool {
+        self.codec==settings.codec && self.source_id==settings.source_id && self.source_generation==settings.source_generation
+    }
 }
 
 const RTP_CLOCK: u64 = 90_000;
@@ -527,7 +535,7 @@ async fn read_inprocess(
     let mut gate = DependencyGate::default();
     while let Some(unit) = units.recv().await {
         let sequence = sequence.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
-        gate.submit(&latest, Arc::new(CompleteFrame { codec, sequence, completed_at: unit.completed_at, data: unit.data, _permit: Some(unit.permit) }));
+        gate.submit(&latest, Arc::new(CompleteFrame { source_generation: 0, source_id: 0, codec, sequence, completed_at: unit.completed_at, data: unit.data, _permit: Some(unit.permit) }));
         if latest.is_closed() { break; }
     }
     // Dropping the receiver also unblocks the encoder if it is waiting to send.
@@ -574,6 +582,8 @@ async fn read_encoder_with(
     size: (u32,u32),display:String,portal:Option<Arc<crate::portal::PortalSession>>,latest:mpsc::Sender<Arc<CompleteFrame>>,encoder:Encoder,sequence:Arc<std::sync::atomic::AtomicU64>,
     settings: VideoSettings, #[cfg_attr(not(feature = "inproc-av"), allow(unused_variables))] idr: Arc<AtomicBool>, budget: Arc<Semaphore>,
 )->Result<(),String>{
+    let selected_output=if display.starts_with("wayland:") {crate::wayland::source(settings.source_id)} else {None};
+    let size=selected_output.map_or(size,|s|(s.width,s.height));
     let kms=display.starts_with("kms:");
     let wayland=kms || display.starts_with("wayland:");
     let (permits_tx,mut permits_rx)=mpsc::channel::<OwnedSemaphorePermit>(4);
@@ -637,7 +647,9 @@ async fn read_encoder_with(
         let executable=std::path::PathBuf::from("/proc/self/exe");
         #[cfg(not(target_os="linux"))]
         let executable=std::env::current_exe().map_err(|e|format!("Capture executable: {e}"))?;
-        let mut capture=wayland_capture_command(&executable,settings.fps)
+        let mut capture_command=wayland_capture_command(&executable,settings.fps);
+        if let Some(output)=selected_output {capture_command.env("UU_WAYLAND_OUTPUT",&output.name);}
+        let mut capture=capture_command
             .env("UU_WAYLAND_DEMAND","1")
             .kill_on_drop(true).stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::inherit())
             .spawn().map_err(|e|format!("Start Wayland capture: {e}"))?;
@@ -735,7 +747,7 @@ async fn read_encoder_with(
             let frame: Vec<u8> = pending.drain(..next).collect();
             let sequence = sequence.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
             let permit=if wayland {Some(permits_rx.recv().await.ok_or("Capture producer stopped")?)} else {None};
-            gate.submit(&latest, Arc::new(CompleteFrame {
+            gate.submit(&latest, Arc::new(CompleteFrame { source_generation: settings.source_generation, source_id: settings.source_id,
                 codec: settings.codec, sequence, completed_at: Instant::now(), data: frame, _permit: permit,
             }));
             if latest.is_closed() { return Ok(()); }
@@ -921,7 +933,7 @@ pub async fn stream_desktop(pc: Arc<RTCPeerConnection>, track: Arc<crate::video_
     'stream: loop {
         let next = *settings.borrow_and_update();
         if next != current || send_interrupted {
-            let discard = next.codec != current.codec || send_interrupted;
+            let discard = next.codec != current.codec || next.source_generation != current.source_generation || next.source_id != current.source_id || send_interrupted;
             current = next;
             timeline.fps = u64::from(next.fps);
             if discard {
@@ -945,6 +957,19 @@ pub async fn stream_desktop(pc: Arc<RTCPeerConnection>, track: Arc<crate::video_
                     reader.0 = tokio::spawn(read_encoder(size, display.clone(), portal.clone(), latest.clone(), current, sequence.clone(), idr.clone(), budget.clone()));
                     continue;
                 }
+                if result.is_err() && !crate::wayland::outputs().is_empty() && !crate::wayland::input_ready() {
+                    // Leave the stream task alive so the request worker can roll back
+                    // a failed capture/encoder and restart the previous source.
+                    crate::wayland::failed(current.source_id,current.source_generation);
+                    loop {
+                        tokio::select! {
+                            changed=settings.changed()=>{if changed.is_err(){return result;}break;},
+                            _=health.tick()=>{if transport_closed(&pc){return Ok(());}},
+                        }
+                    }
+                    send_interrupted=true;
+                    continue;
+                }
                 return result;
             },
             _ = health.tick() => { if transport_closed(&pc) { return Ok(()); } },
@@ -955,7 +980,7 @@ pub async fn stream_desktop(pc: Arc<RTCPeerConnection>, track: Arc<crate::video_
             frame = receiver.recv() => {
                 // A closed queue means the reader ended; its JoinHandle carries the reason.
                 let Some(frame) = frame else { return (&mut reader.0).await.map_err(|e| format!("Encoder reader task: {e}"))?; };
-                if frame.codec != current.codec { continue; }
+                if !frame.matches(&current) { continue; }
                 let duration = timeline.duration_after(frame.completed_at);
                 if let Some(last) = previous { skipped += frame.sequence.saturating_sub(last + 1); }
                 max_age_ms = max_age_ms.max(frame.completed_at.elapsed().as_millis());
@@ -964,6 +989,7 @@ pub async fn stream_desktop(pc: Arc<RTCPeerConnection>, track: Arc<crate::video_
                     data: frame.data.clone().into(), duration, ..Default::default()
                 };
                 let extensions = [crate::rtp_metadata::capture_index(0), crate::rtp_metadata::new_frame()];
+                let sent_before=track.revision();
                 let send = track.write_sample_with_extensions(frame.codec, &sample, &extensions);
                 let send_started=Instant::now();
                 tokio::pin!(send);
@@ -976,6 +1002,9 @@ pub async fn stream_desktop(pc: Arc<RTCPeerConnection>, track: Arc<crate::video_
                             else if *settings.borrow()!=current { send_interrupted=true; continue 'stream; }
                         },
                     }
+                }
+                if !crate::wayland::outputs().is_empty() && track.revision()>sent_before {
+                    crate::wayland::presented(current.source_id,current.source_generation);
                 }
                 previous = Some(frame.sequence);
                 max_send_ms=max_send_ms.max(send_started.elapsed().as_millis());
@@ -1082,7 +1111,7 @@ mod tests {
         let mut gate=DependencyGate::default();
         for sequence in 1..=2 {
             let permit=budget.clone().acquire_owned().await.unwrap();
-            gate.submit(&tx,Arc::new(CompleteFrame {codec:VideoCodec::H264,sequence,completed_at:Instant::now(),
+            gate.submit(&tx,Arc::new(CompleteFrame { source_generation: 0, source_id: 0,codec:VideoCodec::H264,sequence,completed_at:Instant::now(),
                 data:vec![0,0,1,5,42],_permit:Some(permit)}));
         }
         let sending=rx.recv().await.unwrap();
@@ -1216,7 +1245,7 @@ mod tests {
         let (tx, mut rx) = mpsc::channel(4);
         let old_tx = tx.clone();
         let (started_tx, started_rx) = tokio::sync::oneshot::channel();
-        let frame = |sequence, idr| Arc::new(CompleteFrame { _permit: None,
+        let frame = |sequence, idr| Arc::new(CompleteFrame { source_generation: 0, source_id: 0, _permit: None,
             sequence, codec: VideoCodec::H264, completed_at: Instant::now(),
             data: vec![0, 0, 1, 9, 240, 0, 0, 1, if idr { 5 } else { 1 }, 42],
         });
@@ -1311,7 +1340,7 @@ mod tests {
     async fn bounded_queue_never_sends_broken_prediction_chain_after_overload(){
         let(tx,mut rx)=mpsc::channel(1);
         let mut gate=DependencyGate::default();
-        let frame=|sequence,idr|Arc::new(CompleteFrame{_permit:None,sequence,codec:VideoCodec::H264,completed_at:Instant::now(),data:vec![0,0,1,9,240,0,0,1,if idr{5}else{1},42]});
+        let frame=|sequence,idr|Arc::new(CompleteFrame{source_generation:0,source_id:0,_permit:None,sequence,codec:VideoCodec::H264,completed_at:Instant::now(),data:vec![0,0,1,9,240,0,0,1,if idr{5}else{1},42]});
         gate.submit(&tx,frame(1,false));assert!(rx.try_recv().is_err()); // no IDR yet
         gate.submit(&tx,frame(2,true));
         gate.submit(&tx,frame(3,false)); // queue full: P3 lost
@@ -1365,7 +1394,7 @@ mod tests {
     async fn hevc_dependency_gate_recovers_only_at_irap_after_overflow() {
         let (tx, mut rx) = mpsc::channel(1);
         let mut gate = DependencyGate::default();
-        let frame = |sequence, irap| Arc::new(CompleteFrame { _permit: None, codec: VideoCodec::H265,
+        let frame = |sequence, irap| Arc::new(CompleteFrame { source_generation: 0, source_id: 0, _permit: None, codec: VideoCodec::H265,
             sequence, completed_at: Instant::now(), data: vec![0,0,1,if irap { 38 } else { 2 },1,42] });
         gate.submit(&tx, frame(1, false));
         assert!(rx.try_recv().is_err());
@@ -1407,3 +1436,17 @@ mod tests {
     }
 }
 
+
+#[cfg(test)]
+mod screen_frame_tests {
+    use super::*;
+    #[test]
+    fn source_restart_rejects_queued_frames_even_with_same_screen_and_codec() {
+        let frame=CompleteFrame {source_id:0,source_generation:7,codec:VideoCodec::H264,sequence:1,completed_at:Instant::now(),data:vec![],_permit:None};
+        let mut settings=VideoSettings {source_id:0,source_generation:7,..Default::default()};
+        assert!(frame.matches(&settings));
+        settings.source_generation=9;assert!(!frame.matches(&settings));
+        settings.source_generation=7;settings.source_id=1;assert!(!frame.matches(&settings));
+        settings.source_id=0;settings.codec=VideoCodec::H265;assert!(!frame.matches(&settings));
+    }
+}

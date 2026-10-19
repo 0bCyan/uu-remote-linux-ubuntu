@@ -325,6 +325,12 @@ impl InputInjector {
         }
     }
     fn inject_move(&self,x:i32,y:i32,relative:bool)->i32 {
+        // uinput ABS axes span the compositor's whole desktop. A captured output
+        // uses its own pixel space; bind absolute motion to that Wayland output,
+        // including when uinput remains in use for keyboard/buttons/relative input.
+        if !relative && self.backend==crate::desktop_backend::DesktopBackend::Wayland {
+            return crate::wayland::move_pointer(x,y,false);
+        }
         if let Some(uinput)=&self.uinput {
             if relative { return Self::uinput_result(uinput.move_relative(x,y)); }
             let (w,h)=*self.screen.lock().unwrap();
@@ -637,5 +643,57 @@ mod lifecycle_tests {
         finish.send(()).unwrap();event.join().unwrap();teardown.join().unwrap();
         assert!(input.held.lock().unwrap().buttons.is_empty());
         session.with_input(||panic!("late event after disconnect"));
+    }
+}
+
+#[cfg(all(test,target_os="linux",feature="wayland"))]
+mod output_pointer_tests {
+    use super::*;
+    #[test]
+    #[ignore="requires unlocked Hyprland, UU_WAYLAND_MULTISCREEN=1 and accessible uinput; moves pointer only"]
+    fn absolute_pointer_stays_on_capture_output_with_uinput_enabled() {
+        fn cursor()->serde_json::Value {
+            let output=std::process::Command::new("hyprctl").args(["cursorpos","-j"]).output().unwrap();
+            assert!(output.status.success());serde_json::from_slice(&output.stdout).unwrap()
+        }
+        struct Restore(serde_json::Value);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                let _=std::process::Command::new("hyprctl").args(["dispatch","movecursor",&self.0["x"].to_string(),&self.0["y"].to_string()]).output();
+            }
+        }
+        let _restore=Restore(cursor());
+        crate::wayland::init().unwrap();
+        let input=InputInjector::new();
+        assert!(input.uinput.is_some(),"test must exercise the uinput/native hybrid path");
+        // libinput discovers the newly created virtual devices asynchronously.
+        std::thread::sleep(std::time::Duration::from_secs(1));
+        let output=std::process::Command::new("hyprctl").args(["monitors","-j"]).output().unwrap();
+        let monitors:Vec<serde_json::Value>=serde_json::from_slice(&output.stdout).unwrap();
+        let outputs=crate::wayland::outputs();assert!(outputs.len()>=2,"needs at least two outputs");
+        for (id,output) in outputs.iter().enumerate().chain(outputs.iter().enumerate().rev()) {
+            crate::wayland::select(id).unwrap();
+            let monitor=monitors.iter().find(|m|m["name"].as_str()==Some(output.name.as_str())).unwrap();
+            let scale=monitor["scale"].as_f64().unwrap();
+            for (x,y) in [(0.1,0.1),(0.5,0.5),(0.9,0.9),(0.1,0.9),(0.9,0.1)] {
+                let size=(output.width,output.height);
+                let pixels=crate::input_mapping::normalized_pointer(x,y,size.0,size.1).unwrap();
+                assert_eq!(input.backend,crate::desktop_backend::DesktopBackend::Wayland);
+                input.mouse_absolute_normalized(x,y,size);input.flush_pointer();
+                let expected=(monitor["x"].as_f64().unwrap()+f64::from(pixels.0)/scale,
+                    monitor["y"].as_f64().unwrap()+f64::from(pixels.1)/scale);
+                // Motion is asynchronous; observe its first arrival instead of a
+                // later position potentially changed by another input device.
+                let deadline=std::time::Instant::now()+std::time::Duration::from_millis(250);
+                loop {
+                    let actual=cursor();
+                    let matched=(actual["x"].as_f64().unwrap()-expected.0).abs()<=2.0
+                        && (actual["y"].as_f64().unwrap()-expected.1).abs()<=2.0;
+                    if matched {break;}
+                    assert!(std::time::Instant::now()<deadline,"pointer offset: output={} normalized=({},{}) actual={} expected={:?}",output.name,x,y,actual,expected);
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+            }
+        }
     }
 }
