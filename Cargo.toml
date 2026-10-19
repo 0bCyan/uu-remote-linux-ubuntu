@@ -28,6 +28,8 @@ wayland = []
 # Experimental direct linear framebuffer capture; never enabled in release builds.
 kms = []
 portal = []
+# Build the wayland/portal engines as runtime-loaded libuu-wayland.so / libuu-portal.so (release packages).
+engine-plugins = []
 # In-process capture and encoding through FFmpeg 6 libraries (libavcodec/libavdevice dev packages).
 # Off by default so release binaries do not link the build machine's libav.
 inproc-av = ["dep:ffmpeg-next", "dep:x11rb"]

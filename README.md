@@ -68,6 +68,8 @@ Portal 仅作用于本服务获授权的会话。文件传输、终端等独立�
 | niri | Wayland（wlroots 原生协议） | 🧪 实验性，协议支持已按 niri 源码确认，尚未实机验收（#55） | `--features wayland` |
 | GNOME / KDE Plasma | Wayland（xdg-desktop-portal） | 🧪 实验性，验证范围与限制见下 | `--features wayland,portal` |
 
+最后一列是源码编译方式；Release 预编译包已包含全部后端，直接使用即可（见[安装](#0-直接用-release-预编译包推荐x86_64)）。
+
 GNOME Wayland 的 Portal/EIS 路径已在 Ubuntu 26.04、GNOME 50、单屏 4K/200% 缩放下验证画面和键鼠；锁屏冷连接自动解锁已用 Mac 和 iPhone 4.42.0 客户端实机验证，其余锁屏恢复及重连仍待验收。除 GNOME 的上述路径和 X11 外，其余桌面目前主要在虚拟机里测试。如果你在真机上遇到问题，欢迎[提交 issue](../../issues)，
 请附上发行版、桌面环境、显卡型号和 `journalctl --user -u uuremote-native.service` 里的相关日志。
 
@@ -104,6 +106,27 @@ GNOME Portal 的控制通道不再等待授权窗口或第一帧画面：先通�
 | 作为控制端（在 Linux 上控制别的电脑） | 🧪 实验性 `uuremote-viewer`，见[下文](#实验性原生控制端uuremote-viewer) |
 
 ## 安装
+
+### 0. 直接用 Release 预编译包（推荐，x86_64）
+
+从 [Releases](../../releases/latest) 下载 `uu-remote-linux-<版本>-x86_64-linux.tar.gz`，解压后：
+
+```sh
+install -Dm755 uuremote-server ~/.local/bin/uuremote-server
+install -Dm644 libuu-wayland.so libuu-portal.so -t ~/.local/lib/uu-remote-linux/
+```
+
+同一个包支持 X11、Hyprland 等 wlroots 合成器和 GNOME/KDE Wayland：程序启动时按当前会话自动选择后端，只在 Wayland 会话里
+才加载对应的 `libuu-*.so`，X11 用户不需要任何 Wayland 库。系统要求：
+
+| 会话 | 要求 |
+|---|---|
+| X11 | glibc ≥ 2.35（Ubuntu 22.04、Debian 12 及更新） |
+| Hyprland / Sway / niri 等 wlroots | 同上，另需 `libwayland-client`、`libxkbcommon`（Wayland 桌面自带） |
+| GNOME / KDE Wayland | glibc ≥ 2.39（Ubuntu 24.04、Fedora 40、Debian 13 及更新），以及 libei ≥ 1.1、PipeWire |
+
+插件放在 `uuremote-server` 同目录、`../lib/uu-remote-linux/`、`~/.local/lib/uu-remote-linux/` 或 `/usr/lib/uu-remote-linux/` 都能找到
+（`UU_ENGINE_DIR` 可指定）。缺库或版本太旧时日志会写明原因。之后从第 3 步「登录」继续；ARM 等其他架构请按下面源码编译。
 
 ### 1. 依赖（Ubuntu / Debian）
 

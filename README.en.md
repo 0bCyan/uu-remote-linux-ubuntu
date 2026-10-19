@@ -120,6 +120,28 @@ mapping and hardware acceleration remain unverified. This is not zero-copy VAAPI
 
 ## Installation
 
+### 0. Prebuilt release package (recommended, x86_64)
+
+Download `uu-remote-linux-<version>-x86_64-linux.tar.gz` from [Releases](../../releases/latest), extract it, then:
+
+```sh
+install -Dm755 uuremote-server ~/.local/bin/uuremote-server
+install -Dm644 libuu-wayland.so libuu-portal.so -t ~/.local/lib/uu-remote-linux/
+```
+
+One package covers X11, wlroots compositors (Hyprland, Sway, niri) and GNOME/KDE Wayland: the backend is chosen from the
+running session at startup, and the matching `libuu-*.so` is loaded only on Wayland, so X11 hosts need no Wayland libraries.
+
+| Session | Requirements |
+|---|---|
+| X11 | glibc >= 2.35 (Ubuntu 22.04, Debian 12 and newer) |
+| wlroots (Hyprland / Sway / niri) | the same, plus `libwayland-client` and `libxkbcommon` (present on Wayland desktops) |
+| GNOME / KDE Wayland | glibc >= 2.39 (Ubuntu 24.04, Fedora 40, Debian 13 and newer), libei >= 1.1 and PipeWire |
+
+Plugins are found next to `uuremote-server`, in `../lib/uu-remote-linux/`, `~/.local/lib/uu-remote-linux/` or
+`/usr/lib/uu-remote-linux/` (`UU_ENGINE_DIR` overrides); a missing library or too old glibc is reported in the log.
+Continue with step 3 (login). Other architectures (ARM): build from source below.
+
 ### 1. Dependencies (Ubuntu / Debian)
 
 ```sh

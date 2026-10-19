@@ -1,6 +1,7 @@
 //! UU Remote Pure Native Linux Server (Rust Edition)
 //! Zero-Wine, Zero-Python, Single-Binary, 5 Native Tools Integrated
 
+mod engine_plugin;
 mod desktop_backend;
 mod desktop_session;
 mod desktop_power;
@@ -412,8 +413,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let capture = Arc::new((if desktop_backend::headless() {
         Err("headless mode (UU_DESKTOP_BACKEND=none)".to_owned())
     } else if desktop_backend::detect()?==desktop_backend::DesktopBackend::Portal {
-        Err(if cfg!(feature = "portal") { "Portal capture waits for a desktop CONTROL connection".to_owned() }
-            else { portal::NOT_BUILT.to_owned() })
+        Err(if !cfg!(feature = "portal") { portal::NOT_BUILT.to_owned() }
+            else if let Err(reason) = engine_plugin::load(engine_plugin::Engine::Portal) { format!("GNOME/KDE Wayland (portal) engine unavailable: {reason}") }
+            else { "Portal capture waits for a desktop CONTROL connection".to_owned() })
     } else { ScreenCapture::new() }).unwrap_or_else(|error| {
         log::warn!("Desktop unavailable; terminal and file tools remain available: {error}");
         ScreenCapture::unavailable(error)

@@ -1,6 +1,6 @@
 //! Hyprland/wlroots native backend. No XWayland fallback and no input logging.
 #[cfg(all(target_os="linux", feature="wayland"))]
-extern "C" {
+crate::engine_ffi! { crate::engine_plugin::Engine::Wayland;
     fn uu_wl_init(out_w: *mut i32, out_h: *mut i32) -> i32;
     fn uu_wl_capture(buffer: *mut u8, length: usize) -> i32;
     fn uu_wl_move(x: i32, y: i32, relative: i32) -> i32;
@@ -38,6 +38,7 @@ pub fn release_all()->i32 {
 pub fn init() -> Result<(u32,u32),String> {
     #[cfg(all(target_os="linux", feature="wayland"))]
     {
+        crate::engine_plugin::load(crate::engine_plugin::Engine::Wayland).map_err(|reason| format!("Wayland engine unavailable: {reason}"))?;
         let (mut w,mut h)=(0,0);
         let result=unsafe { uu_wl_init(&mut w,&mut h) };
         if result != 0 || w <= 0 || h <= 0 {

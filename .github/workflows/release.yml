@@ -9,7 +9,26 @@ permissions:
   packages: write
 
 jobs:
+  # GNOME/KDE Wayland engine: libei >= 1.1 first ships in Ubuntu 24.04, so this plugin needs
+  # glibc >= 2.39. It is only loaded on portal sessions; X11 and wlroots hosts never open it.
+  portal-plugin:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential pkg-config \
+            libx11-dev libxext-dev libxtst-dev libxfixes-dev libglib2.0-dev libpipewire-0.3-dev libei-dev
+      - uses: dtolnay/rust-toolchain@stable
+      - run: UU_NO_GTK=1 cargo build --release --locked --features portal,engine-plugins --bin uuremote-server
+      - uses: actions/upload-artifact@v4
+        with:
+          name: libuu-portal
+          path: target/release/libuu-portal.so
+
   release:
+    needs: portal-plugin
     # Built on 22.04 so the binary also runs on Ubuntu 22.04/24.04 and newer Debian (glibc >= 2.35).
     runs-on: ubuntu-22.04
     steps:
@@ -18,17 +37,25 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y build-essential pkg-config \
-            libx11-dev libxext-dev libxtst-dev libxfixes-dev libgtk-3-dev libsdl2-dev
+            libx11-dev libxext-dev libxtst-dev libxfixes-dev libgtk-3-dev libsdl2-dev \
+            libwayland-dev libwayland-bin libxkbcommon-dev
       - uses: dtolnay/rust-toolchain@stable
       - run: cargo test --release --locked
-      - run: cargo build --release --locked
-      # Experimental viewer; built after the host so uuremote-server keeps the default features.
+      # One package for every desktop: Wayland (wlroots) and GNOME/KDE portal engines are plugins
+      # opened at runtime (engine-plugins), so X11 hosts need none of their libraries.
+      - run: cargo build --release --locked --features wayland,portal,engine-plugins
+      - uses: actions/download-artifact@v4
+        with:
+          name: libuu-portal
+          path: target/release
+      # Experimental viewer; built after the host so uuremote-server keeps the release features.
       - run: cargo build --release --locked --features native-viewer,viewer-sdl --bin uuremote-viewer
       - name: Package
         run: |
           name=uu-remote-linux-${GITHUB_REF_NAME}-x86_64-linux
           mkdir -p "$name"
-          cp target/release/uuremote-server target/release/uuremote-viewer LICENSE README.md README.en.md config.example.json "$name/"
+          cp target/release/uuremote-server target/release/uuremote-viewer target/release/libuu-wayland.so target/release/libuu-portal.so \
+            LICENSE README.md README.en.md config.example.json "$name/"
           cp -r contrib "$name/"
           tar czf "$name.tar.gz" "$name"
           sha256sum "$name.tar.gz" > "$name.tar.gz.sha256"

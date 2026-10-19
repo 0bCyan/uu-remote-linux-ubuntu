@@ -4,7 +4,7 @@
 mod native {
     use std::{ffi::c_void, ptr::NonNull};
 
-    extern "C" {
+    crate::engine_ffi! { crate::engine_plugin::Engine::Portal;
         fn uu_desktop_power_wake() -> i32;
         fn uu_desktop_idle_inhibitor_acquire(error: *mut i32) -> *mut c_void;
         fn uu_desktop_idle_inhibitor_release(inhibitor: *mut c_void);

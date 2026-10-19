@@ -22,7 +22,7 @@ mod permissions;
 #[cfg(all(target_os = "linux", feature = "portal"))]
 mod native {
     use std::{ffi::c_void, ptr::NonNull, sync::{Mutex, MutexGuard, TryLockError}};
-    extern "C" {
+    crate::engine_ffi! { crate::engine_plugin::Engine::Portal;
         fn uu_portal_open_persist(restore: *const libc::c_char, save: extern "C" fn(*const libc::c_char, *mut c_void), data: *mut c_void, error: *mut i32, width: *mut u32, height: *mut u32) -> *mut c_void;
         fn uu_portal_open_persist_cancellable(restore: *const libc::c_char, save: extern "C" fn(*const libc::c_char, *mut c_void), save_data: *mut c_void, cancelled: extern "C" fn(*mut c_void) -> i32, cancel_data: *mut c_void, error: *mut i32, width: *mut u32, height: *mut u32) -> *mut c_void;
         fn uu_portal_clipboard_supported(portal: *mut c_void) -> i32;
@@ -116,6 +116,8 @@ mod native {
             if cancelled.is_some_and(|value| value.load(std::sync::atomic::Ordering::Acquire)) {
                 return Err(super::PortalError { code: 13 });
             }
+            // engine-plugins: libuu-portal.so (or one of its libraries) may be missing on this host.
+            crate::engine_plugin::load(crate::engine_plugin::Engine::Portal).map_err(|_| super::PortalError { code: 15 })?;
             let (mut error, mut width, mut height) = (0, 0, 0);
             let directory = super::permissions::directory();
             let key = super::permissions::desktop_key();
@@ -584,7 +586,10 @@ fn error(code: i32) -> String {
         8 => "unsupported frame format or size", 9 => "session closed or stream lost",
         10 => "frame unavailable", 11 => "invalid input or frame buffer",
         13 => "operation cancelled", 14 => "dimensions changed; reconnect required",
-        15 => return NOT_BUILT.into(),
+        15 => return match crate::engine_plugin::load(crate::engine_plugin::Engine::Portal) {
+            Err(reason) if cfg!(feature = "portal") => format!("GNOME/KDE Wayland (portal) engine unavailable: {reason}"),
+            _ => NOT_BUILT.into(),
+        },
         _ => "operation failed",
     };
     format!("Portal {reason} (code {code})")

@@ -116,6 +116,7 @@ viewer does not reconnect them automatically.
 | `UU_FFMPEG_ROOT` | FFmpeg prefix (`bin/ffmpeg`, libs in `lib/x86_64-linux-gnu`) |
 | `UU_AUDIO=0`, `UU_AUDIO_SOURCE` | disable sound / choose the Pulse source (default `@DEFAULT_MONITOR@`) |
 | `UU_LOGIN_WINDOW=0` | don't auto-open the login window |
+| `UU_ENGINE_DIR` | directory holding `libuu-wayland.so` / `libuu-portal.so` (`--features engine-plugins`, used by release packages: engines are dlopen'ed only on Wayland sessions; also searched next to the binary, `../lib/uu-remote-linux`, `~/.local/lib/uu-remote-linux`, `/usr/lib/uu-remote-linux`) |
 | `UU_USE_PROXY=1` | honor HTTP/SOCKS proxy env vars; cloud API clients bypass env proxies by default |
 | `UU_REMOTE_ASSIST=0`, `UU_ASSIST_ALLOW=1`, `UU_ASSIST_UI=tty`, `UU_ASSIST_DEBUG=1` | disable assistance / allow at start / terminal UI for `assist` / include the server's short error message in assist errors |
 
@@ -143,6 +144,7 @@ every 60 s.
 | `src/initialization.rs`, `src/control_protocol.rs`, `src/protocol.rs` | protobuf encoders/decoders for CONTROL |
 | `src/session_ice.rs`, `src/network_diagnostics.rs` | cloud ICE servers, address-free path diagnostics |
 | `src/desktop_backend.rs`, `src/wayland.rs`, `src/portal*.rs` | backend selection, Hyprland, GNOME/KDE portal |
+| `src/engine_plugin.rs` | `engine_ffi!`: engine C functions linked statically, or dlsym-resolved from runtime plugins with `engine-plugins` |
 | `c_engine/portal_eis.inc` | scaled GNOME input through the existing Portal session's EIS connection; all input must use EIS once connected |
 | `c_engine/x11_engine.c`, `c_engine/clipboard.c` | X11 capture/input/selection |
 | `c_engine/wayland_engine.c`, `c_engine/portal_engine.c` | Wayland and portal engines |

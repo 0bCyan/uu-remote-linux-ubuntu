@@ -50,7 +50,15 @@ fn main() {
             }
             None => println!("cargo:warning=gtk+-3.0 not found: building without the login window"),
         }
-        if std::env::var_os("CARGO_FEATURE_PORTAL").is_some() {
+        let plugins = std::env::var_os("CARGO_FEATURE_ENGINE_PLUGINS").is_some();
+        if plugins && std::env::var_os("CARGO_FEATURE_PORTAL").is_some() {
+            // Runtime-loaded libuu-portal.so; skipped (with a warning) where libei >= 1.1 is unavailable.
+            for file in ["portal_engine.c", "portal_engine.h", "portal_eis.inc", "desktop_power.c"] { println!("cargo:rerun-if-changed=c_engine/{file}"); }
+            match pkg_config(&["gio-2.0", "gio-unix-2.0", "libpipewire-0.3", "libei-1.0 >= 1.1"]) {
+                Some((cflags, libs)) => shared_engine("libuu-portal.so", &["c_engine/portal_engine.c", "c_engine/desktop_power.c"], &[], &cflags, &libs),
+                None => println!("cargo:warning=GIO/PipeWire/libei >= 1.1 not found: libuu-portal.so not built"),
+            }
+        } else if std::env::var_os("CARGO_FEATURE_PORTAL").is_some() {
             println!("cargo:rerun-if-changed=c_engine/portal_engine.c");
             println!("cargo:rerun-if-changed=c_engine/portal_engine.h");
             println!("cargo:rerun-if-changed=c_engine/portal_eis.inc");
@@ -76,6 +84,7 @@ fn main() {
             let mut build = cc::Build::new();
             build.flag_if_supported("-Wno-unused-parameter"); // protocol listener signatures
             build.file("c_engine/wayland_engine.c").include(&out);
+            let mut sources = vec!["c_engine/wayland_engine.c".to_owned()];
             for name in ["wlr-screencopy-unstable-v1", "wlr-virtual-pointer-unstable-v1", "virtual-keyboard-unstable-v1", "wlr-output-power-management-unstable-v1", "linux-dmabuf-unstable-v1"] {
                 let xml = format!("c_engine/wayland-protocols/{name}.xml");
                 println!("cargo:rerun-if-changed={xml}");
@@ -84,13 +93,43 @@ fn main() {
                     let status = std::process::Command::new("wayland-scanner").args([mode, &xml]).arg(&target).status()
                         .expect("Install wayland-scanner to build the Wayland backend");
                     assert!(status.success(), "wayland-scanner failed");
-                    if mode == "private-code" { build.file(target); }
+                    if mode == "private-code" { sources.push(target.to_string_lossy().into_owned()); build.file(target); }
                 }
             }
             println!("cargo:rerun-if-changed=c_engine/wayland_engine.c");
-            build.compile("uu_wayland_engine");
-            println!("cargo:rustc-link-lib=wayland-client");
-            println!("cargo:rustc-link-lib=xkbcommon");
+            if plugins {
+                let sources: Vec<&str> = sources.iter().map(String::as_str).collect();
+                match pkg_config(&["wayland-client", "xkbcommon"]) {
+                    Some((cflags, libs)) => shared_engine("libuu-wayland.so", &sources, &[out.as_path()], &cflags, &libs),
+                    None => println!("cargo:warning=wayland-client/xkbcommon not found: libuu-wayland.so not built"),
+                }
+            } else {
+                build.compile("uu_wayland_engine");
+                println!("cargo:rustc-link-lib=wayland-client");
+                println!("cargo:rustc-link-lib=xkbcommon");
+            }
         }
     }
+}
+
+/// `pkg-config --cflags` / `--libs` for `packages`, or None when any is missing.
+fn pkg_config(packages: &[&str]) -> Option<(String, String)> {
+    let run = |kind: &str| std::process::Command::new("pkg-config").arg(kind).args(packages).output().ok()
+        .filter(|o| o.status.success()).map(|o| String::from_utf8_lossy(&o.stdout).into_owned());
+    run("--cflags").zip(run("--libs"))
+}
+
+/// Builds an engine as a shared library for engine-plugins and places it next to the binaries
+/// (target/<profile>/), where the release workflow packages it. Not linked into uuremote-server.
+fn shared_engine(name: &str, sources: &[&str], includes: &[&std::path::Path], cflags: &str, libs: &str) {
+    let out = std::path::PathBuf::from(std::env::var_os("OUT_DIR").unwrap());
+    let library = out.join(name);
+    let mut command = cc::Build::new().pic(true).opt_level(2).get_compiler().to_command();
+    command.args(["-shared", "-fPIC", "-Wno-unused-parameter", "-Wl,-z,defs"]).arg(format!("-Wl,-soname,{name}")).arg("-o").arg(&library);
+    for include in includes { command.arg("-I").arg(include); }
+    command.args(cflags.split_whitespace()).args(sources).args(libs.split_whitespace()).arg("-lpthread");
+    let status = command.status().expect("C compiler for the engine plugin");
+    assert!(status.success(), "building {name} failed");
+    // OUT_DIR = target/<profile>/build/<package>-<hash>/out
+    if let Some(profile) = out.ancestors().nth(3) { std::fs::copy(&library, profile.join(name)).expect("copy engine plugin"); }
 }
