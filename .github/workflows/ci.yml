@@ -95,3 +95,22 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --locked --features inproc-av
+
+  test-linux-arm64:
+    # aarch64 hosts (Ampere A1, arm64 VMs, Apple-silicon VMs) build from source, so keep that
+    # build honest on a native arm64 runner instead of letting it rot between releases.
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential pkg-config \
+            libx11-dev libxext-dev libxtst-dev libxfixes-dev libgtk-3-dev
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --locked
+      - name: Release binary
+        run: |
+          cargo build --locked --release --bin uuremote-server
+          file target/release/uuremote-server
