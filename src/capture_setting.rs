@@ -117,10 +117,16 @@ pub fn handle_rpc(rpc: &[WireField], settings: &watch::Sender<VideoSettings>, na
 }
 
 /// Initial codec once the m-line is negotiated: H.265 when both sides support it (the Mac viewer
-/// lists H265 first in its offer), unless UU_VIDEO_CODEC=h264.
+/// lists H265 first in its offer) and a hardware encoder is selected. Software libx265 is about ten
+/// times slower than libx264 (measured 15 vs 155 fps at 1080p on a 4-core ARM host, #59), so CPU
+/// hosts default to H.264. UU_VIDEO_CODEC=h264 / h265 overrides.
 pub fn preferred_codec(h264: bool, h265: bool) -> VideoCodec {
-    let forced_h264 = std::env::var("UU_VIDEO_CODEC").is_ok_and(|v| v.eq_ignore_ascii_case("h264"));
-    if h265 && !(forced_h264 && h264) { VideoCodec::H265 } else { VideoCodec::H264 }
+    let forced = std::env::var("UU_VIDEO_CODEC").ok().map(|v| v.to_ascii_lowercase());
+    pick_codec(h264, h265, forced.as_deref(), crate::video::Encoder::requested() != crate::video::Encoder::Cpu)
+}
+fn pick_codec(h264: bool, h265: bool, forced: Option<&str>, hardware: bool) -> VideoCodec {
+    let wants_h265 = match forced { Some("h264") => false, Some("h265" | "hevc") => true, _ => hardware };
+    if h265 && (wants_h265 || !h264) { VideoCodec::H265 } else { VideoCodec::H264 }
 }
 
 pub fn handle_rpc_with_codecs(rpc: &[WireField], settings: &watch::Sender<VideoSettings>, native: (u32, u32), h264: bool, h265: bool) -> Option<Vec<u8>> {
@@ -498,6 +504,16 @@ mod codec_tests {
         handle_rpc_with_codecs(&rpc(1), &tx, (1920,1080), true, true).unwrap();
         assert_eq!(rx.borrow().codec, VideoCodec::H265);
         assert_eq!(preferred_codec(true, false), VideoCodec::H264);
+    }
+    #[test]
+    fn software_hosts_default_to_h264_unless_forced() {
+        assert_eq!(pick_codec(true, true, None, true), VideoCodec::H265);
+        assert_eq!(pick_codec(true, true, None, false), VideoCodec::H264);
+        assert_eq!(pick_codec(true, true, Some("h265"), false), VideoCodec::H265);
+        assert_eq!(pick_codec(true, true, Some("h264"), true), VideoCodec::H264);
+        // Only one codec bound in the SDP: use it whatever the preference.
+        assert_eq!(pick_codec(false, true, None, false), VideoCodec::H265);
+        assert_eq!(pick_codec(true, false, Some("h265"), true), VideoCodec::H264);
     }
 }
 

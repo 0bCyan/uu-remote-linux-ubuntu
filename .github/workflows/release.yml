@@ -12,7 +12,12 @@ jobs:
   # GNOME/KDE Wayland engine: libei >= 1.1 first ships in Ubuntu 24.04, so this plugin needs
   # glibc >= 2.39. It is only loaded on portal sessions; X11 and wlroots hosts never open it.
   portal-plugin:
-    runs-on: ubuntu-24.04
+    strategy:
+      matrix:
+        include:
+          - { arch: x86_64, runner: ubuntu-24.04 }
+          - { arch: aarch64, runner: ubuntu-24.04-arm }
+    runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
       - name: Install build dependencies
@@ -24,13 +29,18 @@ jobs:
       - run: UU_NO_GTK=1 cargo build --release --locked --features portal,engine-plugins --bin uuremote-server
       - uses: actions/upload-artifact@v4
         with:
-          name: libuu-portal
+          name: libuu-portal-${{ matrix.arch }}
           path: target/release/libuu-portal.so
 
-  release:
+  build:
     needs: portal-plugin
+    strategy:
+      matrix:
+        include:
+          - { arch: x86_64, runner: ubuntu-22.04 }
+          - { arch: aarch64, runner: ubuntu-22.04-arm }
     # Built on 22.04 so the binary also runs on Ubuntu 22.04/24.04 and newer Debian (glibc >= 2.35).
-    runs-on: ubuntu-22.04
+    runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
       - name: Install build dependencies
@@ -46,19 +56,34 @@ jobs:
       - run: cargo build --release --locked --features wayland,portal,engine-plugins
       - uses: actions/download-artifact@v4
         with:
-          name: libuu-portal
+          name: libuu-portal-${{ matrix.arch }}
           path: target/release
       # Experimental viewer; built after the host so uuremote-server keeps the release features.
       - run: cargo build --release --locked --features native-viewer,viewer-sdl --bin uuremote-viewer
       - name: Package
         run: |
-          name=uu-remote-linux-${GITHUB_REF_NAME}-x86_64-linux
+          name=uu-remote-linux-${GITHUB_REF_NAME}-${{ matrix.arch }}-linux
           mkdir -p "$name"
           cp target/release/uuremote-server target/release/uuremote-viewer target/release/libuu-wayland.so target/release/libuu-portal.so \
             LICENSE README.md README.en.md config.example.json "$name/"
           cp -r contrib "$name/"
           tar czf "$name.tar.gz" "$name"
           sha256sum "$name.tar.gz" > "$name.tar.gz.sha256"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: package-${{ matrix.arch }}
+          path: uu-remote-linux-*.tar.gz*
+
+  # One publisher, so the matrix legs never race to create the release.
+  release:
+    needs: build
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: package-*
+          merge-multiple: true
       - uses: softprops/action-gh-release@v2
         with:
           body_path: docs/release-notes/${{ github.ref_name }}.md

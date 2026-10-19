@@ -115,9 +115,9 @@ GNOME Portal 的控制通道不再等待授权窗口或第一帧画面：先通�
 
 ## 安装
 
-### 0. 直接用 Release 预编译包（推荐，x86_64）
+### 0. 直接用 Release 预编译包（推荐，x86_64 / aarch64）
 
-从 [Releases](../../releases/latest) 下载 `uu-remote-linux-<版本>-x86_64-linux.tar.gz`，解压后：
+从 [Releases](../../releases/latest) 下载 `uu-remote-linux-<版本>-x86_64-linux.tar.gz`（ARM64 选 `aarch64-linux`），解压后：
 
 ```sh
 install -Dm755 uuremote-server ~/.local/bin/uuremote-server
@@ -134,7 +134,7 @@ install -Dm644 libuu-wayland.so libuu-portal.so -t ~/.local/lib/uu-remote-linux/
 | GNOME / KDE Wayland | glibc ≥ 2.39（Ubuntu 24.04、Fedora 40、Debian 13 及更新），以及 libei ≥ 1.1、PipeWire |
 
 插件放在 `uuremote-server` 同目录、`../lib/uu-remote-linux/`、`~/.local/lib/uu-remote-linux/` 或 `/usr/lib/uu-remote-linux/` 都能找到
-（`UU_ENGINE_DIR` 可指定）。缺库或版本太旧时日志会写明原因。之后从第 3 步「登录」继续；ARM 等其他架构请按下面源码编译。
+（`UU_ENGINE_DIR` 可指定）。缺库或版本太旧时日志会写明原因。之后从第 3 步「登录」继续；其他架构请按下面源码编译。
 
 ### 1. 依赖（Ubuntu / Debian）
 
@@ -346,8 +346,9 @@ flowchart LR
 
 ### H.265 / HEVC
 
-控制端和主机都支持 H.265 时，主机自动使用 H.265（与官方主机一致，由主机按双方能力选择；官方 Mac 客户端在 SDP
-中优先列出 H.265）。首次桌面连接会用合成帧探测实际编码能力，并通过 CodecNegotiation 告知客户端。支持 `hevc_nvenc`、
+控制端和主机都支持 H.265、且主机使用硬件编码器（NVENC / 显式 VAAPI）时，主机自动使用 H.265（与官方主机一致，由主机按双方能力选择；官方 Mac 客户端在 SDP
+中优先列出 H.265）。**只有 CPU 编码时默认用 H.264**：libx265 比 libx264 慢约 10 倍（4 核 ARM 上 1080p 实测约 15 帧对 155 帧，#59），
+可用 `UU_VIDEO_CODEC=h265` 强制 H.265。实际帧率由控制端的「画质/帧率」菜单决定；`UU_DISPLAY_FPS` 只改上报的显示器刷新率。首次桌面连接会用合成帧探测实际编码能力，并通过 CodecNegotiation 告知客户端。支持 `hevc_nvenc`、
 `libx265`、显式 `UU_VIDEO_ENCODER=vaapi` 的 `hevc_vaapi`；硬件失败先回落软件 HEVC，再回落 H.264。
 `UU_VIDEO_CODEC=h264` 强制使用 H.264。8-bit；真彩 4:4:4 使用 hevc_nvenc `rext` / libx265 `main444-8`。
 已用官方 Mac 客户端在 RTX 3090（hevc_nvenc，含 4:4:4）实机验收；`hevc_vaapi` 配官方 Android 客户端也已实机验收

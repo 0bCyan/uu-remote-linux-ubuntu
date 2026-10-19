@@ -128,9 +128,9 @@ Switching reuses one video track and pauses input until the new source sends a f
 
 ## Installation
 
-### 0. Prebuilt release package (recommended, x86_64)
+### 0. Prebuilt release package (recommended, x86_64 / aarch64)
 
-Download `uu-remote-linux-<version>-x86_64-linux.tar.gz` from [Releases](../../releases/latest), extract it, then:
+Download `uu-remote-linux-<version>-x86_64-linux.tar.gz` (ARM64: `aarch64-linux`) from [Releases](../../releases/latest), extract it, then:
 
 ```sh
 install -Dm755 uuremote-server ~/.local/bin/uuremote-server
@@ -148,7 +148,7 @@ running session at startup, and the matching `libuu-*.so` is loaded only on Wayl
 
 Plugins are found next to `uuremote-server`, in `../lib/uu-remote-linux/`, `~/.local/lib/uu-remote-linux/` or
 `/usr/lib/uu-remote-linux/` (`UU_ENGINE_DIR` overrides); a missing library or too old glibc is reported in the log.
-Continue with step 3 (login). Other architectures (ARM): build from source below.
+Continue with step 3 (login). Other architectures: build from source below.
 
 ### 1. Dependencies (Ubuntu / Debian)
 
@@ -383,7 +383,7 @@ Released under the [GPL-3.0](LICENSE): you may use, modify and redistribute it, 
 
 ### H.265 / HEVC
 
-When both sides support H.265 the host uses it (as the official host does: the host picks the codec from both
+When both sides support H.265 and the host has a hardware encoder (NVENC / explicit VAAPI), the host uses it (as the official host does: the host picks the codec from both
 capability lists; the official Mac viewer lists H265 first in its SDP). The first desktop connection probes a
 synthetic frame and announces encoder support with CodecNegotiation. `hevc_nvenc`, `libx265` and explicit
 `UU_VIDEO_ENCODER=vaapi` (`hevc_vaapi`); hardware failure falls back to software HEVC, then to H.264.
@@ -391,6 +391,9 @@ synthetic frame and announces encoder support with CodecNegotiation. `hevc_nvenc
 Verified with the official Mac viewer on an RTX 3090 (hevc_nvenc, including 4:4:4) and with the official Android
 viewer on Intel Alder Lake-P (iHD): 2560x1440 fully hardware-encoded, 58 fps decoded at about 10 ms. libx265 is
 still not verified against a real viewer.
+With CPU-only encoding the default is H.264: libx265 is about ten times slower than libx264 (measured ~15 vs ~155 fps
+at 1080p on a 4-core ARM host, #59); `UU_VIDEO_CODEC=h265` forces H.265. The applied frame rate comes from the viewer's
+quality/fps menu; `UU_DISPLAY_FPS` only changes the reported display refresh rate.
 
 HEVC access units are split on RFC 7798 picture boundaries instead of AUDs: `hevc_vaapi` with `-aud 1` writes an
 AUD only at IRAPs and drops every other picture from the bitstream, so an AUD-based reader turns a whole GOP into
