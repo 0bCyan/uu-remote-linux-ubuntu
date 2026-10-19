@@ -65,6 +65,7 @@ Portal 仅作用于本服务获授权的会话。文件传输、终端等独立�
 | Xfce | X11 | ✅ 虚拟机测试通过 | 默认 |
 | Cinnamon / MATE | X11 | ✅ 虚拟机测试通过 | 默认 |
 | Hyprland | Wayland（wlroots 原生协议） | 🧪 实验性，虚拟机测试（部分功能受限，见下） | `--features wayland` |
+| niri | Wayland（wlroots 原生协议） | 🧪 实验性，协议支持已按 niri 源码确认，尚未实机验收（#55） | `--features wayland` |
 | GNOME / KDE Plasma | Wayland（xdg-desktop-portal） | 🧪 实验性，验证范围与限制见下 | `--features wayland,portal` |
 
 GNOME Wayland 的 Portal/EIS 路径已在 Ubuntu 26.04、GNOME 50、单屏 4K/200% 缩放下验证画面和键鼠；锁屏冷连接自动解锁已用 Mac 和 iPhone 4.42.0 客户端实机验证，其余锁屏恢复及重连仍待验收。除 GNOME 的上述路径和 X11 外，其余桌面目前主要在虚拟机里测试。如果你在真机上遇到问题，欢迎[提交 issue](../../issues)，
@@ -365,7 +366,8 @@ cargo build --release --features wayland
 
 Omarchy 使用 Hyprland：在其用户会话中运行，设置 `UU_DESKTOP_BACKEND=wayland`，保留
 `WAYLAND_DISPLAY` 和 `XDG_RUNTIME_DIR`。其他合成器可能需要 `--features wayland,portal`。
-uinput 需加载内核模块（开机自动加载：`echo uinput | sudo tee /etc/modules-load.d/uinput.conf`）并应用上文 uaccess 规则；无人登录账号需要专用组的受限授权。
+uinput 需加载内核模块（开机自动加载：`echo uinput | sudo tee /etc/modules-load.d/uinput.conf`）并应用上文 uaccess 规则；无人登录账号需要专用组的受限授权，
+例如 `/etc/tmpfiles.d/uinput.conf` 写入 `z /dev/uinput 0660 root uinput`，再 `sudo usermod -aG uinput <用户>`（只加专用账号）。
 该权限能向整个 seat（包括锁屏/登录界面）注入输入。设置 `UU_INPUT_BACKEND=uinput` 后，
 仍须确认启动日志实际选择了 uinput。
 
@@ -385,6 +387,10 @@ Environment=UU_DESKTOP_BACKEND=wayland
 [Install]
 WantedBy=graphical-session.target
 ```
+
+单元名请保持 `uuremote-native.service`，不要写成模板单元 `uuremote-native@.service`：桌面图标和 `uuremote-server show`
+固定启动这个名字（`UU_SERVICE_UNIT` 可覆盖），systemd 不会把它解析到模板实例。niri 的 `niri --session` 同样会在就绪前导入
+`WAYLAND_DISPLAY`，上面的写法也适用（#55）。
 
 VAAPI 可选包：Intel 新显卡用 `intel-media-driver`，AMD 用 `libva-mesa-driver`，`libva-utils` 提供
 `vainfo`。KMS 依赖 `libdrm`。虚拟 Xfce 依赖 `xorg-server-xvfb xorg-xauth xorg-xdpyinfo

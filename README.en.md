@@ -73,6 +73,7 @@ authorized session. Independent file/terminal tool peers do not reset input.
 | Xfce | X11 | ✅ Tested in a VM | default |
 | Cinnamon / MATE | X11 | ✅ Tested in a VM | default |
 | Hyprland | Wayland (native wlroots protocols) | 🧪 Experimental, tested in a VM (some features limited, see below) | `--features wayland` |
+| niri | Wayland (native wlroots protocols) | 🧪 Experimental; protocol support confirmed from niri sources, not yet tested on hardware (#55) | `--features wayland` |
 | GNOME / KDE Plasma | Wayland (xdg-desktop-portal) | 🧪 Experimental; validation scope and limits below | `--features wayland,portal` |
 
 The GNOME Wayland Portal/EIS path has been checked for video and mouse/keyboard input on Ubuntu 26.04, GNOME 50, with one 4K screen at 200% scale; auto unlock after a cold locked connection is verified with the official Mac and iPhone 4.42.0 viewers, while other lock recovery and reconnection still need hardware acceptance testing. Apart from that path and GNOME on X11, desktop testing has primarily used virtual machines. If something goes wrong on
@@ -415,13 +416,17 @@ Omarchy uses Hyprland: run in its user session, select `UU_DESKTOP_BACKEND=wayla
 and retain `WAYLAND_DISPLAY` / `XDG_RUNTIME_DIR`. This requires wlr-screencopy and the
 virtual input protocols supported by Hyprland; other compositors may need `--features wayland,portal`.
 For uinput, load `uinput` (at boot: `echo uinput | sudo tee /etc/modules-load.d/uinput.conf`) and apply the uaccess rule above; seat ACLs require an active login.
-For unattended accounts, explicitly restrict `/dev/uinput` access to a dedicated group.
+For unattended accounts, explicitly restrict `/dev/uinput` access to a dedicated group, e.g. `z /dev/uinput 0660 root uinput`
+in `/etc/tmpfiles.d/uinput.conf` plus `sudo usermod -aG uinput <user>` (dedicated account only).
 This permission can inject into the whole seat, including lock/greeter screens.
 `UU_INPUT_BACKEND=uinput` requests kernel devices; verify startup actually reports uinput.
 In Hyprland / uwsm sessions `default.target` may start before the compositor exports `WAYLAND_DISPLAY`;
 tie the unit to the graphical session instead (community-verified autostart on Omarchy):
 `After=` and `PartOf=graphical-session.target`, `ConditionEnvironment=WAYLAND_DISPLAY`,
 `Environment=UU_DESKTOP_BACKEND=wayland` (no `DISPLAY`), and `WantedBy=graphical-session.target`.
+Keep the unit name `uuremote-native.service` (not a template `uuremote-native@.service`): the desktop icon and
+`uuremote-server show` always start that name (override with `UU_SERVICE_UNIT`). `niri --session` also imports
+`WAYLAND_DISPLAY` before it is ready, so the same unit applies to niri (#55).
 Optional VAAPI: `intel-media-driver` (modern Intel) or `libva-mesa-driver` (AMD), `libva-utils`
 for `vainfo`. Optional KMS: `libdrm`. Virtual Xfce: `xorg-server-xvfb xorg-xauth xorg-xdpyinfo
 xfce4-session xfce4-panel xfdesktop xfwm4 gnome-terminal`.
