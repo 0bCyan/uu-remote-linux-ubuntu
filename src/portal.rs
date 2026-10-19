@@ -584,12 +584,17 @@ fn error(code: i32) -> String {
         8 => "unsupported frame format or size", 9 => "session closed or stream lost",
         10 => "frame unavailable", 11 => "invalid input or frame buffer",
         13 => "operation cancelled", 14 => "dimensions changed; reconnect required",
+        15 => return NOT_BUILT.into(),
         _ => "operation failed",
     };
     format!("Portal {reason} (code {code})")
 }
 fn check(code: i32) -> Result<(), String> { if code == 0 { Ok(()) } else { Err(error(code)) } }
 
+/// GNOME/KDE Wayland selected the portal backend, but this binary was built without it (the release
+/// package is X11 only): say how to get a picture instead of an opaque "portal unavailable".
+pub const NOT_BUILT: &str = "this build has no GNOME/KDE Wayland (portal) support: choose the Xorg session \
+    (\"GNOME on Xorg\" / \"Plasma (X11)\") at the login screen, or build with --features wayland,portal";
 #[cfg(all(target_os = "linux", feature = "portal"))]
 pub use native::Session as PortalSession;
 #[cfg(not(all(target_os = "linux", feature = "portal")))]
@@ -598,24 +603,24 @@ pub struct PortalSession { pub width: u32, pub height: u32 }
 impl PortalSession {
     pub fn clipboard_supported(&self) -> bool { false }
     pub fn clipboard_ready(&self) -> bool { false }
-    pub fn clipboard_set(&self, _: &str) -> Result<(), String> { Err(error(2)) }
+    pub fn clipboard_set(&self, _: &str) -> Result<(), String> { Err(error(15)) }
     pub fn clipboard_poll(&self) -> Option<String> { None }
     pub fn is_alive(&self) -> bool { false }
     pub fn open() -> Result<Self, String> { Err("Portal backend requires Linux and --features portal".into()) }
     pub fn open_cancellable(cancelled: &std::sync::atomic::AtomicBool) -> Result<Self, PortalError> {
         if cancelled.load(std::sync::atomic::Ordering::Acquire) { Err(PortalError { code: 13 }) }
-        else { Err(PortalError { code: 2 }) }
+        else { Err(PortalError { code: 15 }) }
     }
     pub fn recover(&self, cancelled: &std::sync::atomic::AtomicBool) -> Result<bool, PortalError> {
         if cancelled.load(std::sync::atomic::Ordering::Acquire) { Err(PortalError { code: 13 }) }
-        else { Err(PortalError { code: 2 }) }
+        else { Err(PortalError { code: 15 }) }
     }
     pub fn pause(&self) {}
-    pub fn capture(&self, _: &mut [u8]) -> Result<(), String> { Err(error(2)) }
-    pub fn capture_changed(&self, _: &mut [u8], _: &mut Option<FrameVersion>) -> Result<bool, String> { Err(error(2)) }
-    pub fn move_pointer(&self, _: f64, _: f64, _: bool) -> Result<(), String> { Err(error(2)) }
-    pub fn button(&self, _: i32, _: bool) -> Result<(), String> { Err(error(2)) }
-    pub fn key(&self, _: u64, _: bool) -> Result<(), String> { Err(error(2)) }
+    pub fn capture(&self, _: &mut [u8]) -> Result<(), String> { Err(error(15)) }
+    pub fn capture_changed(&self, _: &mut [u8], _: &mut Option<FrameVersion>) -> Result<bool, String> { Err(error(15)) }
+    pub fn move_pointer(&self, _: f64, _: f64, _: bool) -> Result<(), String> { Err(error(15)) }
+    pub fn button(&self, _: i32, _: bool) -> Result<(), String> { Err(error(15)) }
+    pub fn key(&self, _: u64, _: bool) -> Result<(), String> { Err(error(15)) }
 }
 
 /// Forward frames in-process into encoder stdin. Cancellation drops the Arc;
@@ -641,6 +646,7 @@ mod tests {
     fn errors_never_include_remote_messages_or_identifiers() {
         assert!(super::check(4).unwrap_err().contains("cancelled or denied"));
         assert!(super::check(9).unwrap_err().contains("closed or stream lost"));
+        assert!(super::check(15).unwrap_err().contains("--features wayland,portal"));
     }
     #[test]
     fn portal_error_display_is_fixed_and_sanitized() {
