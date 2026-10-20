@@ -10,6 +10,8 @@ extern "C" {
     fn uu_login_ui_set_done(text: *const libc::c_char);
     fn uu_login_ui_closed() -> libc::c_int;
     fn uu_login_ui_close();
+    fn uu_login_ui_offer_refresh(visible: libc::c_int);
+    fn uu_login_ui_take_refresh() -> libc::c_int;
 }
 
 #[derive(Clone, Copy)]
@@ -56,6 +58,19 @@ impl LoginUi {
     }
 
     #[allow(unused_variables)]
+    /// Show or hide the 刷新二维码 button (a failed QR waits for the user, like the official client).
+    pub fn offer_refresh(&self, visible: bool) {
+        #[cfg(uu_gtk)]
+        if self.shown { unsafe { uu_login_ui_offer_refresh(libc::c_int::from(visible)) } }
+        #[cfg(not(uu_gtk))]
+        let _ = visible;
+    }
+    /// The user clicked 刷新二维码 since the last call.
+    pub fn take_refresh(&self) -> bool {
+        #[cfg(uu_gtk)]
+        if self.shown { return unsafe { uu_login_ui_take_refresh() } != 0; }
+        false
+    }
     pub fn status(&self, text: &str, tone: Tone) {
         #[cfg(uu_gtk)]
         if self.shown { let t = cstr(text); unsafe { uu_login_ui_set_status(t.as_ptr(), tone as libc::c_int) } }

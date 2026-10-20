@@ -251,6 +251,17 @@ impl UUAuthClient {
         Ok((status, value))
     }
 
+    /// Signed POST with an optional JSON body (None = empty body, like Moya `requestPlain`) and an
+    /// explicit timeout. The official clients long-poll the QR status with a 60 s request timeout.
+    pub async fn post_with_timeout(&self, path: &str, body: Option<&serde_json::Value>, timeout: std::time::Duration) -> Result<(u16, serde_json::Value), String> {
+        let body_str = body.map(serde_json::to_string).transpose().map_err(|e| e.to_string())?.unwrap_or_default();
+        let resp = self.http.post(format!("{}{}", BASE_URL, path)).timeout(timeout)
+            .headers(self.build_headers("POST", path, &body_str)).body(body_str)
+            .send().await.map_err(|e| format!("HTTP post {path} failed: {}", transport_error(&e)))?;
+        let status = resp.status().as_u16();
+        Ok((status, resp.json().await.unwrap_or(serde_json::Value::Null)))
+    }
+
     /// Signed JSON POST to another API host (the signature covers the path only).
     pub async fn post_json_url(&self, base: &str, path: &str, body: &serde_json::Value) -> Result<(u16, serde_json::Value), String> {
         let body_str = serde_json::to_string(body).map_err(|e| e.to_string())?;

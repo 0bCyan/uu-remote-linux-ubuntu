@@ -268,14 +268,22 @@ pub async fn prepare_device() -> Result<(Value, Credentials), String> {
 pub(crate) async fn flow(ui: &LoginUi) -> Result<String, String> {
     let (mut cfg, creds) = prepare_device().await?;
     let client = UUAuthClient::new(creds.clone());
-    let mut instant_expiries = 0u32;
-
+    // Mirrors the official Mac client (LoginViewController / LoginManager, UURemote 4.42): gen/login has
+    // no body; the status long poll sends gen's `status_query_ticket` under `token` with the last
+    // status, re-asks as soon as an answer arrives (60 s request timeout), regenerates on status 3
+    // at once and on status 0 after 0.35 s, logs in on 4, and on any error (e.g. HTTP 400 code 1190)
+    // stops until the user asks for a new QR. Sending gen's older `token` field made the cloud reject
+    // every QR within seconds (#68).
+    let timeout = Duration::from_secs(60);
     loop {
-        let (status, resp) = client.post_json("/api/v1/qrcode/gen/login", &json!({})).await?;
-        let d = data("qrcode gen", status, &resp)?;
+        let (status, resp) = client.post_with_timeout("/api/v1/qrcode/gen/login", None, timeout).await?;
+        let d = match data("qrcode gen", status, &resp) {
+            Ok(d) => d.clone(),
+            Err(e) => { println!("QR code could not be loaded ({e})"); wait_for_refresh(ui, "二维码加载失败").await; continue; }
+        };
         let url = d.get("qrcode_jump_url").and_then(|v| v.as_str()).ok_or("qrcode gen returned no qrcode_jump_url")?.to_string();
-        let ticket = d.get("token").or_else(|| d.get("status_query_ticket")).and_then(|v| v.as_str())
-            .ok_or("qrcode gen returned no token")?.to_string();
+        let ticket = qr_ticket(&d).ok_or("qrcode gen returned no status ticket")?.to_string();
+        ui.offer_refresh(false);
         if ui.shown() {
             let modules = qrcode::QrCode::new(url.as_bytes()).map_err(|e| e.to_string())?.width() + 2;
             let (rgba, edge) = qr_rgba(&url, (224 / modules).max(2), 1)?;
@@ -290,48 +298,31 @@ pub(crate) async fn flow(ui: &LoginUi) -> Result<String, String> {
             file.write_all(&crate::cursor::encode_png(edge as u32,edge as u32,&rgba)).map_err(|e|e.to_string())?;
         }
         if !ui.quiet() { println!("\nScan with the UU Remote mobile app (网易UU远程 App 扫码登录):\n{}", render_qr(&url)?); }
-        // Status is a long poll: send the state already shown (server enum 1..4; observed:
-        // 1 waiting, 2 scanned, 4 after the phone confirmed); the server answers when it changes.
         let mut login_status = 1i64;
-        let mut expired = false;
-        let generated = std::time::Instant::now();
-        for _ in 0..150 {
+        let failure = loop {
             let query = json!({"token": ticket, "qrcode_jump_url": url, "login_status": login_status});
-            let asked = std::time::Instant::now();
-            let (status, resp) = match client.post_json("/api/v1/qrcode/login/status", &query).await {
+            let (status, resp) = match client.post_with_timeout("/api/v1/qrcode/login/status", Some(&query), timeout).await {
                 Ok(r) => r,
-                // Long-poll timeout: ask again, but never spin on transport errors (#68).
-                Err(_) => { if asked.elapsed() < Duration::from_secs(1) { tokio::time::sleep(Duration::from_secs(2)).await; } continue; }
+                Err(_) => break "网络超时，二维码已停止刷新",
             };
-            // Code 1190 (HTTP 400, "二维码已失效"): the QR expired; generate a new one.
-            if resp.get("code").and_then(|c| c.as_i64()) == Some(QR_EXPIRED) {
-                ui.status("二维码已过期，正在刷新…", Tone::Info);
-                expired = true; break;
-            }
-            let st = data("qrcode status", status, &resp)?.get("status").and_then(|v| v.as_i64()).unwrap_or(login_status);
-            if st == login_status {
-                // The server normally holds this request; an immediate unchanged answer must not
-                // turn into a tight loop of dozens of requests per second (#68).
-                if asked.elapsed() < Duration::from_secs(1) { tokio::time::sleep(Duration::from_secs(2)).await; }
-                continue;
-            }
-            login_status = st;
+            let code = resp.get("code").and_then(|c| c.as_i64());
+            if code == Some(QR_EXPIRED) { break "二维码已失效"; }
+            let Ok(d) = data("qrcode status", status, &resp) else { break "二维码状态查询失败"; };
+            let st = d.get("status").and_then(|v| v.as_i64()).unwrap_or(login_status);
             match st {
-                2 => {
+                1 => {}
+                2 => if login_status != 2 {
                     println!("已扫码，请在手机上确认 (scanned, confirm on the phone)");
                     ui.status("已扫码，请在手机上确认登录", Tone::Ok);
-                }
-                3 | 4 => {
-                    // A final state: confirmed logs in; cancelled/expired is refused and a new QR follows.
+                },
+                3 => { println!("QR code expired; generating a new one"); break ""; }
+                0 => { tokio::time::sleep(Duration::from_millis(350)).await; break ""; }
+                4 => {
                     let body = json!({"token": ticket, "qrcode_jump_url": url});
-                    let (status, resp) = client.post_json("/api/v1/login/by_qrcode", &body).await?;
+                    let (status, resp) = client.post_with_timeout("/api/v1/login/by_qrcode", Some(&body), timeout).await?;
                     let d = match data("qrcode login", status, &resp) {
                         Ok(d) => d,
-                        Err(e) => {
-                            println!("QR status {st}: login not granted ({e})");
-                            ui.status("手机端未确认登录，正在刷新二维码…", Tone::Error);
-                            expired = true; break;
-                        }
+                        Err(e) => { println!("QR login not granted ({e})"); break "登录失败"; }
                     };
                     let token = d.get("token").and_then(|v| v.as_str()).ok_or("login returned no token")?;
                     let user = d.get("user_id").and_then(|v| v.as_str()).ok_or("login returned no user_id")?;
@@ -348,25 +339,49 @@ pub(crate) async fn flow(ui: &LoginUi) -> Result<String, String> {
                     println!("Logged in as {} ({}); saved to {}", nickname, user, path.display());
                     return Ok(if nickname.is_empty() { user.to_string() } else { nickname.to_string() });
                 }
-                _ => { println!("QR status: {st}"); ui.status("二维码已失效，正在刷新…", Tone::Error); expired = true; break; }
+                other => { println!("QR status: {other}"); break "二维码已失效"; }
             }
-        }
-        println!("{}", if expired { "QR code expired; generating a new one" } else { "QR code timed out; generating a new one" });
-        // A QR rejected within seconds of being generated, again and again, was seen when the cloud
-        // flagged this device identity (#68): back off and say how to recover.
-        if expired && generated.elapsed() < Duration::from_secs(10) { instant_expiries += 1; } else { instant_expiries = 0; }
-        if instant_expiries == 3 {
-            eprintln!("The QR code keeps expiring immediately. If this persists, the cloud may reject this device identity: \
-                back up and remove ~/.config/uuremote/config.json, then run `uuremote-server login` again to register a new device.");
-            ui.status("二维码反复立即失效：可备份并删除 ~/.config/uuremote/config.json 后重新登录（会注册新设备）", Tone::Error);
-        }
-        tokio::time::sleep(Duration::from_secs(1u64 << instant_expiries.min(5))).await; // never spin if the server keeps refusing
+            login_status = st;
+        };
+        if !failure.is_empty() { wait_for_refresh(ui, failure).await; }
     }
+}
+
+/// gen/login's status ticket: `status_query_ticket` (current cloud and official clients), else the
+/// older `token` field for servers that do not send it.
+fn qr_ticket(gen: &Value) -> Option<&str> {
+    gen.get("status_query_ticket").or_else(|| gen.get("token")).and_then(|v| v.as_str()).filter(|t| !t.is_empty())
+}
+
+/// Stop like the official client and wait for the user: the 刷新二维码 button, Enter in a terminal,
+/// or (no window and no terminal, e.g. a service) one minute.
+async fn wait_for_refresh(ui: &LoginUi, reason: &str) {
+    use std::io::IsTerminal;
+    ui.status(&format!("{reason}，请点击「刷新二维码」"), Tone::Error);
+    ui.offer_refresh(true);
+    let terminal = !ui.quiet() && std::io::stdin().is_terminal();
+    if terminal { println!("{reason}. Press Enter to show a new QR code (按回车刷新二维码)"); }
+    else { println!("{reason}; waiting for 刷新二维码{}", if ui.shown() { "" } else { " (a new QR code follows in 60 s)" }); }
+    let mut line = terminal.then(|| tokio::task::spawn_blocking(|| { let mut s = String::new(); let _ = std::io::stdin().read_line(&mut s); }));
+    let started = std::time::Instant::now();
+    loop {
+        if ui.take_refresh() || (ui.shown() && ui.closed()) { break; }
+        if let Some(handle) = line.as_mut() { if handle.is_finished() { break; } }
+        if !ui.shown() && !terminal && started.elapsed() >= Duration::from_secs(60) { break; }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    ui.offer_refresh(false);
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn status_ticket_prefers_status_query_ticket() {
+        assert_eq!(qr_ticket(&json!({"token": "old", "status_query_ticket": "new"})), Some("new"));
+        assert_eq!(qr_ticket(&json!({"token": "old"})), Some("old"));
+        assert_eq!(qr_ticket(&json!({"status_query_ticket": ""})), None);
+    }
     #[tokio::test]
     async fn service_waits_until_a_new_token_is_saved() {
         let dir = std::env::temp_dir().join(format!("uu-login-wait-{}", std::process::id()));

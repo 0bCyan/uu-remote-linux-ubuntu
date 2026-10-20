@@ -46,7 +46,10 @@ static pthread_cond_t init_cond = PTHREAD_COND_INITIALIZER;
 static GtkWidget *window, *allow_switch, *id_label, *code_label, *eye_button, *share_button, *hint_label, *verify_combo, *note_label;
 static GtkWidget *refresh_items[5], *footer_label;
 // Account card: QR login before sign-in, user info (+ logout) after.
-static GtkWidget *assist_card, *account_card, *account_stack, *qr_stack, *qr_image, *login_status, *user_label;
+static GtkWidget *assist_card, *account_card, *account_stack, *qr_stack, *qr_image, *login_status, *user_label, *qr_refresh;
+/* Like the official client, a failed or timed-out QR stays until the user asks for a new one. */
+static atomic_int qr_refresh_requested;
+static void on_qr_refresh(GtkButton *b, gpointer d) { (void)b; (void)d; atomic_store(&qr_refresh_requested, 1); gtk_widget_hide(qr_refresh); }
 static int show_assist = 1, show_account;
 // Tray (host service only): AppIndicator via dlopen (no build dependency), else GtkStatusIcon.
 static GtkWidget *tray_menu, *tray_allow;
@@ -250,6 +253,11 @@ static GtkWidget *build_account_card(void) {
     login_status = label("", "status");
     gtk_label_set_line_wrap(GTK_LABEL(login_status), TRUE);
     gtk_box_pack_start(GTK_BOX(qr_text), login_status, FALSE, FALSE, 0);
+    qr_refresh = gtk_button_new_with_label("刷新二维码");
+    gtk_widget_set_halign(qr_refresh, GTK_ALIGN_START);
+    gtk_widget_set_no_show_all(qr_refresh, TRUE);
+    g_signal_connect(qr_refresh, "clicked", G_CALLBACK(on_qr_refresh), NULL);
+    gtk_box_pack_start(GTK_BOX(qr_text), qr_refresh, FALSE, FALSE, 0);
     gtk_box_pack_start(GTK_BOX(qr_page), qr_text, TRUE, TRUE, 0);
     gtk_stack_add_named(GTK_STACK(account_stack), qr_page, "qr");
 
@@ -641,6 +649,16 @@ void uu_ui_set_user(const char *name) {
     if (!ui_started || init_state != 1) return;
     g_idle_add(apply_user, g_strdup(name ? name : ""));
 }
+static gboolean apply_qr_refresh(gpointer data) {
+    if (window && qr_refresh) { if (GPOINTER_TO_INT(data)) gtk_widget_show(qr_refresh); else gtk_widget_hide(qr_refresh); }
+    return G_SOURCE_REMOVE;
+}
+void uu_login_ui_offer_refresh(int visible) {
+    if (!ui_started || init_state != 1 || atomic_load(&closed)) return;
+    atomic_store(&qr_refresh_requested, 0);
+    g_idle_add(apply_qr_refresh, GINT_TO_POINTER(visible != 0));
+}
+int uu_login_ui_take_refresh(void) { return atomic_exchange(&qr_refresh_requested, 0); }
 void uu_login_ui_set_done(const char *text) { uu_ui_set_user(text); }
 int uu_login_ui_closed(void) { return atomic_load(&closed); }
 void uu_login_ui_close(void) { uu_assist_ui_close(); }
