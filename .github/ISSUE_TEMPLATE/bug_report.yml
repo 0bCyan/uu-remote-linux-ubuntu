@@ -37,6 +37,7 @@ body:
 
         ```sh
         {
+          echo "== doctor (v0.2.17+)"; uuremote-server doctor
           echo "== 系统"; grep PRETTY_NAME /etc/os-release; uname -rm
           echo "== 桌面"; echo "session=$XDG_SESSION_TYPE desktop=$XDG_CURRENT_DESKTOP"
           echo "== 显示器"; xrandr --listmonitors 2>/dev/null

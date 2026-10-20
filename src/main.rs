@@ -2,6 +2,7 @@
 //! Zero-Wine, Zero-Python, Single-Binary, 5 Native Tools Integrated
 
 mod engine_plugin;
+mod doctor;
 mod desktop_backend;
 mod desktop_session;
 mod desktop_power;
@@ -191,7 +192,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .filter_module("uuremote_server", log::LevelFilter::Info).init();
     } else { env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init(); }
     // An unknown argument must never fall through to starting a second full host server.
-    const SUBCOMMANDS: [&str; 14] = ["show", "assist", "desktop-input-probe", "virtual-audio-probe", "login", "unlock-check", "desktop-probe", "desktop-video-probe", "desktop-audio-probe", "wayland-capture",
+    const SUBCOMMANDS: [&str; 15] = ["doctor", "show", "assist", "desktop-input-probe", "virtual-audio-probe", "login", "unlock-check", "desktop-probe", "desktop-video-probe", "desktop-audio-probe", "wayland-capture",
         "wayland-input-probe", "wayland-text-probe", "clipboard-acceptance", "portal-acceptance"];
     if let Some(arg) = std::env::args().nth(1).filter(|a| !SUBCOMMANDS.contains(&a.as_str())) {
         let usage = format!("usage: uuremote-server [{}]\n  (no argument: run the host)", SUBCOMMANDS.join(" | "));
@@ -356,6 +357,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     if std::env::args().nth(1).as_deref() == Some("wayland-text-probe") {
         return wayland::text_probe().map_err(|e|e.into());
+    }
+    if std::env::args().nth(1).as_deref() == Some("doctor") {
+        return doctor::run().await.map_err(|e| e.into());
     }
     if std::env::args().nth(1).as_deref() == Some("wayland-capture") {
         return wayland::capture_stdout().map_err(|e| e.into());
