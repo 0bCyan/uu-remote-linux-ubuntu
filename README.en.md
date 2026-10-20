@@ -187,6 +187,11 @@ cargo build --release --features wayland          # + Hyprland
 cargo build --release --features wayland,portal   # + GNOME/KDE on Wayland
 ```
 
+The optional `--features inproc-av` (in-process encoding) and the viewer's `viewer-ffmpeg` support **FFmpeg 6.x only**
+(`pkg-config --modversion libavcodec` = 60.x). FFmpeg 7+ fails inside the `ffmpeg-sys-next` dependency with
+`avfft.h file not found`; its build script runs before this project's, so no clearer check is possible (#63). The default
+build and the release packages need neither feature.
+
 ### 3. Log in
 
 Run inside your graphical session:

@@ -171,6 +171,10 @@ cargo build --release --features wayland      # + Hyprland
 cargo build --release --features wayland,portal   # + GNOME/KDE Wayland
 ```
 
+可选的 `--features inproc-av`（进程内编码）和控制端的 `viewer-ffmpeg` 只支持 **FFmpeg 6.x**（`pkg-config --modversion libavcodec` 为 60.x）。
+FFmpeg 7 及以上会在依赖 `ffmpeg-sys-next` 里报 `avfft.h file not found`——它的构建脚本先于本项目运行，所以无法提前给出更清楚的提示（#63）。
+默认构建和预编译包都不需要这两个特性。
+
 ### 3. 登录
 
 在图形桌面里运行：

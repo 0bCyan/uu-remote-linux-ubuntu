@@ -143,6 +143,35 @@ fn write_host_pid() {
         let _ = write!(f, "{}", std::process::id());
     }
 }
+/// Why `unit` is not (going to be) running, from `systemctl --user show`; None while it is active or starting.
+fn unit_not_running(unit: &str, settled: bool) -> Option<String> {
+    let output = std::process::Command::new("systemctl").args(["--user", "show", unit, "-p", "ActiveState,SubState,ConditionResult"]).output().ok()?;
+    let text = String::from_utf8_lossy(&output.stdout);
+    let value = |key: &str| text.lines().find_map(|l| l.strip_prefix(key).and_then(|v| v.strip_prefix('='))).unwrap_or("").to_owned();
+    unit_state_problem(unit, &value("ActiveState"), &value("SubState"), &value("ConditionResult"), settled)
+}
+fn unit_state_problem(unit: &str, active: &str, sub: &str, condition: &str, settled: bool) -> Option<String> {
+    let hint = format!("see `systemctl --user status {unit}` and `journalctl --user -u {unit}`");
+    if condition == "no" { return Some(format!("{unit} was skipped: a Condition in the unit is not met (e.g. ConditionEnvironment outside the graphical session); {hint}")); }
+    if active == "failed" { return Some(format!("{unit} failed to start; {hint}")); }
+    if sub == "auto-restart" { return Some(format!("{unit} keeps exiting and being restarted; {hint}")); }
+    if settled && active == "inactive" { return Some(format!("{unit} is not running; {hint}")); }
+    None
+}
+#[cfg(test)]
+mod show_unit_tests {
+    #[test]
+    fn skipped_crashing_and_failed_units_are_reported() {
+        let p = |a, s, c, settled| super::unit_state_problem("u.service", a, s, c, settled);
+        assert!(p("inactive", "dead", "no", false).unwrap().contains("skipped"));
+        assert!(p("activating", "auto-restart", "yes", false).unwrap().contains("restarted"));
+        assert!(p("failed", "failed", "yes", false).unwrap().contains("failed"));
+        assert!(p("inactive", "dead", "yes", false).is_none());
+        assert!(p("inactive", "dead", "yes", true).unwrap().contains("not running"));
+        assert!(p("active", "running", "yes", true).is_none());
+        assert!(p("activating", "start", "yes", true).is_none());
+    }
+}
 /// `uuremote-server show` (desktop launcher): open the running host's window, or start the host in the
 /// foreground with its window when none runs (e.g. no systemd unit installed yet).
 fn show_running_host() -> Result<(), Box<dyn std::error::Error>> {
@@ -162,7 +191,10 @@ fn show_running_host() -> Result<(), Box<dyn std::error::Error>> {
         .stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).status().is_ok_and(|s| s.success());
     if installed && std::process::Command::new("systemctl").args(["--user", "start", &unit]).status().is_ok_and(|s| s.success()) {
         let before = std::fs::metadata(host_pid_path()).and_then(|m| m.modified()).ok();
-        for _ in 0..60 {
+        for attempt in 0..60 {
+            // `systemctl start` also returns 0 when the unit is skipped by a Condition or keeps
+            // crashing under Restart=; report that instead of waiting 30 s for a pid (#62).
+            if let Some(reason) = unit_not_running(&unit, attempt >= 2) { return Err(reason.into()); }
             std::thread::sleep(std::time::Duration::from_millis(500));
             let fresh = std::fs::metadata(host_pid_path()).and_then(|m| m.modified()).ok().is_some_and(|t| Some(t) != before);
             let pid = std::fs::read_to_string(host_pid_path()).ok().and_then(|s| s.trim().parse::<i32>().ok());
@@ -171,7 +203,7 @@ fn show_running_host() -> Result<(), Box<dyn std::error::Error>> {
                 if unsafe { libc::kill(pid, libc::SIGUSR1) } == 0 { return Ok(()); }
             }
         }
-        return Err("the UU remote host service started but did not open its window".into());
+        return Err(format!("{unit} is running but did not open its window within 30 s; check `journalctl --user -u {unit}`").into());
     }
     use std::os::unix::process::CommandExt;
     Err(Box::new(std::process::Command::new("/proc/self/exe").env("UU_SHOW_WINDOW", "1").exec()))

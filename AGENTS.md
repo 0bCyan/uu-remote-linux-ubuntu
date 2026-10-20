@@ -39,7 +39,8 @@ Dependencies (Ubuntu/Debian):
 sudo apt install build-essential pkg-config \
     libx11-dev libxext-dev libxtst-dev libxfixes-dev libavcodec-dev libavformat-dev libavdevice-dev libswscale-dev libclang-dev libgtk-3-dev ffmpeg
 # --features inproc-av:      libavcodec-dev libavformat-dev libavdevice-dev libswscale-dev libclang-dev
-#                            (FFmpeg 6.x; in-process capture/encoding, Ubuntu 24.04 ships it)
+#                            (FFmpeg 6.x only; in-process capture/encoding, Ubuntu 24.04 ships it. FFmpeg >= 7
+#                            fails in ffmpeg-sys-next with "avfft.h file not found", before our build.rs runs)
 # --features wayland:        libwayland-dev libxkbcommon-dev wl-clipboard
 # --features wayland,portal: + libglib2.0-dev libpipewire-0.3-dev libei-dev (libei >= 1.1)
 ```
