@@ -41,6 +41,8 @@ async fn command_output(program: &str, args: &[&str]) -> Option<String> {
 pub async fn run() -> Result<(), String> {
     use crate::desktop_backend as backend;
     use crate::engine_plugin::{load, Engine};
+    // Info logs (e.g. plugin paths under the home directory) would bypass the redaction below.
+    log::set_max_level(log::LevelFilter::Warn);
     println!("uu-remote-linux doctor (safe to paste: no ids, tokens, addresses or file contents)");
     line("version", format!("v{} {}", env!("CARGO_PKG_VERSION"), std::env::consts::ARCH));
     line("glibc", glibc());

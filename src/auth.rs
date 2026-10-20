@@ -251,6 +251,16 @@ impl UUAuthClient {
         Ok((status, value))
     }
 
+    /// Signed JSON POST to another API host (the signature covers the path only).
+    pub async fn post_json_url(&self, base: &str, path: &str, body: &serde_json::Value) -> Result<(u16, serde_json::Value), String> {
+        let body_str = serde_json::to_string(body).map_err(|e| e.to_string())?;
+        let resp = self.http.post(format!("{base}{path}"))
+            .headers(self.build_headers("POST", path, &body_str)).body(body_str)
+            .send().await.map_err(|e| format!("HTTP post {path} failed: {}", transport_error(&e)))?;
+        let status = resp.status().as_u16();
+        Ok((status, resp.json().await.unwrap_or(serde_json::Value::Null)))
+    }
+
     /// Guest APIs use requestPlain for empty requests; sign the actual empty body.
     /// Errors intentionally exclude response text and URL (both can contain secrets).
     pub async fn assist_post(&self, path: &str, body: Option<&serde_json::Value>) -> Result<(u16, serde_json::Value), String> {

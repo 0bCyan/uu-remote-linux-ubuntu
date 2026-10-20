@@ -3,6 +3,7 @@
 
 mod engine_plugin;
 mod doctor;
+mod wol;
 mod desktop_backend;
 mod desktop_session;
 mod desktop_power;
@@ -649,6 +650,11 @@ async fn serve(mut capture: Arc<ScreenCapture>, input: Arc<InputInjector>, shutd
                 }
                 SignalingEvent::Connected => {
                     log::info!("Signaling handshake established.");
+                    static WOL_REPORTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+                    if wol::enabled() && assist.as_ref().is_none_or(|s| s.is_account()) && !WOL_REPORTED.swap(true, std::sync::atomic::Ordering::AcqRel) {
+                        let client = auth.clone();
+                        tokio::spawn(async move { wol::report(&client).await; });
+                    }
                 }
                 SignalingEvent::RoomInfoAck(_) => { log::info!("RoomInfo acknowledged by NetEase server"); }
                 SignalingEvent::DeviceInfoChanged(val) => {
@@ -657,6 +663,21 @@ async fn serve(mut capture: Arc<ScreenCapture>, input: Arc<InputInjector>, shutd
                         let keys = |v: Option<&serde_json::Value>| v.and_then(|v| v.as_object()).map(|o| o.keys().cloned().collect::<Vec<_>>()).unwrap_or_default();
                         log::debug!("Assist bmsg_push shape: type={:?} keys={:?} data_keys={:?}",
                             val.get("type").and_then(serde_json::Value::as_str), keys(Some(&val)), keys(val.get("data")));
+                    }
+                    if val.get("type").and_then(serde_json::Value::as_str) == Some("wake_on_lan") {
+                        // Key names only: the target carries a MAC and LAN address.
+                        let data = val.get("data").unwrap_or(&val);
+                        log::info!("wake_on_lan push received: keys={:?} target_keys={:?} helper_enabled={}",
+                            data.as_object().map(|o| o.keys().cloned().collect::<Vec<_>>()).unwrap_or_default(),
+                            data.get("target_device").and_then(|t| t.as_object()).map(|o| o.keys().cloned().collect::<Vec<_>>()).unwrap_or_default(),
+                            wol::enabled());
+                        if wol::enabled() {
+                            match wol::handle_push(data) {
+                                Ok(sent) => log::info!("WOL helper: magic packet sent ({sent} datagrams)"),
+                                Err(error) => log::warn!("WOL helper: {error}"),
+                            }
+                        }
+                        continue;
                     }
                     if val.get("type").and_then(serde_json::Value::as_str) == Some("get_control_mode") {
                         if let Some(s) = assist.as_mut() {
