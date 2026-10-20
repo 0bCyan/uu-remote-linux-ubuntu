@@ -112,6 +112,14 @@ fn fps_from_option(value: u64) -> Option<u64> {
 
 /// Applies a capture-setting RPC to `settings` and returns the RpcResponse payload (Message 22),
 /// or None when the RPC is not a capture/fps/quality setting.
+/// max_custom_bitrate (field 8) in bit/s: the mobile viewer sends 1_000_000 for 1 Mbps (#67). Values
+/// that can only be a different unit stay usable instead of collapsing to a 1 kbit/s cap: below 1000
+/// they are Mbit/s, below 200_000 kbit/s (no viewer offers custom rates under 200 kbit/s).
+fn custom_bitrate_bps(value: u64) -> u32 {
+    let bps = if value < 1_000 { value * 1_000_000 } else if value < 200_000 { value * 1_000 } else { value };
+    bps.min(u64::from(u32::MAX)) as u32
+}
+
 pub fn handle_rpc(rpc: &[WireField], settings: &watch::Sender<VideoSettings>, native: (u32, u32)) -> Option<Vec<u8>> {
     handle_rpc_with_codecs(rpc, settings, native, true, false)
 }
@@ -148,7 +156,7 @@ fn apply_rpc(rpc: &[WireField], settings: &watch::Sender<VideoSettings>, native:
         // Field 1 is the viewer's fps option index (1 = 30, 2 = 60, ...); 18 fpsCount is the frame rate.
         if let Some(fps) = number(&fields, 18).filter(|v| *v > 0).or_else(|| number(&fields, 1).and_then(fps_from_option)) { next.fps = fps as u32; }
         if let Some(quality) = number(&fields, 2).filter(|v| *v > 0) { next.quality = quality; }
-        if let Some(bitrate) = number(&fields, 8).filter(|v| *v > 0) { next.custom_bps = bitrate.min(u64::from(u32::MAX)) as u32; }
+        if let Some(bitrate) = number(&fields, 8).filter(|v| *v > 0) { next.custom_bps = custom_bitrate_bps(bitrate); }
         // Field 7 chorma_format (sic): 3 = 4:4:4 when 真彩 is on, 1 = 4:2:0. The Sync reports what is encoded.
         match number(&fields, 7) {
             Some(CHROMA_444) if full_chroma => next.chroma = CHROMA_444,
@@ -485,6 +493,13 @@ mod tests {
             let sync = sync_payload(&rx.borrow(), (1920, 1080));
             assert_eq!(number(&decode_wire(&sync).unwrap(), 4), Some(bps));
         }
+    }
+
+    #[test]
+    fn small_custom_bitrates_are_read_as_larger_units() {
+        assert_eq!(custom_bitrate_bps(20), 20_000_000);
+        assert_eq!(custom_bitrate_bps(8_000), 8_000_000);
+        assert_eq!(custom_bitrate_bps(1_000_000), 1_000_000);
     }
 
     #[test]

@@ -268,6 +268,7 @@ pub async fn prepare_device() -> Result<(Value, Credentials), String> {
 pub(crate) async fn flow(ui: &LoginUi) -> Result<String, String> {
     let (mut cfg, creds) = prepare_device().await?;
     let client = UUAuthClient::new(creds.clone());
+    let mut instant_expiries = 0u32;
 
     loop {
         let (status, resp) = client.post_json("/api/v1/qrcode/gen/login", &json!({})).await?;
@@ -293,11 +294,14 @@ pub(crate) async fn flow(ui: &LoginUi) -> Result<String, String> {
         // 1 waiting, 2 scanned, 4 after the phone confirmed); the server answers when it changes.
         let mut login_status = 1i64;
         let mut expired = false;
+        let generated = std::time::Instant::now();
         for _ in 0..150 {
             let query = json!({"token": ticket, "qrcode_jump_url": url, "login_status": login_status});
+            let asked = std::time::Instant::now();
             let (status, resp) = match client.post_json("/api/v1/qrcode/login/status", &query).await {
                 Ok(r) => r,
-                Err(_) => continue, // long-poll timeout: ask again
+                // Long-poll timeout: ask again, but never spin on transport errors (#68).
+                Err(_) => { if asked.elapsed() < Duration::from_secs(1) { tokio::time::sleep(Duration::from_secs(2)).await; } continue; }
             };
             // Code 1190 (HTTP 400, "二维码已失效"): the QR expired; generate a new one.
             if resp.get("code").and_then(|c| c.as_i64()) == Some(QR_EXPIRED) {
@@ -305,7 +309,12 @@ pub(crate) async fn flow(ui: &LoginUi) -> Result<String, String> {
                 expired = true; break;
             }
             let st = data("qrcode status", status, &resp)?.get("status").and_then(|v| v.as_i64()).unwrap_or(login_status);
-            if st == login_status { continue; }
+            if st == login_status {
+                // The server normally holds this request; an immediate unchanged answer must not
+                // turn into a tight loop of dozens of requests per second (#68).
+                if asked.elapsed() < Duration::from_secs(1) { tokio::time::sleep(Duration::from_secs(2)).await; }
+                continue;
+            }
             login_status = st;
             match st {
                 2 => {
@@ -343,7 +352,15 @@ pub(crate) async fn flow(ui: &LoginUi) -> Result<String, String> {
             }
         }
         println!("{}", if expired { "QR code expired; generating a new one" } else { "QR code timed out; generating a new one" });
-        tokio::time::sleep(Duration::from_secs(1)).await; // never spin if the server keeps refusing
+        // A QR rejected within seconds of being generated, again and again, was seen when the cloud
+        // flagged this device identity (#68): back off and say how to recover.
+        if expired && generated.elapsed() < Duration::from_secs(10) { instant_expiries += 1; } else { instant_expiries = 0; }
+        if instant_expiries == 3 {
+            eprintln!("The QR code keeps expiring immediately. If this persists, the cloud may reject this device identity: \
+                back up and remove ~/.config/uuremote/config.json, then run `uuremote-server login` again to register a new device.");
+            ui.status("二维码反复立即失效：可备份并删除 ~/.config/uuremote/config.json 后重新登录（会注册新设备）", Tone::Error);
+        }
+        tokio::time::sleep(Duration::from_secs(1u64 << instant_expiries.min(5))).await; // never spin if the server keeps refusing
     }
 }
 

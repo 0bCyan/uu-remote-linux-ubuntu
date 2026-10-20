@@ -77,7 +77,7 @@ pub async fn run() -> Result<(), String> {
     // A session without any display cannot capture a screen; say so instead of naming a backend.
     if let Ok(selected) = &selected {
         if missing_display(*selected, backend::headless(), std::env::var_os("DISPLAY").as_deref(), std::env::var_os("WAYLAND_DISPLAY").as_deref()) {
-            println!("  ! no display in this session (DISPLAY and WAYLAND_DISPLAY are unset): the desktop backend cannot capture a screen");
+            println!("  ! DISPLAY and WAYLAND_DISPLAY are unset: the X11 engine will only try :0 and :1; without an X server there, no screen can be captured");
             println!("    terminal, file transfer and port mapping still work; UU_DESKTOP_BACKEND=none marks the host as headless");
         }
     }
