@@ -6,6 +6,16 @@ pub enum DesktopBackend { X11, Wayland, Portal, Kms }
 /// port mapping stay available (servers without a monitor or logged-in session).
 pub fn headless() -> bool { std::env::var("UU_DESKTOP_BACKEND").is_ok_and(|v| v == "none") }
 
+/// A Wayland compositor socket exists for this user or the environment says so, even when this
+/// process (e.g. a systemd unit with only DISPLAY set) would select X11.
+pub fn wayland_session_running() -> bool {
+    std::env::var("XDG_SESSION_TYPE").is_ok_and(|v| v == "wayland")
+        || std::env::var("WAYLAND_DISPLAY").is_ok_and(|v| !v.is_empty())
+        || std::env::var_os("XDG_RUNTIME_DIR").and_then(|dir| std::fs::read_dir(dir).ok())
+            .is_some_and(|entries| entries.flatten().any(|e| e.file_name().to_str()
+                .is_some_and(|n| n.starts_with("wayland-") && !n.ends_with(".lock"))))
+}
+
 pub fn detect() -> Result<DesktopBackend, String> {
     let backend=select(std::env::var("UU_DESKTOP_BACKEND").ok().as_deref(),
         std::env::var("XDG_SESSION_TYPE").ok().as_deref(),

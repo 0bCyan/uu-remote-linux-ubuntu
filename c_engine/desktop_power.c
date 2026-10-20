@@ -7,6 +7,8 @@
 #define SESSION_DEST "org.gnome.SessionManager"
 #define SESSION_PATH "/org/gnome/SessionManager"
 #define SESSION_IFACE "org.gnome.SessionManager"
+#define SCREENSAVER_DEST "org.freedesktop.ScreenSaver"
+#define SCREENSAVER_PATH "/org/freedesktop/ScreenSaver"
 
 enum {
     UU_POWER_OK = 0,
@@ -17,6 +19,7 @@ enum {
 struct uu_idle_inhibitor {
     GDBusConnection *connection;
     guint32 cookie;
+    int freedesktop; /* org.freedesktop.ScreenSaver (KDE) instead of org.gnome.SessionManager */
 };
 
 struct setup_timeout {
@@ -138,13 +141,45 @@ struct uu_idle_inhibitor *uu_desktop_idle_inhibitor_acquire(int *error_code) {
     return inhibitor;
 }
 
+/* KDE (and other desktops implementing the freedesktop idle-inhibition spec): the inhibition is
+   also dropped by the screensaver when this private connection closes. */
+struct uu_idle_inhibitor *uu_desktop_screensaver_inhibitor_acquire(int *error_code) {
+    if (!error_code) return NULL;
+    *error_code = UU_POWER_OK;
+    GDBusConnection *connection = private_session_bus(error_code);
+    if (!connection) return NULL;
+    GError *error = NULL;
+    GVariant *reply = g_dbus_connection_call_sync(
+        connection, SCREENSAVER_DEST, SCREENSAVER_PATH, SCREENSAVER_DEST, "Inhibit",
+        g_variant_new("(ss)", "uu-remote-linux", "Remote desktop session is active"),
+        G_VARIANT_TYPE("(u)"), G_DBUS_CALL_FLAGS_NONE, CALL_TIMEOUT_MS, NULL, &error);
+    g_clear_error(&error);
+    struct uu_idle_inhibitor *inhibitor = reply ? calloc(1, sizeof(*inhibitor)) : NULL;
+    if (!inhibitor) {
+        *error_code = UU_POWER_CALL_FAILED;
+        if (reply) g_variant_unref(reply);
+        close_private_bus(connection);
+        return NULL;
+    }
+    g_variant_get(reply, "(u)", &inhibitor->cookie);
+    g_variant_unref(reply);
+    inhibitor->connection = connection;
+    inhibitor->freedesktop = 1;
+    return inhibitor;
+}
+
 void uu_desktop_idle_inhibitor_release(struct uu_idle_inhibitor *inhibitor) {
     if (!inhibitor) return;
     GError *error = NULL;
-    GVariant *reply = g_dbus_connection_call_sync(
-        inhibitor->connection, SESSION_DEST, SESSION_PATH, SESSION_IFACE, "Uninhibit",
-        g_variant_new("(u)", inhibitor->cookie), G_VARIANT_TYPE("()"),
-        G_DBUS_CALL_FLAGS_NONE, CALL_TIMEOUT_MS, NULL, &error);
+    GVariant *reply = inhibitor->freedesktop
+        ? g_dbus_connection_call_sync(
+            inhibitor->connection, SCREENSAVER_DEST, SCREENSAVER_PATH, SCREENSAVER_DEST, "UnInhibit",
+            g_variant_new("(u)", inhibitor->cookie), G_VARIANT_TYPE("()"),
+            G_DBUS_CALL_FLAGS_NONE, CALL_TIMEOUT_MS, NULL, &error)
+        : g_dbus_connection_call_sync(
+            inhibitor->connection, SESSION_DEST, SESSION_PATH, SESSION_IFACE, "Uninhibit",
+            g_variant_new("(u)", inhibitor->cookie), G_VARIANT_TYPE("()"),
+            G_DBUS_CALL_FLAGS_NONE, CALL_TIMEOUT_MS, NULL, &error);
     if (reply) g_variant_unref(reply);
     g_clear_error(&error);
 

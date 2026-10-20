@@ -410,6 +410,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let _audio_cleanup=virtual_audio::Cleanup;
     log::info!("Starting uu-remote-linux host v{}...", env!("CARGO_PKG_VERSION"));
 
+    if !desktop_backend::headless() && desktop_backend::detect()? == desktop_backend::DesktopBackend::X11 && desktop_backend::wayland_session_running() {
+        // X11 capture inside a Wayland session reads XWayland's root window: all black, no error (#61).
+        log::warn!("A Wayland session is running but the X11 backend is selected: the picture will be black. Run inside the Wayland session (WAYLAND_DISPLAY set, UU_DESKTOP_BACKEND=auto) or log in to the Xorg session");
+    }
     let capture = Arc::new((if desktop_backend::headless() {
         Err("headless mode (UU_DESKTOP_BACKEND=none)".to_owned())
     } else if desktop_backend::detect()?==desktop_backend::DesktopBackend::Portal {

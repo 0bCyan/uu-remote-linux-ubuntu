@@ -8,6 +8,7 @@ mod native {
         fn uu_desktop_power_wake() -> i32;
         fn uu_desktop_idle_inhibitor_acquire(error: *mut i32) -> *mut c_void;
         fn uu_desktop_idle_inhibitor_release(inhibitor: *mut c_void);
+        fn uu_desktop_screensaver_inhibitor_acquire(error: *mut i32) -> *mut c_void;
     }
 
     pub struct Handle(NonNull<c_void>);
@@ -16,9 +17,9 @@ mod native {
     unsafe impl Send for Handle {}
 
     impl Handle {
-        pub fn acquire() -> Result<Self, String> {
+        pub fn acquire(gnome: bool) -> Result<Self, String> {
             let mut error = 0;
-            let pointer = unsafe { uu_desktop_idle_inhibitor_acquire(&mut error) };
+            let pointer = unsafe { if gnome { uu_desktop_idle_inhibitor_acquire(&mut error) } else { uu_desktop_screensaver_inhibitor_acquire(&mut error) } };
             NonNull::new(pointer).map(Self).ok_or_else(|| super::error("idle inhibition", error))
         }
 
@@ -50,7 +51,9 @@ pub fn wake() -> Result<(), String> {
     }
 }
 
-/// Holds a GNOME SessionManager idle-only inhibitor until dropped.
+/// Holds an idle-only inhibitor until dropped: GNOME SessionManager on GNOME, the freedesktop
+/// ScreenSaver interface on KDE (remote input through the portal does not count as activity
+/// there, so the session locked mid-session, #61).
 ///
 /// Acquire and drop perform blocking D-Bus work. Session-bus setup and each method call are
 /// bounded to three seconds. Callers on an async runtime should move both operations to a
@@ -62,7 +65,8 @@ pub struct IdleInhibitor {
 
 impl IdleInhibitor {
     pub fn acquire() -> Result<Self, String> {
-        if !gnome_portal_active() {
+        let kde = portal_desktop_is("kde");
+        if !gnome_portal_active() && !kde {
             return Ok(Self {
                 #[cfg(all(target_os = "linux", feature = "portal"))]
                 _handle: None,
@@ -70,7 +74,7 @@ impl IdleInhibitor {
         }
         #[cfg(all(target_os = "linux", feature = "portal"))]
         {
-            native::Handle::acquire().map(|handle| Self { _handle: Some(handle) })
+            native::Handle::acquire(!kde).map(|handle| Self { _handle: Some(handle) })
         }
         #[cfg(not(all(target_os = "linux", feature = "portal")))]
         {
@@ -79,10 +83,12 @@ impl IdleInhibitor {
     }
 }
 
-fn gnome_portal_active() -> bool {
-    let gnome = std::env::var("XDG_CURRENT_DESKTOP").unwrap_or_default().split(':')
-        .any(|desktop| desktop.eq_ignore_ascii_case("gnome"));
-    gnome && crate::desktop_backend::detect().is_ok_and(|backend| backend == crate::desktop_backend::DesktopBackend::Portal)
+fn gnome_portal_active() -> bool { portal_desktop_is("gnome") }
+
+fn portal_desktop_is(name: &str) -> bool {
+    let matches = std::env::var("XDG_CURRENT_DESKTOP").unwrap_or_default().split(':')
+        .any(|desktop| desktop.eq_ignore_ascii_case(name));
+    matches && crate::desktop_backend::detect().is_ok_and(|backend| backend == crate::desktop_backend::DesktopBackend::Portal)
 }
 
 #[cfg(all(target_os = "linux", feature = "portal"))]
