@@ -344,6 +344,8 @@ Common environment variables:
 Host settings such as "lock after remote session" and "mute host" are stored in
 `~/.config/uuremote/host_settings.json`.
 
+Custom bitrate follows the Mbps value selected in the client; for example, 1 Mbps sets an encoder cap of 1000 kbit/s.
+
 With external FFmpeg CPU encoding, the bitrate presets (Original / Ultra / HD / custom) use average bitrate (ABR) to avoid gray keyframes at 4K and low bitrates; Auto keeps constant rate factor (CRF).
 
 ## Let an AI agent install or develop it

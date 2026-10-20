@@ -45,8 +45,8 @@ pub struct VideoSettings {
     pub fps: u32,
     pub codec: VideoCodec,
     pub quality: u64,
-    /// Viewer max_custom_bitrate (only used for QUALITY_CUSTOM): Mbit/s, or kbit/s above 1000.
-    pub custom_mbps: u32,
+    /// Viewer max_custom_bitrate in bits/s (only used for QUALITY_CUSTOM).
+    pub custom_bps: u32,
     /// Scaled stream size (其他分辨率); None streams the native desktop size.
     pub output: Option<(u32, u32)>,
     /// CHROMA_420 or CHROMA_444 (真彩); 4:4:4 only when the encoder pipeline supports it.
@@ -54,7 +54,7 @@ pub struct VideoSettings {
 }
 
 impl Default for VideoSettings {
-    fn default() -> Self { let (source_id,source_generation)=crate::wayland::selection(); Self { source_id,source_generation, codec: VideoCodec::H264, fps: 60, quality: QUALITY_AUTO, custom_mbps: 0, output: None, chroma: CHROMA_420 } }
+    fn default() -> Self { let (source_id,source_generation)=crate::wayland::selection(); Self { source_id,source_generation, codec: VideoCodec::H264, fps: 60, quality: QUALITY_AUTO, custom_bps: 0, output: None, chroma: CHROMA_420 } }
 }
 
 /// Selectable smaller stream sizes with the desktop's aspect ratio (even dimensions).
@@ -86,8 +86,8 @@ impl VideoSettings {
             QUALITY_GENERAL => Some(2_000),
             QUALITY_HD => Some(8_000),
             QUALITY_BLURAY => Some(20_000),
-            QUALITY_CUSTOM if self.custom_mbps > 0 =>
-                Some(if self.custom_mbps > 1_000 { self.custom_mbps } else { self.custom_mbps * 1_000 }.min(100_000)),
+            QUALITY_CUSTOM if self.custom_bps > 0 =>
+                Some((self.custom_bps / 1_000).clamp(1, 100_000)),
             _ => None,
         }
     }
@@ -148,7 +148,7 @@ fn apply_rpc(rpc: &[WireField], settings: &watch::Sender<VideoSettings>, native:
         // Field 1 is the viewer's fps option index (1 = 30, 2 = 60, ...); 18 fpsCount is the frame rate.
         if let Some(fps) = number(&fields, 18).filter(|v| *v > 0).or_else(|| number(&fields, 1).and_then(fps_from_option)) { next.fps = fps as u32; }
         if let Some(quality) = number(&fields, 2).filter(|v| *v > 0) { next.quality = quality; }
-        if let Some(bitrate) = number(&fields, 8).filter(|v| *v > 0) { next.custom_mbps = bitrate as u32; }
+        if let Some(bitrate) = number(&fields, 8).filter(|v| *v > 0) { next.custom_bps = bitrate.min(u64::from(u32::MAX)) as u32; }
         // Field 7 chorma_format (sic): 3 = 4:4:4 when 真彩 is on, 1 = 4:2:0. The Sync reports what is encoded.
         match number(&fields, 7) {
             Some(CHROMA_444) if full_chroma => next.chroma = CHROMA_444,
@@ -237,7 +237,7 @@ pub fn sync_payload(settings: &VideoSettings, native: (u32, u32)) -> Vec<u8> {
     put_varint(1, u64::from(settings.fps), &mut out);
     put_varint(2, settings.quality, &mut out);
     put_varint(3, settings.chroma, &mut out);
-    if settings.custom_mbps > 0 { put_varint(4, u64::from(settings.custom_mbps), &mut out); }
+    if settings.custom_bps > 0 { put_varint(4, u64::from(settings.custom_bps), &mut out); }
     put_varint(5, u64::from(size.0), &mut out);
     put_varint(6, u64::from(size.1), &mut out);
     put_varint(9, u64::from(size.0), &mut out);
@@ -284,7 +284,7 @@ mod tests {
         put_varint(18, 30, &mut body);
         let request = rpc(77, 2, &body);
         let response = handle_rpc(&decode_wire(&request).unwrap(), &tx, (1920, 1080)).unwrap();
-        assert_eq!(*rx.borrow(), VideoSettings { source_id:0,source_generation:0, codec: VideoCodec::H264, fps: 30, quality: QUALITY_GENERAL, custom_mbps: 0, output: None, chroma: CHROMA_420 });
+        assert_eq!(*rx.borrow(), VideoSettings { source_id:0,source_generation:0, codec: VideoCodec::H264, fps: 30, quality: QUALITY_GENERAL, custom_bps: 0, output: None, chroma: CHROMA_420 });
         assert_eq!(rx.borrow().max_kbps(), Some(2_000));
         let fields = decode_wire(&response).unwrap();
         assert_eq!(message(&fields, 1), Some(&[8u8, 77][..]));
@@ -468,8 +468,33 @@ mod tests {
     #[test]
     fn auto_quality_keeps_constant_quality_encoding() {
         assert_eq!(VideoSettings::default().max_kbps(), None);
-        assert_eq!(VideoSettings { quality: QUALITY_CUSTOM, custom_mbps: 0, ..Default::default() }.max_kbps(), None);
-        assert_eq!(VideoSettings { quality: QUALITY_CUSTOM, custom_mbps: 12, ..Default::default() }.max_kbps(), Some(12_000));
+        assert_eq!(VideoSettings { quality: QUALITY_CUSTOM, custom_bps: 0, ..Default::default() }.max_kbps(), None);
+        assert_eq!(VideoSettings { quality: QUALITY_CUSTOM, custom_bps: 12_000_000, ..Default::default() }.max_kbps(), Some(12_000));
+    }
+
+    #[test]
+    fn mobile_custom_bitrate_is_bits_per_second_in_request_and_sync() {
+        // Mobile viewer sends field 8 = 1_000_000 for 1 Mbps (observed live, 2026-10-20).
+        for (bps, kbps) in [(1_000_000, 1_000), (30_000_000, 30_000), (500_000, 500), (100_000_000, 100_000), (200_000_000, 100_000)] {
+            let (tx, rx) = watch::channel(VideoSettings::default());
+            let mut body = Vec::new();
+            put_varint(2, QUALITY_CUSTOM, &mut body);
+            put_varint(8, bps, &mut body);
+            handle_rpc(&decode_wire(&rpc(7, 2, &body)).unwrap(), &tx, (1920, 1080)).unwrap();
+            assert_eq!(rx.borrow().max_kbps(), Some(kbps));
+            let sync = sync_payload(&rx.borrow(), (1920, 1080));
+            assert_eq!(number(&decode_wire(&sync).unwrap(), 4), Some(bps));
+        }
+    }
+
+    #[test]
+    fn oversized_custom_bitrate_does_not_wrap_before_encoder_limit() {
+        let (tx, rx) = watch::channel(VideoSettings::default());
+        let mut body = Vec::new();
+        put_varint(2, QUALITY_CUSTOM, &mut body);
+        put_varint(8, u64::from(u32::MAX) + 1, &mut body);
+        handle_rpc(&decode_wire(&rpc(8, 2, &body)).unwrap(), &tx, (1920, 1080)).unwrap();
+        assert_eq!(rx.borrow().max_kbps(), Some(100_000));
     }
 
     #[test]
