@@ -117,7 +117,18 @@ GNOME Portal 的控制通道不再等待授权窗口或第一帧画面：先通�
 
 ### 0. 直接用 Release 预编译包（推荐，x86_64 / aarch64）
 
-从 [Releases](../../releases/latest) 下载 `uu-remote-linux-<版本>-x86_64-linux.tar.gz`（ARM64 选 `aarch64-linux`），解压后：
+**Ubuntu / Debian（v0.2.18 起）**：下载 `uu-remote-linux_<版本>_amd64.deb`（ARM64 选 `arm64`）后：
+
+```sh
+sudo apt install ./uu-remote-linux_<版本>_amd64.deb
+uuremote-server login                                   # 用 UU 远程 App 扫码
+systemctl --user enable --now uuremote-native.service   # 随图形会话启动
+```
+
+deb 会安装程序、插件、用户级 systemd 服务和应用菜单图标；uinput 权限不会自动开启（见第 5 步）。
+GNOME / KDE 会把显示环境自动传给服务；Xfce 等不传的桌面需按第 4 步补 `DISPLAY`。
+
+**其他发行版**：从 [Releases](../../releases/latest) 下载 `uu-remote-linux-<版本>-x86_64-linux.tar.gz`（ARM64 选 `aarch64-linux`），解压后：
 
 ```sh
 install -Dm755 uuremote-server ~/.local/bin/uuremote-server

@@ -35,6 +35,14 @@ jobs:
         run: |
           cargo build --locked --features wayland,portal,engine-plugins --bin uuremote-server
           test -f target/debug/libuu-wayland.so
+      - name: Debian package installs
+        run: |
+          packaging/deb/build-deb.sh 0.0.0~ci target/debug /tmp/deb
+          dpkg-deb -I /tmp/deb/*.deb | grep -E 'Depends|Recommends'
+          sudo apt-get install -y /tmp/deb/*.deb
+          uuremote-server --help | head -1
+          test -f /usr/lib/uu-remote-linux/libuu-wayland.so
+          systemd-analyze verify /usr/lib/systemd/user/uuremote-native.service
 
   test-viewer:
     runs-on: ubuntu-22.04

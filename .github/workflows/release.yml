@@ -69,10 +69,20 @@ jobs:
           cp -r contrib "$name/"
           tar czf "$name.tar.gz" "$name"
           sha256sum "$name.tar.gz" > "$name.tar.gz.sha256"
+      - name: Debian package
+        run: |
+          packaging/deb/build-deb.sh "${GITHUB_REF_NAME#v}" target/release .
+          deb=$(ls uu-remote-linux_*.deb)
+          sha256sum "$deb" > "$deb.sha256"
+          sudo apt-get install -y "./$deb"
+          uuremote-server --help | head -1
+          systemd-analyze verify /usr/lib/systemd/user/uuremote-native.service
       - uses: actions/upload-artifact@v4
         with:
           name: package-${{ matrix.arch }}
-          path: uu-remote-linux-*.tar.gz*
+          path: |
+            uu-remote-linux-*.tar.gz*
+            uu-remote-linux_*.deb*
 
   # One publisher, so the matrix legs never race to create the release.
   release:
@@ -90,6 +100,8 @@ jobs:
           files: |
             uu-remote-linux-*.tar.gz
             uu-remote-linux-*.tar.gz.sha256
+            uu-remote-linux_*.deb
+            uu-remote-linux_*.deb.sha256
 
   # Headless NAS image (docker/), built from the release tarball published by the job above.
   docker:

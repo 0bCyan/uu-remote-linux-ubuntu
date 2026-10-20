@@ -131,7 +131,18 @@ Switching reuses one video track and pauses input until the new source sends a f
 
 ### 0. Prebuilt release package (recommended, x86_64 / aarch64)
 
-Download `uu-remote-linux-<version>-x86_64-linux.tar.gz` (ARM64: `aarch64-linux`) from [Releases](../../releases/latest), extract it, then:
+**Ubuntu / Debian (v0.2.18+)**: download `uu-remote-linux_<version>_amd64.deb` (ARM64: `arm64`), then:
+
+```sh
+sudo apt install ./uu-remote-linux_<version>_amd64.deb
+uuremote-server login                                   # scan the QR code with the UU Remote app
+systemctl --user enable --now uuremote-native.service   # start with the graphical session
+```
+
+The deb installs the binaries, plugins, a systemd user unit and menu entries; uinput access stays opt-in (step 5).
+GNOME and KDE pass the display environment to the unit; on desktops that don't (e.g. Xfce) add `DISPLAY` as in step 4.
+
+**Other distributions**: download `uu-remote-linux-<version>-x86_64-linux.tar.gz` (ARM64: `aarch64-linux`) from [Releases](../../releases/latest), extract it, then:
 
 ```sh
 install -Dm755 uuremote-server ~/.local/bin/uuremote-server
