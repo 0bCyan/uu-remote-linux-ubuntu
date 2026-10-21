@@ -1,6 +1,10 @@
 fn main() {
     println!("cargo:rerun-if-changed=c_engine/portal_clipboard.inc");
     println!("cargo:rerun-if-changed=c_engine/x11_engine.c");
+    println!("cargo:rerun-if-changed=c_engine/nvenc_engine.c");
+    println!("cargo:rerun-if-changed=c_engine/nvenc_engine.h");
+    println!("cargo:rerun-if-changed=vendor/ffnvcodec/ffnvcodec/dynlink_cuda.h");
+    println!("cargo:rerun-if-changed=vendor/ffnvcodec/ffnvcodec/nvEncodeAPI.h");
     println!("cargo:rerun-if-changed=c_engine/clipboard.c");
     println!("cargo:rerun-if-changed=c_engine/assist_window.c");
     println!("cargo:rerun-if-changed=c_engine/viewer_window.c");
@@ -21,11 +25,15 @@ fn main() {
             build.compile("uu_kms_engine");
             println!("cargo:rustc-link-lib=drm");
         }
-        cc::Build::new()
-            .file("c_engine/x11_engine.c")
+        let mut x11_build = cc::Build::new();
+        x11_build.file("c_engine/x11_engine.c")
             .file("c_engine/clipboard.c")
-            .file("c_engine/pam_check.c")
-            .compile("x11_engine");
+            .file("c_engine/pam_check.c");
+        if std::env::var_os("CARGO_FEATURE_INPROC_AV").is_some() {
+            x11_build.file("c_engine/nvenc_engine.c");
+            x11_build.include("vendor/ffnvcodec");
+        }
+        x11_build.compile("x11_engine");
 
         println!("cargo:rustc-link-lib=X11");
         println!("cargo:rustc-link-lib=Xext");

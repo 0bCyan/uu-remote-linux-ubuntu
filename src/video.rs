@@ -202,7 +202,7 @@ fn nvidia_present() -> bool {
 /// in-process encoder are 4:2:0 only).
 pub fn full_chroma_available() -> bool {
     #[cfg(feature = "inproc-av")]
-    if crate::inproc_encoder::selected() { return false; }
+    if crate::inproc_encoder::selected(Encoder::requested()) { return false; }
     Encoder::requested() != Encoder::Vaapi
 }
 
@@ -506,15 +506,31 @@ async fn read_encoder(
 ) -> Result<(), String> {
     // The sequence is shared so a CPU fallback or settings restart continues it (skip statistics stay correct).
     let encoder = Encoder::requested();
-    if encoder == Encoder::Cpu { return read_encoder_with(size,display,portal,latest,Encoder::Cpu,sequence,settings,idr,budget).await; }
-    match read_encoder_with(size,display.clone(),portal.clone(),latest.clone(),encoder,sequence.clone(),settings,idr.clone(),budget.clone()).await {
+    if encoder == Encoder::Cpu { return read_encoder_with(size,display,portal,latest,Encoder::Cpu,true,sequence,settings,idr,budget).await; }
+    #[cfg_attr(not(feature = "inproc-av"), allow(unused_mut))]
+    let mut result = read_encoder_with(size,display.clone(),portal.clone(),latest.clone(),encoder,true,sequence.clone(),settings,idr.clone(),budget.clone()).await;
+    // A failed native NVENC session (old driver, unsupported mode) still leaves FFmpeg's NVENC process pipeline.
+    #[cfg(feature = "inproc-av")]
+    if let Err(error) = &result {
+        if !latest.is_closed() && native_inproc(&display, portal.is_some(), encoder) {
+            log::warn!("In-process {} stream unavailable; switching to the FFmpeg process pipeline: {}",encoder.name_for(settings.codec),error);
+            result = read_encoder_with(size,display.clone(),portal.clone(),latest.clone(),encoder,false,sequence.clone(),settings,idr.clone(),budget.clone()).await;
+        }
+    }
+    match result {
         Ok(())=>Ok(()),
         Err(error) if !latest.is_closed()=>{
             log::warn!("{} stream unavailable; switching scoped encoder to CPU: {}",encoder.name_for(settings.codec),error);
-            read_encoder_with(size,display,portal,latest,Encoder::Cpu,sequence,settings,idr,budget).await
+            read_encoder_with(size,display,portal,latest,Encoder::Cpu,true,sequence,settings,idr,budget).await
         },
         Err(error)=>Err(error),
     }
+}
+
+/// The native in-process NVENC path serves X11 only (not Wayland/KMS capture or a portal session).
+#[cfg(feature = "inproc-av")]
+fn native_inproc(display: &str, portal: bool, encoder: Encoder) -> bool {
+    !display.starts_with("wayland:") && !display.starts_with("kms:") && !portal && crate::inproc_encoder::selected(encoder)
 }
 
 /// Capture and encode inside this process; each packet is one access unit.
@@ -528,9 +544,11 @@ async fn read_inprocess(
     let stop = Arc::new(AtomicBool::new(false));
     // If this future is dropped (reader task aborted), the blocking encoder stops at its next packet.
     let _stop_on_drop = StopOnDrop(stop.clone());
+    // A restart aborts the previous reader without waiting for its blocking encoder; wait for it here.
+    let slot = crate::inproc_encoder::stream_slot(&idr).await;
     let job = tokio::task::spawn_blocking({
         let stop = stop.clone();
-        move || crate::inproc_encoder::run(config, units_tx, stop, idr, budget)
+        move || { let _slot = slot; crate::inproc_encoder::run(config, units_tx, stop, idr, budget) }
     });
     let mut gate = DependencyGate::default();
     while let Some(unit) = units.recv().await {
@@ -579,7 +597,8 @@ fn rate_args(settings: &VideoSettings, encoder: Encoder) -> (String, String) {
 }
 
 async fn read_encoder_with(
-    size: (u32,u32),display:String,portal:Option<Arc<crate::portal::PortalSession>>,latest:mpsc::Sender<Arc<CompleteFrame>>,encoder:Encoder,sequence:Arc<std::sync::atomic::AtomicU64>,
+    size: (u32,u32),display:String,portal:Option<Arc<crate::portal::PortalSession>>,latest:mpsc::Sender<Arc<CompleteFrame>>,encoder:Encoder,
+    #[cfg_attr(not(feature = "inproc-av"), allow(unused_variables))] allow_inproc: bool,sequence:Arc<std::sync::atomic::AtomicU64>,
     settings: VideoSettings, #[cfg_attr(not(feature = "inproc-av"), allow(unused_variables))] idr: Arc<AtomicBool>, budget: Arc<Semaphore>,
 )->Result<(),String>{
     let selected_output=if display.starts_with("wayland:") {crate::wayland::source(settings.source_id)} else {None};
@@ -593,14 +612,13 @@ async fn read_encoder_with(
         Some(Arc::new(capture))
     } else { None };
     #[cfg(feature = "inproc-av")]
-    if !wayland && portal.is_none() && crate::inproc_encoder::selected() {
+    if allow_inproc && native_inproc(&display, portal.is_some(), encoder) {
         let max_kbps = settings.max_kbps().unwrap_or(30_000) as i64;
         let config = crate::inproc_encoder::Config {
             display: display.clone(), input: size, output: settings.output, fps: u32::from(settings.fps),
             gop: gop_frames(settings.fps, true) as u32, cq: settings.cq() as u32,
             target_bps: settings.max_kbps().map_or(16_000, |k| i64::from(k) * 3 / 4) * 1000,
-            max_bps: max_kbps * 1000, buffer_bits: i64::from(buffer_for(&settings, encoder)) * 1000, encoder, codec: settings.codec,
-            damage: crate::inproc_encoder::damage_enabled(),
+            max_bps: max_kbps * 1000, buffer_bits: i64::from(buffer_for(&settings, encoder)) * 1000, codec: settings.codec,
         };
         log::info!("Desktop encoder: display={} source={}x{} output={:?} fps={} cq={} maxrate={}k encoder={} pipeline=in-process",
             display,size.0,size.1,settings.output,settings.fps,config.cq,max_kbps,encoder.name_for(settings.codec));

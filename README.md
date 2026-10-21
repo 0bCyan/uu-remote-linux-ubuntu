@@ -171,9 +171,8 @@ cargo build --release --features wayland      # + Hyprland
 cargo build --release --features wayland,portal   # + GNOME/KDE Wayland
 ```
 
-可选的 `--features inproc-av`（进程内编码）和控制端的 `viewer-ffmpeg` 只支持 **FFmpeg 6.x**（`pkg-config --modversion libavcodec` 为 60.x）。
-FFmpeg 7 及以上会在依赖 `ffmpeg-sys-next` 里报 `avfft.h file not found`——它的构建脚本先于本项目运行，所以无法提前给出更清楚的提示（#63）。
-默认构建和预编译包都不需要这两个特性。
+控制端的 `viewer-ffmpeg` 只支持 **FFmpeg 6.x**（`pkg-config --modversion libavcodec` 为 60.x）；FFmpeg 7 及以上会在依赖 `ffmpeg-sys-next` 里报 `avfft.h file not found`（#63）。
+服务端可选的 `--features inproc-av` 是 X11 下的进程内 NVENC 编码：不链接 FFmpeg 开发库，运行时加载 NVIDIA 驱动库（`libcuda.so.1`、`libnvidia-encode.so.1`），需要支持 NVENC API 12.1 的驱动（530 及以上）。截屏与编码尺寸一致时 NVENC 直接读取 XShm 缓冲，省去一次主机到显存的拷贝。CPU、VAAPI 编码或 `UU_CAPTURE=grab` 仍走外部 FFmpeg 进程；进程内 NVENC 启动失败时先回退到 FFmpeg 的 NVENC 进程管线，再回退到 CPU。默认构建和预编译包都不需要该特性。
 
 ### 3. 登录
 
@@ -384,9 +383,9 @@ HEVC 的访问单元按 RFC 7798 的图片边界切分，不依赖 AUD：`hevc_v
 
 设置 `UU_VIDEO_ENCODER=vaapi` 使用 Intel/AMD H.264 VAAPI；`UU_VAAPI_DEVICE` 默认
 `/dev/dri/renderD128`，运行用户需要 render 节点权限。不会自动选择 VAAPI；设备或驱动初始化
-失败会明确警告并回退 libx264。外部 FFmpeg 和 `--features inproc-av` 均先转 NV12 再上传硬件帧。
+失败会明确警告并回退 libx264。外部 FFmpeg 先转 NV12 再上传硬件帧。
 VBR 使用控制端码率预设及 CQ 对应的最小 QP，无 B 帧、async depth=1，并保留现有 GOP/VFR 规则。
-Intel 核显（UHD 770，iHD 驱动）已实机验收：默认的外部 FFmpeg 管线用官方 Mac 控制端测试了各档画质、帧率、缩放和重连，全程硬件编码、无回退，CPU 占用比 libx264 低约 40%。**AMD 显卡和 `--features inproc-av` 管线的 VAAPI 尚未实机验证。**
+Intel 核显（UHD 770，iHD 驱动）已实机验收：默认的外部 FFmpeg 管线用官方 Mac 控制端测试了各档画质、帧率、缩放和重连，全程硬件编码、无回退，CPU 占用比 libx264 低约 40%。**AMD 显卡的 VAAPI 尚未实机验证。**
 
 高分辨率下 VAAPI 的默认 VBV 缓冲（100–500 kbit）会把关键帧压得过狠：2560×1440 H.264 VAAPI、30M
 上限、静止画面上实测首个 IDR 只有 59,910 字节，画面每隔一个 GOP 糊一下再慢慢恢复。设
@@ -451,8 +450,7 @@ WantedBy=graphical-session.target
 VAAPI 可选包：Intel 新显卡用 `intel-media-driver`，AMD 用 `libva-mesa-driver`，`libva-utils` 提供
 `vainfo`。KMS 依赖 `libdrm`。虚拟 Xfce 依赖 `xorg-server-xvfb xorg-xauth xorg-xdpyinfo
 xfce4-session xfce4-panel xfdesktop xfwm4 gnome-terminal`。
-滚动 Arch 的 FFmpeg 可能超出 `inproc-av` 支持的 6.x；请使用默认进程方案或独立的 FFmpeg 6 前缀，
-不要降级系统 FFmpeg。
+若编译包含 `viewer-ffmpeg`，滚动 Arch 的 FFmpeg 可能超出其支持的 6.x；请使用独立的 FFmpeg 6 前缀，不要降级系统 FFmpeg（服务端的 `--features inproc-av` 原生 NVENC 不依赖 FFmpeg）。
 
 ### 实验性 KMS 截屏
 
