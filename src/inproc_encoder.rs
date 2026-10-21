@@ -1,8 +1,12 @@
 //! In-process X11 capture (XDamage + XShm) and NVENC encoding through the NVIDIA driver.
+//! With UU_VIDEO_ENCODER=vaapi, H.264 / HEVC go through VAAPI instead: a DRI3 DMA-BUF of the root window is
+//! imported as a VA surface and converted/scaled by VPP, so the CPU never touches the pixels (XShm upload
+//! when DRI3 is unavailable).
 //! When capture and encoder sizes match, the XShm buffer is registered as CUDA pinned memory and
 //! NVENC reads it by DMA, so there is no host-to-device copy (the X server still writes XShm).
 
 use std::collections::VecDeque;
+use std::ffi::CString;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -29,6 +33,31 @@ struct NvencConfigFFI {
     chroma_444: libc::c_int,
 }
 
+#[repr(C)]
+struct VaapiEngineOpaque {
+    _private: [u8; 0],
+}
+
+#[repr(C)]
+struct VaapiConfigFFI {
+    width: u32,
+    height: u32,
+    cap_width: u32,
+    cap_height: u32,
+    fps: u32,
+    gop: u32,
+    target_bps: i64,
+    max_bps: i64,
+    buffer_bits: i64,
+    is_hevc: libc::c_int,
+    device: *const libc::c_char,
+}
+
+#[repr(C)]
+struct Dri3CaptureOpaque {
+    _private: [u8; 0],
+}
+
 extern "C" {
     fn nvenc_create(config: *const NvencConfigFFI) -> *mut NvencEngineOpaque;
     fn nvenc_register_host_buffer(
@@ -45,6 +74,24 @@ extern "C" {
         out_len: *mut u32,
     ) -> libc::c_int;
     fn nvenc_destroy(engine: *mut NvencEngineOpaque);
+
+    fn vaapi_create(config: *const VaapiConfigFFI) -> *mut VaapiEngineOpaque;
+    fn vaapi_import_dma_buffer(engine: *mut VaapiEngineOpaque, dma_fd: libc::c_int, stride: u32) -> libc::c_int;
+    fn vaapi_upload_host_buffer(engine: *mut VaapiEngineOpaque, host_ptr: *const u8, pitch: u32) -> libc::c_int;
+    fn vaapi_encode_frame(
+        engine: *mut VaapiEngineOpaque,
+        force_idr: libc::c_int,
+        out_data: *mut *const u8,
+        out_len: *mut u32,
+    ) -> libc::c_int;
+    fn vaapi_destroy(engine: *mut VaapiEngineOpaque);
+
+    fn dri3_capture_create(display_name: *const libc::c_char, width: u32, height: u32) -> *mut Dri3CaptureOpaque;
+    fn dri3_capture_blit(cap: *mut Dri3CaptureOpaque) -> libc::c_int;
+    fn dri3_capture_wait_damage(cap: *mut Dri3CaptureOpaque, timeout_ms: libc::c_int) -> libc::c_int;
+    fn dri3_capture_get_dma_fd(cap: *mut Dri3CaptureOpaque) -> libc::c_int;
+    fn dri3_capture_get_stride(cap: *mut Dri3CaptureOpaque) -> u32;
+    fn dri3_capture_destroy(cap: *mut Dri3CaptureOpaque);
 }
 
 struct SafeNvencEngine(*mut NvencEngineOpaque);
@@ -55,6 +102,28 @@ impl Drop for SafeNvencEngine {
     fn drop(&mut self) {
         if !self.0.is_null() {
             unsafe { nvenc_destroy(self.0) };
+            self.0 = std::ptr::null_mut();
+        }
+    }
+}
+
+struct SafeVaapiEngine(*mut VaapiEngineOpaque);
+unsafe impl Send for SafeVaapiEngine {}
+impl Drop for SafeVaapiEngine {
+    fn drop(&mut self) {
+        if !self.0.is_null() {
+            unsafe { vaapi_destroy(self.0) };
+            self.0 = std::ptr::null_mut();
+        }
+    }
+}
+
+struct SafeDri3Capture(*mut Dri3CaptureOpaque);
+unsafe impl Send for SafeDri3Capture {}
+impl Drop for SafeDri3Capture {
+    fn drop(&mut self) {
+        if !self.0.is_null() {
+            unsafe { dri3_capture_destroy(self.0) };
             self.0 = std::ptr::null_mut();
         }
     }
@@ -73,6 +142,8 @@ pub struct Config {
     pub codec: crate::capture_setting::VideoCodec,
     /// ChromaFormat (capture_setting::CHROMA_444 = 4:4:4).
     pub chroma: u64,
+    /// UU_VIDEO_ENCODER=vaapi: the VAAPI engine (H.264 / HEVC Main) instead of NVENC.
+    pub vaapi: bool,
 }
 
 pub fn disabled() -> bool {
@@ -84,7 +155,7 @@ pub fn damage_enabled() -> bool {
 }
 
 pub fn selected(encoder: crate::video::Encoder) -> bool {
-    encoder == crate::video::Encoder::Nvenc && damage_enabled() && !disabled() && crate::config::ffmpeg_root().is_none()
+    matches!(encoder, crate::video::Encoder::Nvenc | crate::video::Encoder::Vaapi) && damage_enabled() && !disabled() && crate::config::ffmpeg_root().is_none()
 }
 
 /// One encoder thread per stream. Aborting the reader only asks the blocking thread to stop at its
@@ -134,6 +205,205 @@ fn random_keepalive(seed: &mut u32) -> Duration {
 }
 
 pub fn run(
+    config: Config,
+    units: mpsc::Sender<EncodedUnit>,
+    stop: Arc<AtomicBool>,
+    idr: Arc<AtomicBool>,
+    budget: Arc<Semaphore>,
+) -> Result<(), String> {
+    if config.vaapi {
+        run_vaapi(config, units, stop, idr, budget)
+    } else {
+        run_nvenc(config, units, stop, idr, budget)
+    }
+}
+
+fn run_vaapi(
+    config: Config,
+    units: mpsc::Sender<EncodedUnit>,
+    stop: Arc<AtomicBool>,
+    idr: Arc<AtomicBool>,
+    budget: Arc<Semaphore>,
+) -> Result<(), String> {
+    let (width, height) = config.output.unwrap_or(config.input);
+    let (width, height) = (width + width % 2, height + height % 2);
+    let (cap_width, cap_height) = config.input;
+    log::info!(
+        "Initializing Native In-Process VAAPI: {}x{} -> {}x{}, {} fps, GOP {}, HEVC={}",
+        cap_width,
+        cap_height,
+        width,
+        height,
+        config.fps,
+        config.gop,
+        config.codec == crate::capture_setting::VideoCodec::H265
+    );
+    let device = CString::new(crate::video::vaapi_device()).map_err(|_| "UU_VAAPI_DEVICE contains NUL".to_string())?;
+    let ffi_cfg = VaapiConfigFFI {
+        width,
+        height,
+        cap_width,
+        cap_height,
+        fps: config.fps,
+        gop: config.gop,
+        target_bps: config.target_bps,
+        max_bps: config.max_bps,
+        buffer_bits: config.buffer_bits,
+        is_hevc: libc::c_int::from(config.codec == crate::capture_setting::VideoCodec::H265),
+        device: device.as_ptr(),
+    };
+    let raw_engine = unsafe { vaapi_create(&ffi_cfg) };
+    if raw_engine.is_null() {
+        return Err("Failed to create native VAAPI engine".into());
+    }
+    let engine = SafeVaapiEngine(raw_engine);
+
+    // Capture stays at the full input size; VPP scales (or pads) to the encoder size.
+    let display = CString::new(config.display.as_str()).map_err(|_| "DISPLAY contains NUL".to_string())?;
+    let dri3 = Some(SafeDri3Capture(unsafe { dri3_capture_create(display.as_ptr(), cap_width, cap_height) }))
+        .filter(|c| !c.0.is_null())
+        .filter(|c| unsafe {
+            let (fd, stride) = (dri3_capture_get_dma_fd(c.0), dri3_capture_get_stride(c.0));
+            fd >= 0 && stride > 0 && vaapi_import_dma_buffer(engine.0, fd, stride) == 0
+        });
+    let mut capture = None;
+    if dri3.is_some() {
+        log::info!("Native VAAPI imports a DRI3 DMA-BUF of the root window (GPU blit, VPP to NV12)");
+    } else {
+        log::warn!("DRI3 DMA-BUF unavailable on {}, uploading XShm frames to VAAPI", config.display);
+        capture = Some(
+            DamageCapture::open(&config.display)
+                .map_err(|e| format!("DamageCapture::open failed on {}: {e}", config.display))?,
+        );
+    }
+
+    let frame_interval = Duration::from_nanos(1_000_000_000 / u64::from(config.fps));
+    let mut seed = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(1, |d| d.subsec_nanos())
+        | 1;
+    let mut keepalive = random_keepalive(&mut seed);
+    let mut dirty = true;
+    let mut next_tick = Instant::now();
+    let mut last_send = Instant::now();
+    let mut permits = VecDeque::with_capacity(4);
+
+    let locked = crate::session_lock::watch_locked();
+    let mut last_locked = *locked.borrow();
+
+    loop {
+        if stop.load(Ordering::Relaxed) {
+            return Ok(());
+        }
+
+        let deadline = if dirty {
+            next_tick
+        } else {
+            last_send + keepalive
+        };
+        let timeout = deadline.saturating_duration_since(Instant::now());
+
+        if vaapi_wait(&dri3, &mut capture, timeout.max(Duration::from_millis(1)))? {
+            dirty = true;
+        }
+
+        let now = Instant::now();
+        if dirty && now < next_tick {
+            continue;
+        }
+        if !dirty && now < last_send + keepalive {
+            continue;
+        }
+
+        let Some(permit) = acquire(&budget, &units) else {
+            return Ok(());
+        };
+        if stop.load(Ordering::Relaxed) {
+            return Ok(());
+        }
+
+        dirty |= vaapi_wait(&dri3, &mut capture, Duration::ZERO)?;
+        let state = *locked.borrow();
+        if state != last_locked {
+            dirty = true;
+            last_locked = state;
+        }
+
+        let force_idr = if idr.swap(false, Ordering::AcqRel) {
+            1
+        } else {
+            0
+        };
+
+        // Keepalive frames re-encode the last surface; only damage needs a new copy of the screen.
+        if dirty {
+            match (dri3.as_ref(), capture.as_mut()) {
+                (Some(c), _) => {
+                    if unsafe { dri3_capture_blit(c.0) } != 0 {
+                        return Err("DRI3 blit of the root window failed".into());
+                    }
+                }
+                (None, Some(c)) => {
+                    let pitch = c.size().0 * 4;
+                    let res = unsafe { vaapi_upload_host_buffer(engine.0, c.capture()?.as_ptr(), pitch) };
+                    if res != 0 {
+                        return Err(format!("vaapi_upload_host_buffer failed with error {res}"));
+                    }
+                }
+                (None, None) => unreachable!(),
+            }
+        }
+
+        let mut out_data: *const u8 = std::ptr::null();
+        let mut out_len: u32 = 0;
+        let res = unsafe { vaapi_encode_frame(engine.0, force_idr, &mut out_data, &mut out_len) };
+        if res != 0 {
+            return Err(format!("vaapi_encode_frame failed with error {res}"));
+        }
+
+        if out_len > 0 && !out_data.is_null() {
+            let data = unsafe { std::slice::from_raw_parts(out_data, out_len as usize) }.to_vec();
+            permits.push_back(permit);
+            let send_permit = permits.pop_front().unwrap();
+
+            if units
+                .blocking_send(EncodedUnit {
+                    data,
+                    permit: send_permit,
+                    completed_at: Instant::now(),
+                })
+                .is_err()
+            {
+                return Ok(());
+            }
+        }
+
+        let now = Instant::now();
+        if dirty {
+            let next = next_tick + frame_interval;
+            next_tick = if next > now {
+                next
+            } else {
+                now + frame_interval
+            };
+            dirty = false;
+        }
+        last_send = now;
+        keepalive = random_keepalive(&mut seed);
+    }
+}
+fn vaapi_wait(dri3: &Option<SafeDri3Capture>, capture: &mut Option<DamageCapture>, timeout: Duration) -> Result<bool, String> {
+    match (dri3, capture) {
+        (Some(c), _) => match unsafe { dri3_capture_wait_damage(c.0, timeout.as_millis().min(1000) as i32) } {
+            r if r < 0 => Err("XDamage wait on the DRI3 connection failed".into()),
+            r => Ok(r > 0),
+        },
+        (None, Some(c)) => c.wait(timeout),
+        (None, None) => unreachable!(),
+    }
+}
+
+fn run_nvenc(
     config: Config,
     units: mpsc::Sender<EncodedUnit>,
     stop: Arc<AtomicBool>,
