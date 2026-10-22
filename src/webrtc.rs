@@ -560,6 +560,20 @@ impl WebRtcSession {
                                 (21, WireValue::Bytes(rpc)) => Some(*rpc), _ => None,
                             }) else { continue; };
                             let Ok(rpc_fields) = crate::protocol::decode_wire(rpc) else { continue; };
+                            // X11: 分辨率 changes the display mode itself, like the official Windows host; the stream
+                            // then carries the new native size instead of a scaled one (desktop_mode).
+                            let resized = if desktop && active_screen.init_error.is_none() && active_screen.portal.is_none()
+                                && active_screen.backend == crate::desktop_backend::DesktopBackend::X11 && crate::desktop_mode::enabled() {
+                                match crate::capture_setting::requested_resolution(&rpc_fields) {
+                                    Some(request) => {
+                                        let display = active_screen.display.clone();
+                                        tokio::task::spawn_blocking(move || crate::desktop_mode::apply(&display, request)).await.ok().flatten()
+                                            .filter(|size| *size != input_size)
+                                    },
+                                    None => None,
+                                }
+                            } else { None };
+                            let input_size = resized.unwrap_or(input_size);
                             let before = *settings.borrow();
                             let output_before = before.output;
                             let revision = track.revision();
@@ -571,6 +585,8 @@ impl WebRtcSession {
                                 let mut response=None;owner.with_current(||response=apply());response
                             } else {apply()};
                             let Some(response)=response else {continue;};
+                            // Restart capture even when the encoded settings are unchanged (native size, no scaling).
+                            if resized.is_some() { settings.send_modify(|s| s.source_generation = s.source_generation.wrapping_add(1)); }
                             let codec_changed = settings.borrow().codec != before.codec;
                             if desktop && codec_changed && !track.wait_for_applied(revision, &settings).await {
                                 log::warn!("Codec switch did not produce a transmitted frame; success reply withheld");
@@ -581,7 +597,7 @@ impl WebRtcSession {
                             let next = || sequence.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                             let _ = response_tx.send(crate::initialization::envelope(next(), timestamp, 22, &response));
                             let current = *settings.borrow();
-                            if current.output != output_before {
+                            if current.output != output_before || resized.is_some() {
                                 match crate::capture_setting::screen_sources(next(), timestamp, input_size, current.output, "Linux desktop") {
                                     Ok(screens) => { let _ = response_tx.send(screens); }
                                     Err(error) => log::warn!("Screen sources update failed: {}", error),
@@ -889,6 +905,8 @@ impl WebRtcSession {
 
                     Box::pin(async move {
                         let input_size = crate::wayland::input_size((screen.width, screen.height));
+                        // After a RandR resize the stream restarts capture at the new size; map the pointer to it.
+                        let live_x11 = screen.init_error.is_none() && screen.portal.is_none() && screen.backend == crate::desktop_backend::DesktopBackend::X11;
                         if let Some(term) = &terminal_worker {
                             if crate::terminal::is_frame(&msg.data) { term.handle(&msg.data); return; }
                         }
@@ -1160,7 +1178,7 @@ impl WebRtcSession {
                                             if let Some(session)=message_input_session.as_ref() {session.with_input(|| {
                                             if !crate::wayland::input_ready() {return;}
                                             match &event {
-                                                ControlInput::MouseAbsolute {x,y} => input_worker.mouse_absolute_normalized(*x,*y,crate::wayland::input_size(input_size)),
+                                                ControlInput::MouseAbsolute {x,y} => input_worker.mouse_absolute_normalized(*x,*y,crate::wayland::input_size(if live_x11 {crate::capture::x11_last_size().unwrap_or(input_size)} else {input_size})),
                                                 ControlInput::MouseRelative {dx,dy} => input_worker.mouse_relative(*dx,*dy),
                                                 ControlInput::MouseScroll {dx,dy} => input_worker.mouse_scroll(*dx,*dy),
                                                 ControlInput::Keyboard {key, pressed} => input_worker.windows_key_event(*key, *pressed),
