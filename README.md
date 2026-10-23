@@ -85,7 +85,7 @@ GNOME Portal 的控制通道不再等待授权窗口或第一帧画面：先通�
 
 锁屏黑帧使用 FFmpeg 的 libx264/libx265 编码器（按已协商的 H.264/H.265 选择），硬件编码器可用并不代表这些软件编码器已安装。编码失败会明确记录日志。黑帧不改变采集权限或上报的真实屏幕尺寸；解锁或锁状态未知时暂停，采集就绪、拒绝或连接关闭时结束，再由真实视频接续同一条视频轨。对照实验与验证范围见 [#29](../../issues/29)、[#34](../../pull/34)。
 
-原生 Wayland 后端需要合成器提供 `wlr-output-power-management` 才能唤醒已关闭的屏幕；缺少该协议不影响采集和编码。
+原生 Wayland 后端需要合成器提供 `wlr-output-power-management` 才能唤醒已关闭的屏幕；缺少该协议不影响采集和编码。视频启动及运行期间，屏幕保活失败仅记录警告并在下轮重试，不终止视频；实际采集、编码或发送错误仍按原逻辑处理。
 
 原生 Wayland 实验选项：`UU_WAYLAND_PIPELINE=0` 可关闭流水线做对照。`UU_WAYLAND_DMABUF=1` 显式尝试 dma-buf→GBM CPU 映射（默认关闭，需要运行时 libgbm；可用 `UU_WAYLAND_DMABUF_DEVICE` 指定 render node，默认 `/dev/dri/renderD128`）。仅支持显式线性修饰符、单平面 8-bit RGB，失败回退 SHM；virgl VM 中只验证了回退，成功导入/映射和硬件加速均未验证。这不是零拷贝 VAAPI 路径；选择 `UU_VIDEO_ENCODER=vaapi` 时仍由 FFmpeg 上传 CPU 帧。
 首次连接时，桌面会弹窗请求「远程桌面 / 屏幕共享」授权，同意后会记住授权。

@@ -94,7 +94,7 @@ Existing screen-off and lock settings remain unchanged. Only capture recovery in
 
 Locked black video requires FFmpeg's libx264/libx265 encoder for the negotiated H.264/H.265 codec; hardware encoding support alone does not satisfy this dependency. Encoder failures are logged explicitly. Synthetic video does not change capture permissions or advertised monitor dimensions. It pauses on unlock or unknown lock state, ends when capture is ready/rejected or the connection closes, and then hands the same video track to real capture. See [#29](../../issues/29) and [#34](../../pull/34) for the controlled experiment and validation scope.
 
-The native Wayland backend needs `wlr-output-power-management` from the compositor to wake a turned-off screen; without it only wake is unavailable — capture and encoding are unaffected.
+The native Wayland backend needs `wlr-output-power-management` from the compositor to wake a turned-off screen; without it only wake is unavailable — capture and encoding are unaffected. Display-wake failures at video startup or during streaming are logged and retried at the next interval without ending the video stream; capture, encoder and send errors retain their existing handling.
 
 Native Wayland experiments: `UU_WAYLAND_PIPELINE=0` disables pipelining for comparison.
 `UU_WAYLAND_DMABUF=1` explicitly tries dma-buf → GBM CPU mapping (off by default;
