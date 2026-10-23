@@ -76,7 +76,7 @@ async fn exercise(fail_wake: usize, fail_capture: bool) {
         remote.set_remote_description(host.local_description().await.unwrap()).await.unwrap();
         let settings = VideoSettings { source_id: 0, source_generation: 0, ..Default::default() };
         let (settings_tx, settings_rx) = tokio::sync::watch::channel(settings);
-        let selection = crate::video_select::resolve_pair(Some("cpu"), None, Some("h264"), None, false);
+        let selection = crate::video_select::resolve_pair(Some("cpu"), None, Some("h264"), None, false, None);
         let mut task = tokio::spawn(stream_desktop(host.clone(), track.clone(), (640, 480),
             DISPLAY.into(), None, settings_rx, Arc::new(settings_tx), Arc::new(AtomicBool::new(false)), selection));
         let result = if fail_capture {

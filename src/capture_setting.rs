@@ -131,7 +131,7 @@ pub fn handle_rpc(rpc: &[WireField], settings: &watch::Sender<VideoSettings>, na
 /// hosts default to H.264. UU_VIDEO_CODEC=h264 / h265 overrides.
 #[cfg(test)]
 fn test_selection() -> crate::video_select::Selection {
-    crate::video_select::resolve_pair(Some("auto"), None, Some("auto"), None, false)
+    crate::video_select::resolve_pair(Some("auto"), None, Some("auto"), None, false, None)
 }
 
 #[cfg(test)]
@@ -600,6 +600,26 @@ mod codec_tests {
         let (tx, rx) = watch::channel(VideoSettings::default());
         apply_rpc(&request, &tx, (1920, 1080), true, true, false, Some("h265")).unwrap();
         assert_eq!(rx.borrow().codec, VideoCodec::H265);
+    }
+    #[test]
+    fn true_color_keeps_codec_and_vaapi_reports_420() {
+        // Field 7 = 3 (真彩). full_chroma false is the VAAPI 4:2:0 drop; true encodes 4:4:4.
+        let request = decode_wire(&[18, 2, 56, 3]).unwrap();
+        let (tx, rx) = watch::channel(VideoSettings { codec: VideoCodec::H265, ..Default::default() });
+        apply_rpc(&request, &tx, (1920, 1080), true, true, true, None).unwrap();
+        assert_eq!((rx.borrow().chroma, rx.borrow().codec), (CHROMA_444, VideoCodec::H265));
+        // NVENC session (full chroma) that already chose H.265 stays H.265 when 真彩 is requested.
+        let nvenc = crate::video_select::resolve_pair(None, None, None, None, true, None);
+        assert_eq!(nvenc.encoder, crate::video::Encoder::Nvenc);
+        let (tx, rx) = watch::channel(VideoSettings { codec: preferred_codec_for(true, true, nvenc), ..VideoSettings::default() });
+        assert_eq!(rx.borrow().codec, VideoCodec::H265);
+        handle_rpc_for(&request, &tx, (1920, 1080), true, true, nvenc).unwrap();
+        assert_eq!((rx.borrow().chroma, rx.borrow().codec), (CHROMA_444, VideoCodec::H265));
+        let (tx, rx) = watch::channel(VideoSettings { codec: VideoCodec::H265, ..Default::default() });
+        apply_rpc(&request, &tx, (1920, 1080), true, true, false, None).unwrap();
+        assert_eq!((rx.borrow().chroma, rx.borrow().codec), (CHROMA_420, VideoCodec::H265));
+        assert_eq!(number(&decode_wire(&sync_payload(&rx.borrow(), (1920, 1080))).unwrap(), 3), Some(CHROMA_420));
+        assert!(decode_wire(&sync_payload(&rx.borrow(), (1920, 1080))).unwrap().iter().all(|f| f.number != 13));
     }
 }
 

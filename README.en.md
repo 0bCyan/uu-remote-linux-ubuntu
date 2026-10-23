@@ -337,7 +337,7 @@ Common environment variables:
 | `UU_WAYLAND_NO_VIRTUAL_KEYBOARD=1` | Native Wayland skips the virtual keyboard (e.g. Denial reserves it for its input method); keys go through uinput. Without wlr-virtual-pointer the pointer also uses uinput (#72) |
 | `UU_INPUT_BACKEND` | `auto` (default: uinput on Wayland when accessible) / `uinput` / `native` |
 | `UU_TERMINAL_SHORTCUTS=0` | Disable the Ctrl+V paste rewrite in terminal windows |
-| `UU_VIDEO_ENCODER` | `cpu`: libx264; `vaapi`: opt-in Intel/AMD; `nvenc`: force NVENC; unset or `auto`: NVENC only when an NVIDIA driver is loaded, else CPU. A non-`auto` `video_encoder` in `host_settings.json` wins |
+| `UU_VIDEO_ENCODER` | `cpu`: libx264; `vaapi`: opt-in Intel/AMD; `nvenc`: force NVENC; unset or `auto`: a background probe (one synthetic IDR per candidate, 3 s each). With an NVIDIA driver the order is NVENC then CPU; without one the only candidate is CPU and the probe is skipped. A session that starts before the probe finishes uses the previous rule (NVENC if NVIDIA is present, else CPU). On a self-built `--features inproc-av` binary, a process-only failure of NVENC when the in-process engine would try it first on X11 is logged `native_unprobed` and keeps the previous NVENC choice (Wayland, portal, and KMS fall back to CPU). The skipped CPU-only probe is logged `not probed (only candidate)`. A successful probe and that CPU-only skip stay cached while NVIDIA presence matches the report. A later desktop connection whose presence differs starts one background re-probe and still uses the cached encoder until the new result is stored. A hardware-candidate failure (NVENC failed, CPU chosen) is kept for 10 minutes; the next desktop connection after that starts the same re-probe and still uses the cached encoder until the new result is stored. Explicit `cpu` / `vaapi` / `nvenc` does not start the probe. Another failure restarts the 10 minutes. `native_unprobed` is not a temporary failure. A non-`auto` `video_encoder` in `host_settings.json` wins. VAAPI stays out of auto until #33 |
 | `UU_VAAPI_BUFFER_MS` | VAAPI VBV buffer in ms (10-1000, VAAPI only); raise it when keyframes are squeezed into a blur at high resolution |
 | `UU_FFMPEG_ROOT` | Use FFmpeg from this prefix |
 | `UU_AUDIO=0` | Disable sound; `UU_AUDIO_SOURCE` picks the PulseAudio source |
@@ -353,10 +353,17 @@ Host settings such as "lock after remote session" and "mute host" are stored in
 (`auto`/`cpu`/`vaapi`/`nvenc`) and `video_codec` (`auto`/`h264`/`h265`), written by
 `uuremote-server set-encoder` and `uuremote-server set-codec` (illegal arguments exit 2).
 A value other than `auto` beats `UU_VIDEO_ENCODER` / `UU_VIDEO_CODEC`; `auto` or a missing
-field falls through to the environment, then to the default (NVENC when an NVIDIA driver is
-loaded, otherwise CPU; codec stays H.265 on hardware and H.264 on CPU). They take effect the
-next time a desktop connection starts. Explicit `vaapi` has no 4:4:4 and the stream drops to
-4:2:0. If the chosen encoder cannot start, the stream falls back to CPU and logs a warning.
+field falls through to the environment, then to auto (NVENC then CPU when an NVIDIA driver
+is loaded; CPU with no probe when it is not; codec stays H.265 on hardware and H.264 on CPU).
+The probe runs in the background at startup and does not delay the first picture. A success
+stays cached until the process exits, except when NVIDIA presence (`/proc/driver/nvidia/version`
+or `/dev/nvidia0`) no longer matches the report: the next desktop connection then starts one
+background re-probe (`warm_auto_probe`) and still uses the cached encoder until the new result
+is stored. An NVENC failure is kept for 10 minutes, and the next desktop connection after that
+starts the same background re-probe while still using the cached encoder. They take effect the next time a desktop connection starts. Explicit `vaapi` with 真彩 stays on VAAPI,
+encodes 4:2:0, and reports chroma 4:2:0 in CaptureSettingSync field 3. If the chosen encoder
+cannot start, the stream falls back to CPU and logs a warning. VAAPI is not an auto candidate
+until #33.
 
 Custom bitrate follows the Mbps value selected in the client; for example, 1 Mbps sets an encoder cap of 1000 kbit/s.
 
@@ -434,10 +441,12 @@ AUD only at IRAPs and drops every other picture from the bitstream, so an AUD-ba
 one "frame" and the IRAP gate then rejects all of them: the connection stalls at "transferring" while the host
 sends about 12 kbit/s. `UU_VIDEO_CODEC=h265` selects H.265 explicitly for A/B diagnosis.
 
-### VAAPI (opt-in / 显式启用)
+### VAAPI
 
-`UU_VIDEO_ENCODER=vaapi` selects Intel/AMD H.264 VAAPI; `UU_VAAPI_DEVICE` defaults to
-`/dev/dri/renderD128` (render-node permissions required). No automatic VAAPI selection.
+`UU_VIDEO_ENCODER=vaapi` or `set-encoder vaapi` selects Intel/AMD H.264 VAAPI explicitly.
+`UU_VAAPI_DEVICE` defaults to `/dev/dri/renderD128` (render-node permissions required).
+`auto` is NVENC then CPU when an NVIDIA driver is present, and CPU otherwise. VAAPI is
+selected only explicitly; putting it in auto waits on #33.
 The FFmpeg process uploads NV12 frames to a VAAPI frame pool; a self-built `--features inproc-av`
 binary instead runs VAAPI in process on X11 (a DRI3 DMA-BUF of the root window zero-copy, or XShm
 upload without DRI3, then VPP to NV12 and VCN; H.264/HEVC).

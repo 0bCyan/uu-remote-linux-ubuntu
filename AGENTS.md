@@ -122,7 +122,7 @@ viewer does not reconnect them automatically.
 | Mac viewer Cmd | With 「使用 macOS 快捷键」 off the Mac viewer sends Cmd=VK_LWIN 0x5B, Option=0xA4, Ctrl=0xA2; connect header `controller_platform`=4 is macOS. For Mac controllers Cmd is held back: Cmd+C/V/A/F/X/Z → Ctrl+key (terminal: Cmd+C/V → Ctrl+Shift+C/V), other combos/alone → Super |
 | `UU_TERMINAL_SHORTCUTS=0` | disable Ctrl+V → Ctrl+Shift+V in focused X11 terminals (Mac Cmd and Ctrl both arrive as VK_LCONTROL) |
 | `contrib/virtual-desktop/` | Xvfb + session (`UU_VIRTUAL_SESSION`, `UU_VIRTUAL_BUS=user|private`) for monitorless hosts; serve it with `DISPLAY=:99` |
-| `UU_VIDEO_ENCODER` | `cpu`: libx264; `vaapi`: explicit Intel/AMD; `nvenc`: force; unset/`auto`: NVENC only if `/proc/driver/nvidia/version` or `/dev/nvidia0` exists, else CPU (#10). Ignored when `host_settings.json` `video_encoder` is not `auto` |
+| `UU_VIDEO_ENCODER` | `cpu`: libx264; `vaapi`: explicit Intel/AMD; `nvenc`: force; unset/`auto`: background probe, one synthetic IDR per candidate, 3 s each. While #33 is open, auto is NVENC then CPU when `/proc/driver/nvidia/version` or `/dev/nvidia0` exists; with no NVIDIA the only candidate is CPU and the probe is skipped. A session that starts before the probe finishes uses the legacy rule (NVENC if NVIDIA is present, else CPU). On `--features inproc-av`, a process-only failure of NVENC when the native engine would try it first on X11 is `native_unprobed` and keeps that legacy NVENC choice (Wayland, portal, and KMS fall back to CPU). The skipped CPU-only probe is logged `not probed (only candidate)`. A successful probe and that CPU-only skip stay cached while NVIDIA presence (`/proc/driver/nvidia/version` or `/dev/nvidia0`) matches the report. A later desktop connection whose presence differs treats the report as stale and starts one background re-probe (`warm_auto_probe`, non-blocking, one at a time) and still uses the cached encoder. A hardware-candidate failure (NVENC failed, chosen CPU) is cached for 10 minutes (`PROBE_FAILURE_TTL`); the next desktop connection after that starts the same re-probe and still uses the cached encoder. Explicit `cpu` / `vaapi` / `nvenc` (setting file or `UU_VIDEO_ENCODER`) does not start the probe. A later success selects NVENC again; another failure restarts the 10 minutes. `native_unprobed` is not a failure cache. Ignored when `host_settings.json` `video_encoder` is not `auto`. Explicit `vaapi` with 真彩 encodes 4:2:0 and reports that in CaptureSettingSync (field 3). VAAPI is not an auto candidate until #33 |
 | `UU_VIDEO_CODEC=h264` | force H.264 even when the viewer negotiated H.265 (default: H.265 when both sides support it and the encoder is hardware). Same precedence as the encoder: setting file, then this variable, then auto |
 | `UU_FFMPEG_ROOT` | FFmpeg prefix (`bin/ffmpeg`, libs in `lib/x86_64-linux-gnu`) |
 | `UU_AUDIO=0`, `UU_AUDIO_SOURCE` | disable sound / choose the Pulse source (default `@DEFAULT_MONITOR@`) |
@@ -277,10 +277,12 @@ started a second full host server instead, so check that a subcommand exists in 
 - Update README.md / README.en.md when user-visible features or limitations change, and add
   `docs/release-notes/<tag>.md` before tagging a release.
 
-### VAAPI (opt-in / 显式启用)
+### VAAPI
 
-`UU_VIDEO_ENCODER=vaapi` selects Intel/AMD H.264 VAAPI; `UU_VAAPI_DEVICE` defaults to
-`/dev/dri/renderD128` (render-node permissions required). No automatic VAAPI selection.
+`UU_VIDEO_ENCODER=vaapi` or `set-encoder vaapi` selects Intel/AMD H.264 VAAPI explicitly.
+`UU_VAAPI_DEVICE` defaults to `/dev/dri/renderD128` (render-node permissions required).
+Auto is NVENC then CPU when an NVIDIA driver is present, otherwise CPU. VAAPI is not an
+auto candidate until #33.
 The FFmpeg process pipeline uploads NV12 frames to a VAAPI frame pool. With `--features inproc-av` on X11, VAAPI
 H.264/HEVC Main runs in process: a DRI3 DMA-BUF of the root (XShm upload without DRI3) goes through VPP to NV12
 and VCN, with SPS/PPS(/VPS) and slice headers packed by the host as radeonsi (Mesa 26) needs; parameters follow

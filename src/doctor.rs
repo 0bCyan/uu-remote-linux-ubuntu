@@ -16,6 +16,13 @@ fn env_state(name: &str) -> String {
 
 fn line(key: &str, value: impl std::fmt::Display) { println!("{key:<22} {}", redact(&value.to_string())); }
 
+fn format_probe(probe: &crate::video_select::ProbeReport) -> String {
+    let body = probe.order.iter().zip(probe.outcomes.iter())
+        .map(|(e, o)| format!("{}={}", format!("{e:?}").to_ascii_lowercase(), o.label()))
+        .collect::<Vec<_>>().join(" ");
+    if probe.expires_at.is_some() { format!("{body} (failure result, retried after 10 min)") } else { body }
+}
+
 fn glibc() -> String {
     #[cfg(all(target_os = "linux", target_env = "gnu"))]
     {
@@ -95,6 +102,13 @@ pub async fn run() -> Result<(), String> {
     let selection = crate::video_select::selection();
     let env_enc = std::env::var("UU_VIDEO_ENCODER").unwrap_or_else(|_| "unset".into());
     let codec = match selection.codec_pref { crate::video_select::CodecPref::Auto => "auto", crate::video_select::CodecPref::H264 => "h264", crate::video_select::CodecPref::H265 => "h265" };
+    let probe_text = if selection.encoder_source == crate::video_select::Source::Auto {
+        format_probe(&crate::video::run_auto_probe().await)
+    } else {
+        crate::video_select::cached_probe().as_ref().map(format_probe).unwrap_or_else(|| "not yet run".to_owned())
+    };
+    let selection = if selection.encoder_source == crate::video_select::Source::Auto { crate::video_select::selection() } else { selection };
+    line("encoder probe", probe_text);
     line("encoder", format!("{:?} (source={}; UU_VIDEO_ENCODER={env_enc})", selection.encoder, crate::video_select::encoder_source_label(selection.encoder_source)));
     line("codec", format!("{codec} (source={})", crate::video_select::source_label(selection.codec_source)));
     // Both codecs offered: hardware prefers H.265, CPU stays H.264 unless the preference forces one.
