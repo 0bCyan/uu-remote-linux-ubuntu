@@ -546,6 +546,19 @@ GNOME-to-official-Mac bidirectional clipboard synchronization is still unverifie
 - CLI: `connect DEVICE false - echo legacy [--view-only]` (desktop), `files DEVICE ls|get|put …`, `terminal DEVICE [SESSION]`,
   `terminal-ui DEVICE NAME`, `portmap DEVICE LOCAL_PORT HOST PORT` (listens on 127.0.0.1 only), `power DEVICE reboot|shutdown`, `unbind DEVICE` (remove a device from the account; also under "More tools" in the launcher),
   `assist CONNECT_ID` (the code is read from one stdin line, never an argument). See `uuremote-viewer --help`.
+- **Secure `type` input** (inject keystrokes into an open desktop session — lock-screen PIN/password; never put secrets on argv):
+  ```sh
+  # Preferred: open desktop via ui/connect first, then type (reuses the session; does not kick the live view)
+  UU_INPUT_ENV=UU_SECRET UU_SECRET='…' \
+    uuremote-viewer type DEVICE [--delay-ms 40] [--omit-last 1] [--snapshot /path/out.png]
+  # Or: printf '%s' '…' | uuremote-viewer type DEVICE
+  # Validate only, no network: uuremote-viewer type DEVICE --dry-run
+  # If no desktop viewer is running you must pass --new-session (opens a new peer and replaces any already-open desktop window; upstream #30)
+  ```
+  Brace tokens: `{Enter}` `{Tab}` `{Esc}` `{Backspace}` `{Ctrl+Alt+Del}` …; `{{` is a literal `{`.
+  **Layout**: characters are mapped for **US QWERTY** only (non-US layouts may mistype symbols/letters).
+  **Windows numeric PIN**: Windows often submits automatically once enough digits are entered — usually no `{Enter}` needed. Use `--omit-last N` to omit the last N characters when you want to fill without signing in.
+  Logs and `--dry-run` report lengths/event counts only. When reusing a session, about one second after sending, a PNG frame is saved (default under `$XDG_RUNTIME_DIR/uu-viewer-type/`, mode 0600); the path is logged and printed as `snapshot=…`.
 - Ctrl+Alt+F in the desktop window opens the files window on the same connection. `UU_VIEWER_AUDIO=0` disables sound,
   `UU_VIEWER_CLIPBOARD=0` the clipboard, `UU_VIEWER_VIEW_ONLY=1` input; `UU_VIEWER_FFMPEG` selects the ffmpeg binary.
 - Desktop offers H.264 / H.265; the host chooses the codec. `UU_VIEWER_CODEC=h264` limits both SDP and decoder capabilities to H.264.
