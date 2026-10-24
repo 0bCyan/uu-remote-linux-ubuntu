@@ -1,3 +1,4 @@
+// Modified by 0bCyan for the Ubuntu fork, 2026-10-24. See NOTICE.md and docs/UBUNTU_FORK.md.
 #ifndef UU_DRI3_CAPTURE_H
 #define UU_DRI3_CAPTURE_H
 
@@ -12,7 +13,7 @@ typedef struct Dri3Capture Dri3Capture;
 
 Dri3Capture* dri3_capture_create(const char* display_name, uint32_t width, uint32_t height);
 
-// Trigger GPU blit from Root Window to the DRI3 DMA-BUF Pixmap.
+// Copy accumulated XDamage rectangles into a persistent DRI3 DMA-BUF Pixmap (full on first use).
 // Returns 0 on success, negative on error.
 int dri3_capture_blit(Dri3Capture* cap);
 

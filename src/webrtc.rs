@@ -1,3 +1,4 @@
+// Modified by 0bCyan for the Ubuntu fork, 2026-10-24. See NOTICE.md and docs/UBUNTU_FORK.md.
 //! Native Rust WebRTC Engine (PeerConnection, DataChannels, Input & Video)
 
 use crate::capture::ScreenCapture;
@@ -79,8 +80,12 @@ impl WebRtcSession {
             webrtc::rtp_transceiver::rtp_codec::RTCRtpHeaderExtensionCapability { uri: crate::rtp_metadata::NEW_FRAME_URI.into() },
             webrtc::rtp_transceiver::rtp_codec::RTPCodecType::Video, None,
         ).map_err(|e| format!("Register UU fresh-frame metadata failed: {}", e))?;
+        let video_network=Arc::new(crate::video_network::VideoNetwork::new());
+        let mut base_registry=webrtc::interceptor::registry::Registry::new();
+        // First writer is innermost: NACK retransmissions also pass through it.
+        if desktop { base_registry.add(Box::new(crate::video_network::PacingBuilder(video_network.clone()))); }
         let registry = webrtc::api::interceptor_registry::register_default_interceptors(
-            webrtc::interceptor::registry::Registry::new(), &mut m,
+            base_registry, &mut m,
         ).map_err(|e| format!("Register RTP/RTCP interceptors failed: {}", e))?;
         let mut se = webrtc::api::setting_engine::SettingEngine::default();
         #[cfg(test)]
@@ -218,7 +223,7 @@ impl WebRtcSession {
         }));
 
         // 注册视频轨
-        let video_track = Arc::new(crate::video_track::VideoTrack::new());
+        let video_track = Arc::new(crate::video_track::VideoTrack::with_network(video_network.clone()));
 
         // Set by PLI/FIR; the desktop encoder answers with an IDR on its next frame.
         let idr_request = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -232,6 +237,7 @@ impl WebRtcSession {
             while let Ok((packets, _)) = sender.read(&mut feedback).await {
                 for packet in packets {
                     feedback_counts.observe(packet.as_any());
+                    video_network.feedback(packet.as_any());
                     if packet.as_any().is::<webrtc::rtcp::payload_feedbacks::picture_loss_indication::PictureLossIndication>()
                         || packet.as_any().is::<webrtc::rtcp::payload_feedbacks::full_intra_request::FullIntraRequest>() {
                         // Dedupe only while an IDR is pending; the encoder clears the flag when it emits one,

@@ -1,3 +1,4 @@
+// Modified by 0bCyan for the Ubuntu fork, 2026-10-24. See NOTICE.md and docs/UBUNTU_FORK.md.
 fn main() {
     println!("cargo:rerun-if-changed=c_engine/portal_clipboard.inc");
     println!("cargo:rerun-if-changed=c_engine/x11_engine.c");
@@ -44,6 +45,7 @@ fn main() {
             println!("cargo:rustc-link-lib=xcb");
             println!("cargo:rustc-link-lib=xcb-dri3");
             println!("cargo:rustc-link-lib=xcb-damage");
+            println!("cargo:rustc-link-lib=xcb-xfixes");
         }
         x11_build.compile("x11_engine");
 

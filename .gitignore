@@ -6,3 +6,13 @@ target/
 /docs/validation/
 /docs/ACTIVE_HANDOFF.md
 /contrib/tests/
+
+# Local runtime state and analysis are never part of a public source snapshot.
+/config.json
+/host_settings.json
+/host.pid
+/.env
+/.env.*
+/work/
+/outputs/
+/*.exe

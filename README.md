@@ -1,17 +1,37 @@
-# uu-remote-linux · UU 远程 Linux 被控端 + 控制端（非官方）
+# uu-remote-linux-ubuntu · UU 远程 Ubuntu 优化二开版（非官方）
 
 **简体中文** | [English](README.en.md)
 
-> **写在前面**
->
-> 网易 UU 远程非常好用，但官网一直没有 Linux 版本。于是我借助 Claude 和 Codex，写了这个开源的 Linux 被控端：
-> 装上之后，就能用官方的 Mac / Windows / 手机客户端远程控制你的 Linux 电脑。
-> 现在还附带一个**实验性 Linux 控制端** `uuremote-viewer`：在 Linux 上用 UU 账号远控官方 Windows / Mac 被控端或本项目主机
-> （桌面、文件传输、终端、端口映射、远程协助，详见[下文](#实验性原生控制端uuremote-viewer)）。
-> 没有桌面的**群晖 / NAS** 也能用 Docker 部署：[部署指南](docs/deploy-nas-docker.md)，镜像 [`ghcr.io/vallierdev/uu-remote-linux`](https://github.com/VallierDev/uu-remote-linux/pkgs/container/uu-remote-linux)。
->
-> 这是个人兴趣项目，**与网易无关，也不是官方客户端**。如果网易认为本项目侵权或有不妥，
-> 请在推特私信我 **[@ai_fengshou](https://x.com/ai_fengshou)**，我会第一时间自行下架。
+## 二次开发与来源
+
+本仓库是 [VallierDev/uu-remote-linux](https://github.com/VallierDev/uu-remote-linux) 的**非官方二次开发版**，由 [0bCyan](https://github.com/0bCyan) 维护，重点优化 Ubuntu 被控端的流畅度、清晰度和交互。原项目由 VallierDev 及上游贡献者开发；本项目保留上游 Git 历史、版权声明与 [LICENSE](LICENSE)，不将原项目成果归为本仓库原创。
+
+- 基线：上游 **v0.2.29**，提交 [`c041160d6dbbb48a4d7f2c5ed65cb39c6d6c34c5`](https://github.com/VallierDev/uu-remote-linux/commit/c041160d6dbbb48a4d7f2c5ed65cb39c6d6c34c5)。
+- 当前二开快照：**Ubuntu R5**，主要在 Ubuntu 24.04 / GNOME X11 / Intel VAAPI H.264 上测试。
+- 二开内容：DRI3 局部更新与缓存、BT.709 色彩、视频及重传统一限速、反馈码率适配、Dock 边缘手势、长按按键重复、GTK 玻璃风格界面。详见 [二开变更与验证](docs/UBUNTU_FORK.md) 和 [来源与署名](NOTICE.md)。
+- 授权沿用上游：Cargo SPDX 标识为 **GPL-3.0-or-later**；第三方组件保留各自许可证。
+- 本项目与网易、Apple 及上游维护者均无隶属或官方授权关系，不包含网易 Windows 程序或 Apple 设计素材。
+
+### Ubuntu X11 二开版快速构建
+
+需要 Rust stable、Ubuntu 开发依赖及 VAAPI 驱动。以下命令启用本轮硬件编码优化：
+
+```sh
+sudo apt install build-essential pkg-config libx11-dev libxext-dev libxtst-dev \
+  libxfixes-dev libgtk-3-dev ffmpeg libva-dev libgbm-dev libx11-xcb-dev \
+  libxcb-dri3-dev libxcb-damage0-dev libxcb-xfixes0-dev
+git clone https://github.com/0bCyan/uu-remote-linux-ubuntu.git
+cd uu-remote-linux-ubuntu
+cargo build --release --locked --features inproc-av --bin uuremote-server
+./target/release/uuremote-server set-encoder vaapi
+./target/release/uuremote-server set-codec h264
+./target/release/uuremote-server login
+./target/release/uuremote-server
+```
+
+驱动与运行参数、安装服务、已安装主机更新方式见 [二开说明](docs/UBUNTU_FORK.md)。不支持 VAAPI 的设备应按下文选择合适编码器。
+
+以下通用功能文档和截图继承自上游；其中跨平台实测记录、历史 issue/PR 编号属于上游。本二开目前以源码构建为准，上游预编译包及 NAS 镜像不包含本仓库 R1–R5 改动。
 
 <p align="center"><img src="docs/images/viewer-window.png" width="720" alt="Linux 控制端启动窗口：设备列表（设备名已打码）"></p>
 <p align="center"><sub>Linux 控制端：设备列表（设备名已打码）</sub></p>
@@ -36,7 +56,7 @@
 | 主窗口与扫码登录 | 一个窗口包含「本设备」（远程协助）和「账号」两部分：未登录时显示扫码二维码，登录后显示账号并可退出登录；也可用 `login --no-gui` 在终端扫码 |
 | 远程协助（实验性） | 像官方客户端一样，把**设备 ID + 验证码**发给别人，对方在 UU「开始协助」里输入即可连接；登录前（访客身份）和登录后都能用，见下文 |
 | 远程桌面 | H.264 视频，NVIDIA 显卡用 NVENC 硬件编码，否则用 libx264；查看端绘制本地鼠标，不会出现双光标 |
-| 鼠标 / 键盘 | 绝对/相对移动、点击、滚轮、按键；修复了网络延迟导致的按键连发；Wayland 下可用 uinput 虚拟键鼠（不依赖键盘布局，见下文） |
+| 鼠标 / 键盘 | 绝对/相对移动、点击、滚轮、按键；X11 支持控制端发送的退格、方向键等长按重复事件，并抑制网络延迟造成的额外连发；Wayland 下可用 uinput 虚拟键鼠（不依赖键盘布局，见下文） |
 | Mac 快捷键 | **推荐**：在 Mac 远控窗口菜单里关闭「使用 macOS 快捷键」，之后和在 Mac 上一样：Cmd+C/V/A/F/X/Z 是复制、粘贴、全选、查找、剪切、撤销（终端里 Cmd+C/V 自动变成 Ctrl+Shift+C/V），Ctrl+C 在终端里始终是中断。保持开启时，客户端会把 Cmd 和 Ctrl 都当成 Ctrl 发送：终端里 Ctrl+V / Cmd+V 自动转成粘贴，Ctrl+C 是中断，复制用 Cmd+Shift+C（X11） |
 | 鼠标指针样式 | 远端指针形状实时同步（X11） |
 | 剪贴板 | 双向文本同步 |
@@ -70,20 +90,20 @@ Portal 仅作用于本服务获授权的会话。文件传输、终端等独立�
 
 最后一列是源码编译方式；Release 预编译包已包含全部后端，直接使用即可（见[安装](#0-直接用-release-预编译包推荐x86_64)）。
 
-GNOME Wayland 的 Portal/EIS 路径已在 Ubuntu 26.04、GNOME 50、单屏 4K/200% 缩放下验证画面和键鼠；锁屏冷连接自动解锁已用 Mac 和 iPhone 4.42.0 客户端实机验证，其余锁屏恢复及重连仍待验收。除 GNOME 的上述路径和 X11 外，其余桌面目前主要在虚拟机里测试。如果你在真机上遇到问题，欢迎[提交 issue](../../issues)，
+GNOME Wayland 的 Portal/EIS 路径已在 Ubuntu 26.04、GNOME 50、单屏 4K/200% 缩放下验证画面和键鼠；锁屏冷连接自动解锁已用 Mac 和 iPhone 4.42.0 客户端实机验证，其余锁屏恢复及重连仍待验收。除 GNOME 的上述路径和 X11 外，其余桌面目前主要在虚拟机里测试。如果你在真机上遇到问题，欢迎[提交 issue](https://github.com/0bCyan/uu-remote-linux-ubuntu/issues)，
 请附上 `uuremote-server doctor` 的输出（v0.2.17 起；只含会话、后端、插件、权限、编码器等状态，不含账号、令牌或地址，可直接粘贴）和 `journalctl --user -u uuremote-native.service` 里的相关日志。
 
 Wayland 下的限制：默认采集单屏，Hyprland 可按上文启用切屏；分辨率固定；Hyprland 原生后端默认使用双缓冲流水线 shm screencopy，控制端帧率设置会同步到采集节拍和编码器，但实际帧率仍受合成器、渲染和读回速度限制（旧串行路径在 2560x1600 曾测得约 16～22 帧；流水线只在虚拟机里测量过，不代表实机保证）；portal 后端暂不支持动态分辨率；GNOME 的屏幕唤醒与锁屏恢复见下；剪贴板只在控制端的远控窗口处于前台时同步。
 
-GNOME 缩放桌面在使用 Portal 原生键鼠时，若支持 `ConnectToEIS` 和屏幕 `mapping_id`，通过同一授权会话的 EIS 接口注入输入，按匹配的区域与实际帧尺寸分别映射横纵坐标，没有固定分辨率或缩放倍率，可避免 `NotifyPointerMotionAbsolute` 在缩放时拒绝坐标。Portal 构建需要 libei ≥ 1.1。缺少 EIS 支持时保留旧输入路径及其既有缩放限制；其他初始化错误会明确报告并触发会话恢复。EIS 连接成功后全部输入统一使用 EIS。只采集画面或使用 uinput 时不会初始化 EIS；缺少可选的逻辑尺寸也不阻断采集。键盘沿用项目现有的 Windows VK → evdev 映射。恢复时保持编码器的采集帧尺寸不变，允许缩放后的逻辑尺寸变化。GNOME 显示配置变化后，已推流的 Portal 采集若持续「暂停且无有效格式」，会在关联通知后的 200 毫秒宽限结束后提前进入现有恢复流程；正常重协商恢复会取消提前判定，连续通知不会推迟同次异常的判定。未收到相关通知时保留五秒兜底；静态画面或有效格式下的暂停不会触发恢复。Ubuntu 26.04、GNOME Wayland 单屏 3840×2160 已实测保持连接切换 200%→166.67%→200%，恢复后画面持续更新且鼠标可控制全屏；切换期间会短暂停顿、黑屏后恢复，五秒是兜底判定阈值，并非总恢复时间。提前恢复的测量结果和验证范围见 [#35](../../pull/35)。此路径仍需实机验证锁屏恢复；多屏、连接中改变分辨率及旋转/镜像变换不属于本次修复范围。 捕获设置协议仍为版本 4：对客户端上报的分辨率统一使用像素坐标、DPR 为 1；Portal 逻辑尺寸仅用于本地输入映射。
+GNOME 缩放桌面在使用 Portal 原生键鼠时，若支持 `ConnectToEIS` 和屏幕 `mapping_id`，通过同一授权会话的 EIS 接口注入输入，按匹配的区域与实际帧尺寸分别映射横纵坐标，没有固定分辨率或缩放倍率，可避免 `NotifyPointerMotionAbsolute` 在缩放时拒绝坐标。Portal 构建需要 libei ≥ 1.1。缺少 EIS 支持时保留旧输入路径及其既有缩放限制；其他初始化错误会明确报告并触发会话恢复。EIS 连接成功后全部输入统一使用 EIS。只采集画面或使用 uinput 时不会初始化 EIS；缺少可选的逻辑尺寸也不阻断采集。键盘沿用项目现有的 Windows VK → evdev 映射。恢复时保持编码器的采集帧尺寸不变，允许缩放后的逻辑尺寸变化。GNOME 显示配置变化后，已推流的 Portal 采集若持续「暂停且无有效格式」，会在关联通知后的 200 毫秒宽限结束后提前进入现有恢复流程；正常重协商恢复会取消提前判定，连续通知不会推迟同次异常的判定。未收到相关通知时保留五秒兜底；静态画面或有效格式下的暂停不会触发恢复。Ubuntu 26.04、GNOME Wayland 单屏 3840×2160 已实测保持连接切换 200%→166.67%→200%，恢复后画面持续更新且鼠标可控制全屏；切换期间会短暂停顿、黑屏后恢复，五秒是兜底判定阈值，并非总恢复时间。提前恢复的测量结果和验证范围见 [#35](https://github.com/VallierDev/uu-remote-linux/pull/35)。此路径仍需实机验证锁屏恢复；多屏、连接中改变分辨率及旋转/镜像变换不属于本次修复范围。 捕获设置协议仍为版本 4：对客户端上报的分辨率统一使用像素坐标、DPR 为 1；Portal 逻辑尺寸仅用于本地输入映射。
 
 GNOME Portal 的控制通道不再等待授权窗口或第一帧画面：先通知客户端当前选择桌面，再上报锁屏状态、接收官方客户端的「自动解锁被控端」请求。官方 Android 客户端需要桌面目标通知才会进入自动解锁流程，因此该通知不能等待采集就绪；真实屏幕尺寸、编码信息及采集权限仍按实际就绪状态上报。请在客户端启用自动解锁，使用当前 Linux 用户的登录密码；主机通过 PAM 验证后解锁当前 GNOME 会话、请求点亮屏幕，并恢复同一 Portal 会话中的画面、键鼠和剪贴板。首次授权或权限被撤销时仍需本机确认。物理或逻辑分辨率变化后需要重连。
 
-桌面锁屏且尚未建立 Portal 时（冷连接），主机也会建立控制通道：上报锁屏状态并接受自动解锁，解锁后再恢复画面、键鼠和剪贴板。Portal 等待就绪期间，主机默认通过已协商的视频轨每秒发送一帧生成的纯黑画面，让官方 iPhone 客户端进入自动解锁流程，无需额外配置。Ubuntu GNOME Wayland 上已用官方 Mac 客户端验证；iPhone 4.42.0 的 H.265 冷连接完成了同一实验二进制「开启黑帧成功 → 关闭失败 → 再开成功」对照（[#29](../../issues/29)）。**局限**：黑帧不是真实 GNOME 锁屏画面，也不支持在锁屏界面操作原生键鼠；需要在 UU 客户端 控制中心 → 安全 → 自动解锁被控端 中启用自动解锁并输入密码。若本机没有已保存的 Portal 授权，解锁后仍需本机确认授权才能显示真实桌面。
+桌面锁屏且尚未建立 Portal 时（冷连接），主机也会建立控制通道：上报锁屏状态并接受自动解锁，解锁后再恢复画面、键鼠和剪贴板。Portal 等待就绪期间，主机默认通过已协商的视频轨每秒发送一帧生成的纯黑画面，让官方 iPhone 客户端进入自动解锁流程，无需额外配置。Ubuntu GNOME Wayland 上已用官方 Mac 客户端验证；iPhone 4.42.0 的 H.265 冷连接完成了同一实验二进制「开启黑帧成功 → 关闭失败 → 再开成功」对照（[#29](https://github.com/VallierDev/uu-remote-linux/issues/29)）。**局限**：黑帧不是真实 GNOME 锁屏画面，也不支持在锁屏界面操作原生键鼠；需要在 UU 客户端 控制中心 → 安全 → 自动解锁被控端 中启用自动解锁并输入密码。若本机没有已保存的 Portal 授权，解锁后仍需本机确认授权才能显示真实桌面。
 
 无需修改现有熄屏和锁屏设置。主机仅在会话已解锁的采集恢复期间临时申请 GNOME 的 idle 抑制，拿到首帧后立即释放；锁屏、断开或初始化失败也会释放。远控窗口空闲时仍按原策略熄屏和锁屏，手动锁屏也继续生效。锁屏及锁状态未知时停止桌面输入并隐藏真实画面；独立终端、文件传输和端口映射连接不依赖画面初始化，也不会因桌面重连被关闭。这一恢复路径已覆盖自动化协议与生命周期回归测试，锁屏冷连接后的自动解锁与采集恢复已用官方 Mac 和 iPhone 4.42.0 客户端在 GNOME 实机验证，熄屏等其余场景仍待验收；不支持从整机挂起或休眠状态通过现有控制通道唤醒。
 
-锁屏黑帧使用 FFmpeg 的 libx264/libx265 编码器（按已协商的 H.264/H.265 选择），硬件编码器可用并不代表这些软件编码器已安装。编码失败会明确记录日志。黑帧不改变采集权限或上报的真实屏幕尺寸；解锁或锁状态未知时暂停，采集就绪、拒绝或连接关闭时结束，再由真实视频接续同一条视频轨。对照实验与验证范围见 [#29](../../issues/29)、[#34](../../pull/34)。
+锁屏黑帧使用 FFmpeg 的 libx264/libx265 编码器（按已协商的 H.264/H.265 选择），硬件编码器可用并不代表这些软件编码器已安装。编码失败会明确记录日志。黑帧不改变采集权限或上报的真实屏幕尺寸；解锁或锁状态未知时暂停，采集就绪、拒绝或连接关闭时结束，再由真实视频接续同一条视频轨。对照实验与验证范围见 [#29](https://github.com/VallierDev/uu-remote-linux/issues/29)、[#34](https://github.com/VallierDev/uu-remote-linux/pull/34)。
 
 原生 Wayland 后端需要合成器提供 `wlr-output-power-management` 才能唤醒已关闭的屏幕；缺少该协议不影响采集和编码。视频启动及运行期间，屏幕保活失败仅记录警告并在下轮重试，不终止视频；实际采集、编码或发送错误仍按原逻辑处理。
 
@@ -130,7 +150,7 @@ systemctl --user enable --now uuremote-native.service   # 随图形会话启动
 deb 会安装程序、插件、用户级 systemd 服务和应用菜单图标，并通过依赖自动装上 FFmpeg；uinput 权限不会自动开启（见第 5 步）。
 GNOME / KDE 会把显示环境自动传给服务；Xfce 等不传的桌面需按第 4 步补 `DISPLAY`。
 
-**其他发行版**：从 [Releases](../../releases/latest) 下载 `uu-remote-linux-<版本>-x86_64-linux.tar.gz`（ARM64 选 `aarch64-linux`），解压后用普通桌面用户（不要 root）运行：
+**其他发行版**：从 [上游 Releases](https://github.com/VallierDev/uu-remote-linux/releases/latest) 下载 `uu-remote-linux-<版本>-x86_64-linux.tar.gz`（ARM64 选 `aarch64-linux`），解压后用普通桌面用户（不要 root）运行：
 
 ```sh
 cd uu-remote-linux-<版本>-x86_64-linux
@@ -164,7 +184,7 @@ sudo apt install libwayland-dev libxkbcommon-dev wl-clipboard
 # 可选：GNOME/KDE portal 后端
 sudo apt install libglib2.0-dev libpipewire-0.3-dev libei-dev
 # 可选：inproc-av 的 VAAPI/DRI3 引擎编译所需（libva 本体运行时加载）
-sudo apt install libva-dev libgbm-dev libx11-xcb-dev libxcb-dri3-dev libxcb-damage0-dev
+sudo apt install libva-dev libgbm-dev libx11-xcb-dev libxcb-dri3-dev libxcb-damage0-dev libxcb-xfixes0-dev
 ```
 
 - 需要 Rust 工具链（<https://rustup.rs>）。
@@ -242,6 +262,8 @@ X11 默认继续用 XTest，因为它能正确处理网络延迟下按住不放�
 
 ## 远程协助与主窗口（实验性）
 
+主窗口采用受 Apple Liquid Glass 启发的轻量原生 GTK 界面：柔和渐变、悬浮顶栏、清晰的协助开关与连接信息，验证设置收在「验证与安全」中。窗口可调整大小，内容超出时可滚动；支持键盘聚焦及大字体。玻璃质感通过静态渐变与高光模拟，不进行实时背景模糊，也没有持续装饰动画。此改动只调整本机窗口，保留原有连接、编码和安全操作。
+
 和官方客户端的「远程协助」一样：本机显示**设备 ID** 和**验证码**，把它们发给信任的人，对方在 UU 远程的「开始协助」里输入即可控制本机。
 
 - **未登录**：启动后直接显示主窗口，用访客身份提供远程协助，同时显示扫码登录二维码。扫码登录后自动切换到账号模式。
@@ -316,6 +338,8 @@ systemctl --user restart uuremote-native.service
 | `UU_TERMINAL_SHORTCUTS=0` | 关闭终端窗口里的 Ctrl+V 粘贴转换 |
 | `UU_VIDEO_ENCODER` | `cpu` 强制 CPU；`vaapi` 显式启用 Intel/AMD 硬编；`nvenc` 强制 NVENC；未设置或 `auto` 时后台探测（每个候选编码一帧，限时 3 秒）。有 NVIDIA 驱动时顺序是 NVENC → CPU；没有 NVIDIA 时只有 CPU，不探测。探测未完成就建流则沿用旧规则（有 NVIDIA 用 NVENC，否则 CPU）。自行编译的 `--features inproc-av` 上，仅 X11 会先走进程内引擎：外部 FFmpeg 探测失败时记为 `native_unprobed`，沿用旧规则（NVENC）；Wayland、portal、KMS 回退 CPU。只有 CPU 时跳过探测，记为 `not probed (only candidate)`。探测成功和这种只含 CPU 的跳过会缓存到 NVIDIA 是否存在发生变化为止（`/proc/driver/nvidia/version` 或 `/dev/nvidia0`）。之后的桌面连接在后台再探测一次（不挡住这一路，仍用缓存的编码器）。NVENC 探测失败、选用 CPU 时只缓存 10 分钟；到期后下一次桌面连接同样在后台再探测一次，再次失败则重新计 10 分钟。显式 `cpu` / `vaapi` / `nvenc` 不启动探测。`native_unprobed` 不算失败缓存。优先级低于 `host_settings.json` 里非 `auto` 的 `video_encoder`。VAAPI 要等 #33 解决后才会进入 auto |
 | `UU_VAAPI_BUFFER_MS` | VAAPI 的 VBV 缓冲（10–1000 ms，仅 `UU_VIDEO_ENCODER=vaapi` 时生效）；高分辨率下关键帧被压糊时用它换稳定画质 |
+| `UU_VIDEO_PACING=0` | 关闭视频原包及重传共享的发送节奏控制（默认开启） |
+| `UU_VIDEO_ADAPTIVE=0` | 关闭反馈码率适配，发送预算直接使用控制端上限；原生 VAAPI 实时适配默认开启 |
 | `UU_FFMPEG_ROOT` | 使用指定目录下的 FFmpeg |
 | `UU_AUDIO=0` | 关闭声音转发；`UU_AUDIO_SOURCE` 指定 PulseAudio 采集源 |
 | `UU_LOGIN_WINDOW=0` | 凭证缺失时不自动弹出登录窗口 |
@@ -363,15 +387,17 @@ flowchart LR
 
 ## 许可证
 
-本项目以 [GPL-3.0](LICENSE) 许可证发布：可以自由使用、修改和再发布，但再发布（包括修改后的版本）必须同样以 GPL-3.0 开源。
+本二开保留上游 [LICENSE](LICENSE) 原文及 GPL 授权（Cargo SPDX：`GPL-3.0-or-later`）；分发时请遵守对应的许可证义务，并保留上游和第三方版权声明。
 
 ## 免责声明
 
 - 「网易」「UU 远程」等名称和商标归网易公司所有。本项目与网易公司没有任何关联，未获其授权或认可。
 - 本项目基于互操作目的开发，请在遵守 UU 远程用户协议和当地法律的前提下使用，风险自负。
-- 网易或权利人如有异议，请通过推特 [@ai_fengshou](https://x.com/ai_fengshou) 联系，我会配合处理或下架。
+- 本二开的问题及权利人反馈请通过 [本仓库 Issues](https://github.com/0bCyan/uu-remote-linux-ubuntu/issues) 联系维护者；上游作者的联系方式属于上游，不代表本二开维护者。
 
 ## 致谢
+
+- [VallierDev](https://github.com/VallierDev) 与 [uu-remote-linux 上游贡献者](https://github.com/VallierDev/uu-remote-linux/graphs/contributors)：本仓库的原始项目与核心实现。
 
 - 网易 UU 远程团队：做了一个好用的远程工具。
 - [webrtc-rs](https://github.com/webrtc-rs/webrtc)、FFmpeg、GTK 等开源项目。
@@ -392,6 +418,10 @@ HEVC 的访问单元按 RFC 7798 的图片边界切分，不依赖 AUD：`hevc_v
 「正在传输画面」，而主机侧只有约 12 kbit/s。`UU_VIDEO_CODEC=h265` 可显式选中 H.265，便于对照排查。
 
 ### VAAPI 硬件编码
+
+本地优化：进程内 H.264 显式使用限幅 BT.709，并在 SPS VUI 声明相同矩阵/范围，避免高分辨率下控制端猜错色彩标准；原生 VAAPI 最小 QP 跟随画质预设。视频 RTP 原包与 NACK 重传共享每连接令牌桶（突发约 3.6 KB，线上预算为编码预算的 1.15 倍），大帧也遵守预算，不再用两帧时长截断限速；音频和控制消息保留独立发送路径。H.264/H.265 分片载荷为 1100 字节，给中继封装留出余量。初始编码预算为 6 Mbps 或控制端选择的更低上限；每个有效反馈窗口至少 2 秒、80 个已发送包，重传请求压力或有效 RR 丢包报告持续升高时降码率，负载足够且连续六个窗口健康才小幅恢复；稀疏报告与其他媒体流报告不用于丢包判断，静态桌面不向上探测。原生 VAAPI 在编码线程更新码率与同比例 VBV，不重建预测链；CPU/NVENC/外部 FFmpeg 路径目前仅受发送预算限制，尚无相同的实时编码码率适配。重传请求比例并不等于最终未恢复丢包率。`UU_VIDEO_ADAPTIVE=0` 关闭反馈适配并按控制端码率上限发送，`UU_VIDEO_PACING=0` 关闭发送节奏控制。日志包含实际视频 kbps、最大帧字节数和当前编码预算。X11 绝对坐标通过相对 XTEST 事件到达目标，最外沿继续输入会产生压力事件，以支持 GNOME Dock/热角；`UU_X11_ABSOLUTE_WARP=1` 恢复旧输入行为。虚拟链路回归与本机 VAAPI 探测通过，真实手机网络的流畅度和丢包仍需控制端验收。
+
+进程内 X11 VAAPI 在首次采集后按 XDamage/XFixes 变化矩形更新 DRI3 图面；矩形过多、面积过大或扩展不可用时整帧拷贝。静止时复用上次 NV12 转换结果，并保留编码保活和强制 IDR。`UU_DRI3_FULL_COPY=1` 可关闭矩形拷贝做对照。RGB 上传和 DMA-BUF 导入显式使用 BGRX，以避免 Intel iHD 默认布局不匹配。Meteor Lake/iHD 已通过本地生成图 H.264 的上传、DRI3 导入、局部变化和强制 IDR 探测；手机端闪烁和网络码率仍需实机验收。复现步骤见 [视频回归探测](contrib/video-tests/README.md)。
 
 `UU_VIDEO_ENCODER=vaapi` 或 `set-encoder vaapi` 显式选择 Intel/AMD H.264 VAAPI。
 `UU_VAAPI_DEVICE` 默认 `/dev/dri/renderD128`，运行用户需要 render 节点权限。

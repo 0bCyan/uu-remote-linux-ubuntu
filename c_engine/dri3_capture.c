@@ -1,3 +1,4 @@
+// Modified by 0bCyan for the Ubuntu fork, 2026-10-24. See NOTICE.md and docs/UBUNTU_FORK.md.
 #include "dri3_capture.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -10,6 +11,7 @@
 #include <xcb/xcb.h>
 #include <xcb/dri3.h>
 #include <xcb/damage.h>
+#include <xcb/xfixes.h>
 #include <gbm.h>
 
 struct Dri3Capture {
@@ -29,6 +31,10 @@ struct Dri3Capture {
     xcb_gcontext_t gc;
     xcb_damage_damage_t damage;
     uint8_t damage_event_code;
+    xcb_xfixes_region_t dirty_region;
+    int needs_full_copy;
+    uint64_t copied_pixels;
+    uint32_t copied_rects;
 };
 
 Dri3Capture* dri3_capture_create(const char* display_name, uint32_t width, uint32_t height) {
@@ -160,25 +166,71 @@ Dri3Capture* dri3_capture_create(const char* display_name, uint32_t width, uint3
     cap->gc = gc;
     cap->damage = damage;
     cap->damage_event_code = damage_event_code;
+    cap->needs_full_copy = 1;
+    const xcb_query_extension_reply_t *fixes = xcb_get_extension_data(conn, &xcb_xfixes_id);
+    const char *full_copy = getenv("UU_DRI3_FULL_COPY");
+    if (damage && fixes && fixes->present && !(full_copy && strcmp(full_copy, "1") == 0)) {
+        xcb_xfixes_query_version_reply_t *version = xcb_xfixes_query_version_reply(
+            conn, xcb_xfixes_query_version(conn, 2, 0), NULL);
+        if (version && version->major_version >= 2) {
+            cap->dirty_region = xcb_generate_id(conn);
+            xcb_xfixes_create_region(conn, cap->dirty_region, 0, NULL);
+        }
+        free(version);
+    }
 
-    fprintf(stderr, "[dri3_capture] Initialized: %ux%u (stride: %u, dma_fd: %d) Pure GPU Blit ready!\n",
-            w, h, stride, bo_fd);
+    fprintf(stderr, "[dri3_capture] Initialized: %ux%u (stride: %u, dma_fd: %d) GPU blit, dirty rectangles=%s\n",
+            w, h, stride, bo_fd, cap->dirty_region ? "enabled" : "disabled");
     return cap;
 }
 
 int dri3_capture_blit(Dri3Capture* cap) {
     if (!cap) return -1;
-    xcb_copy_area(cap->conn, cap->screen->root, cap->pix, cap->gc, 0, 0, 0, 0, cap->width, cap->height);
+    cap->copied_pixels = 0;
+    cap->copied_rects = 0;
+    xcb_xfixes_fetch_region_reply_t *region = NULL;
+    if (cap->damage) {
+        // Take and clear the accumulated region only when copying; clearing it in wait() loses rectangles.
+        xcb_damage_subtract(cap->conn, cap->damage, XCB_NONE, cap->dirty_region);
+        if (cap->dirty_region) region = xcb_xfixes_fetch_region_reply(cap->conn,
+            xcb_xfixes_fetch_region(cap->conn, cap->dirty_region), NULL);
+    }
+    int n = region ? xcb_xfixes_fetch_region_rectangles_length(region) : 0;
+    xcb_rectangle_t *rects = region ? xcb_xfixes_fetch_region_rectangles(region) : NULL;
+    uint64_t area = 0;
+    for (int i = 0; i < n; i++) area += (uint64_t)rects[i].width * rects[i].height;
+    if (cap->needs_full_copy || !region || n > 256 || area > (uint64_t)cap->width * cap->height * 3 / 5) {
+        xcb_copy_area(cap->conn, cap->screen->root, cap->pix, cap->gc, 0, 0, 0, 0, cap->width, cap->height);
+        cap->copied_pixels = (uint64_t)cap->width * cap->height;
+        cap->copied_rects = 1;
+    } else {
+        for (int i = 0; i < n; i++) {
+            int x = rects[i].x, y = rects[i].y;
+            int right = x + rects[i].width, bottom = y + rects[i].height;
+            if (x < 0) x = 0;
+            if (y < 0) y = 0;
+            if (right > (int)cap->width) right = cap->width;
+            if (bottom > (int)cap->height) bottom = cap->height;
+            if (x >= right || y >= bottom) continue;
+            xcb_copy_area(cap->conn, cap->screen->root, cap->pix, cap->gc,
+                          x, y, x, y, right - x, bottom - y);
+            cap->copied_pixels += (uint64_t)(right - x) * (bottom - y);
+            cap->copied_rects++;
+        }
+    }
+    free(region);
     // Round trip: the server has executed (and flushed to the GPU) the copy before VAAPI reads the BO;
     // xcb_flush alone only sends the request.
     xcb_get_input_focus_reply_t *r = xcb_get_input_focus_reply(cap->conn, xcb_get_input_focus(cap->conn), NULL);
     if (!r) return -1;
     free(r);
+    cap->needs_full_copy = 0;
     return 0;
 }
 
 int dri3_capture_wait_damage(Dri3Capture* cap, int timeout_ms) {
     if (!cap) return -1;
+    if (!cap->damage) { poll(NULL, 0, timeout_ms); return 1; }
 
     // Check queued events
     xcb_generic_event_t *ev = NULL;
@@ -190,8 +242,6 @@ int dri3_capture_wait_damage(Dri3Capture* cap, int timeout_ms) {
         free(ev);
     }
     if (damaged) {
-        xcb_damage_subtract(cap->conn, cap->damage, XCB_NONE, XCB_NONE);
-        xcb_flush(cap->conn);
         return 1;
     }
 
@@ -210,8 +260,6 @@ int dri3_capture_wait_damage(Dri3Capture* cap, int timeout_ms) {
             free(ev);
         } while ((ev = xcb_poll_for_event(cap->conn)) != NULL);
         if (damaged) {
-            xcb_damage_subtract(cap->conn, cap->damage, XCB_NONE, XCB_NONE);
-            xcb_flush(cap->conn);
             return 1;
         }
     }
@@ -229,6 +277,7 @@ uint32_t dri3_capture_get_stride(Dri3Capture* cap) {
 void dri3_capture_destroy(Dri3Capture* cap) {
     if (!cap) return;
 
+    if (cap->dirty_region) xcb_xfixes_destroy_region(cap->conn, cap->dirty_region);
     if (cap->damage) xcb_damage_destroy(cap->conn, cap->damage);
     if (cap->gc) xcb_free_gc(cap->conn, cap->gc);
     if (cap->pix) xcb_free_pixmap(cap->conn, cap->pix);

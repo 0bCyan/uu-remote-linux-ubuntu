@@ -1,3 +1,4 @@
+// Modified by 0bCyan for the Ubuntu fork, 2026-10-24. See NOTICE.md and docs/UBUNTU_FORK.md.
 //! One negotiated video m-line/SSRC, with codec-specific payload types.
 //! A single RTP sequence/timestamp survives format changes (never two independent SSRC timelines).
 use std::{any::Any, sync::atomic::{AtomicBool, Ordering}};
@@ -7,6 +8,7 @@ use webrtc::{error::{Error, Result}, media::Sample, rtp::{packet::Packet, header
 use webrtc::rtp_transceiver::rtp_codec::{RTCRtpCodecCapability, RTCRtpCodecParameters, RTPCodecType};
 use webrtc::track::track_local::{TrackLocal, TrackLocalContext, track_local_static_rtp::TrackLocalStaticRTP};
 use crate::capture_setting::VideoCodec;
+use std::time::Duration;
 
 /// Official SDK GetSupportedFormats constructs H265 with an empty parameter map.
 pub fn register_hevc(media: &mut webrtc::api::media_engine::MediaEngine) -> Result<()> {
@@ -24,14 +26,16 @@ pub struct VideoTrack {
     h264: TrackLocalStaticRTP, h265: TrackLocalStaticRTP,
     has_h264: AtomicBool, has_h265: AtomicBool, timeline: Mutex<Timeline>,
     progress: tokio::sync::watch::Sender<(u64, VideoCodec)>,
+    pub(crate) network: std::sync::Arc<crate::video_network::VideoNetwork>,
 }
 impl VideoTrack {
-    pub fn new() -> Self {
+    pub fn new() -> Self { Self::with_network(std::sync::Arc::new(crate::video_network::VideoNetwork::new())) }
+    pub(crate) fn with_network(network: std::sync::Arc<crate::video_network::VideoNetwork>) -> Self {
         let track = |codec: VideoCodec| TrackLocalStaticRTP::new(
             RTCRtpCodecCapability { mime_type: codec.mime().into(), clock_rate: 90_000, ..Default::default() },
             "video_0".into(), "video_0".into());
         let (progress, _) = tokio::sync::watch::channel((0, VideoCodec::H264));
-        Self { progress, h264: track(VideoCodec::H264), h265: track(VideoCodec::H265), has_h264: AtomicBool::new(false),
+        Self { progress, network, h264: track(VideoCodec::H264), h265: track(VideoCodec::H265), has_h264: AtomicBool::new(false),
             has_h265: AtomicBool::new(false), timeline: Mutex::new(Timeline { sequence: rand::random(), timestamp: rand::random(), h264: Default::default() }) }
     }
     pub fn supports(&self, codec: VideoCodec) -> bool {
@@ -56,8 +60,8 @@ impl VideoTrack {
         let mut state = self.timeline.lock().await;
         // Leave room for the RTP header and negotiated UU extensions below the 1200 byte MTU.
         let payloads = match codec {
-            VideoCodec::H264 => state.h264.payload(1160, &sample.data).map_err(Error::Rtp)?,
-            VideoCodec::H265 => crate::hevc::payload(1160, &sample.data).map_err(Error::new)?,
+            VideoCodec::H264 => state.h264.payload(1100, &sample.data).map_err(Error::Rtp)?,
+            VideoCodec::H265 => crate::hevc::payload(1100, &sample.data).map_err(Error::new)?,
         };
         let count = payloads.len();
         let mut complete = count > 0;
@@ -98,7 +102,7 @@ impl TrackLocal for VideoTrack {
 mod tests {
     use super::*;
     use webrtc::{api::{APIBuilder, media_engine::MediaEngine}, peer_connection::configuration::RTCConfiguration};
-    async fn negotiate(h264: bool, hevc: bool) {
+    async fn negotiate(h264: bool, hevc: bool, burst_test: bool) {
         let mut remote_media = MediaEngine::default();
         if h264 { remote_media.register_codec(RTCRtpCodecParameters { capability: RTCRtpCodecCapability {
             mime_type: VideoCodec::H264.mime().into(), clock_rate: 90_000,
@@ -109,7 +113,10 @@ mod tests {
         let remote = APIBuilder::new().with_setting_engine(remote_setting).with_media_engine(remote_media).build().new_peer_connection(RTCConfiguration::default()).await.unwrap();
         remote.add_transceiver_from_kind(RTPCodecType::Video, None).await.unwrap();
         let mut media = MediaEngine::default(); media.register_default_codecs().unwrap(); register_hevc(&mut media).unwrap();
-        let host = APIBuilder::new().with_setting_engine(host_setting).with_media_engine(media).build().new_peer_connection(RTCConfiguration::default()).await.unwrap();
+        let network=std::sync::Arc::new(crate::video_network::VideoNetwork::new());
+        let mut registry=webrtc::interceptor::registry::Registry::new();
+        registry.add(Box::new(crate::video_network::PacingBuilder(network.clone())));
+        let host = APIBuilder::new().with_interceptor_registry(registry).with_setting_engine(host_setting).with_media_engine(media).build().new_peer_connection(RTCConfiguration::default()).await.unwrap();
         let (packets_tx, mut packets_rx) = tokio::sync::mpsc::unbounded_channel();
         remote.on_track(Box::new(move |remote_track, _, _| {
             let packets_tx = packets_tx.clone();
@@ -121,7 +128,7 @@ mod tests {
                 });
             })
         }));
-        let track = std::sync::Arc::new(VideoTrack::new());
+        let track = std::sync::Arc::new(VideoTrack::with_network(network.clone()));
         host.add_track(track.clone()).await.unwrap();
         let offer = remote.create_offer(None).await.unwrap();
         let mut gathered = remote.gathering_complete_promise().await;
@@ -145,6 +152,39 @@ mod tests {
                 tokio::time::sleep(std::time::Duration::from_millis(10)).await;
             }
         }).await.unwrap();
+        if burst_test {
+            struct Bucket { at: std::time::Instant, credit: f64, rate: f64, capacity: f64, seen: usize, dropped: usize }
+            let bucket = std::sync::Arc::new(std::sync::Mutex::new(Bucket { at: std::time::Instant::now(), credit: 12000.0, rate: 1_000_000.0, capacity: 12000.0, seen: 0, dropped: 0 }));
+            let model = bucket.clone();
+            router.lock().await.add_chunk_filter(Box::new(move |chunk| {
+                let data = chunk.user_data();
+                // SRTP preserves its RTP header. Ignore ICE, DTLS and RTCP.
+                if data.len()<12 || data[0]>>6!=2 || data[1]&127!=102 { return true; }
+                let mut b=model.lock().unwrap();
+                b.credit=(b.credit+b.at.elapsed().as_secs_f64()*b.rate).min(b.capacity);
+                b.at=std::time::Instant::now(); b.seen+=1;
+                if b.credit<data.len() as f64 { b.dropped+=1; false } else { b.credit-=data.len() as f64; true }
+            })).await;
+            let mut data=vec![0,0,1,0x65];data.extend(vec![0x55;300_000]);
+            let sample=Sample { data:data.into(), duration:Duration::from_millis(100), ..Default::default() };
+            for (link_bps,encoder_bps,queue) in [(8_000_000,6_000_000,12_000),(3_000_000,2_000_000,6_000)] {
+                network.set_ceiling(encoder_bps);
+                let mut measurements=vec![];
+                for paced in [false,true] {
+                    { let mut b=bucket.lock().unwrap(); b.at=std::time::Instant::now(); b.capacity=f64::from(queue);b.credit=b.capacity;b.rate=f64::from(link_bps)/8.0;b.seen=0;b.dropped=0; }
+                    network.pacing.store(paced,Ordering::Relaxed);
+                    track.write_sample_with_extensions(VideoCodec::H264,&sample,&[]).await.unwrap();
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                    let b=bucket.lock().unwrap(); measurements.push((b.seen,b.dropped));
+                }
+                eprintln!("RTP burst model: link_bps={} queue={} unpaced={:?} paced={:?} (seen, dropped)",link_bps,queue,measurements[0],measurements[1]);
+                assert!(measurements[0].0>=50);
+                assert_eq!(measurements[0].0,measurements[1].0);
+                assert!(measurements[0].1>10);
+                assert!(measurements[1].1<measurements[0].1/2);
+            }
+            host.close().await.unwrap(); remote.close().await.unwrap();router.lock().await.stop().await.unwrap();return;
+        }
         let codecs = if !h264 { vec![VideoCodec::H265] } else if hevc { vec![VideoCodec::H264, VideoCodec::H265, VideoCodec::H264] } else { vec![VideoCodec::H264] };
         let mut previous: Option<Packet> = None;
         for codec in codecs {
@@ -170,5 +210,7 @@ mod tests {
         router.lock().await.stop().await.unwrap();
     }
     #[tokio::test]
-    async fn negotiated_codecs_only_and_legacy_h264_offer() { negotiate(true, false).await; negotiate(true, true).await; negotiate(false, true).await; }
+    async fn pacing_reduces_burst_loss_on_bounded_virtual_link() { negotiate(true,false,true).await; }
+    #[tokio::test]
+    async fn negotiated_codecs_only_and_legacy_h264_offer() { negotiate(true, false, false).await; negotiate(true, true, false).await; negotiate(false, true, false).await; }
 }

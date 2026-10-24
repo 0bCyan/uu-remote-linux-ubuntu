@@ -105,6 +105,8 @@ jobs:
 
   # Headless NAS image (docker/), built from the release tarball published by the job above.
   docker:
+    # Inherited upstream NAS packaging is not an Ubuntu R5 image.
+    if: github.repository == 'VallierDev/uu-remote-linux'
     needs: release
     runs-on: ubuntu-22.04
     steps:

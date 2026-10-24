@@ -1,3 +1,4 @@
+// Modified by 0bCyan for the Ubuntu fork, 2026-10-24. See NOTICE.md and docs/UBUNTU_FORK.md.
 //! UU Remote Pure Native Linux Server (Rust Edition)
 //! Zero-Wine, Zero-Python, Single-Binary, 5 Native Tools Integrated
 
@@ -32,6 +33,7 @@ mod webrtc;
 mod video;
 mod video_select;
 mod video_track;
+mod video_network;
 mod locked_video;
 #[cfg(test)]
 mod test_network;

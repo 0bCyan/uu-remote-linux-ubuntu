@@ -1,3 +1,4 @@
+// Modified by 0bCyan for the Ubuntu fork, 2026-10-24. See NOTICE.md and docs/UBUNTU_FORK.md.
 /**
  * Native Linux X11 High-Performance Capture & Input Injection Engine
  * Zero-Wine dependency, zero-overhead, thread-safe.
@@ -11,6 +12,8 @@
 #include <X11/Xlib.h>
 #include <X11/Xutil.h>
 #include <X11/Xatom.h>
+#include <X11/XKBlib.h>
+#include <X11/keysym.h>
 #include <strings.h>
 #include <X11/extensions/XShm.h>
 #include <X11/extensions/XTest.h>
@@ -54,6 +57,25 @@ static void track_injected_key(int keycode, int is_press) {
         *slot &= ~bit;
         if (--g_injected_count == 0 && g_restore_repeat) { XAutoRepeatOn(g_display); g_restore_repeat = 0; }
     }
+}
+
+/* XTEST ignores another down while the key is held. Recreate explicit viewer
+ * repeats as up/down, keeping host autorepeat disabled to avoid RTT duplicates.
+ * Modifier downs must stay held across chords (no synthetic Ctrl/Shift release). */
+static int inject_keycode(int keycode, int is_press) {
+    if (keycode < 8 || keycode > 255) return -2;
+    int held = g_injected_down[keycode >> 3] & (1u << (keycode & 7));
+    if (is_press) {
+        if (held) {
+            KeySym symbol = XkbKeycodeToKeysym(g_display, (KeyCode)keycode, 0, 0);
+            if (!IsModifierKey(symbol)) XTestFakeKeyEvent(g_display, keycode, False, CurrentTime);
+        }
+        track_injected_key(keycode, 1);
+    }
+    XTestFakeKeyEvent(g_display, keycode, is_press ? True : False, CurrentTime);
+    if (!is_press) track_injected_key(keycode, 0);
+    XFlush(g_display);
+    return 0;
 }
 
 static void shm_open_image(void) {
@@ -182,7 +204,25 @@ int x11_wake_display(void) {
 
 int x11_mouse_move(int x, int y) {
     if (!g_display) return -1;
-    XTestFakeMotionEvent(g_display, g_screen, x, y, CurrentTime);
+    const char *warp = getenv("UU_X11_ABSOLUTE_WARP");
+    if (warp && strcmp(warp, "1") == 0) {
+        XTestFakeMotionEvent(g_display, g_screen, x, y, CurrentTime);
+    } else {
+        // XTEST absolute motion warps through XFixes barriers. Relative motion from
+        // the current point preserves GNOME's pressure gestures (e.g. Ubuntu Dock).
+        Window root, child; int px, py, wx, wy; unsigned int mask;
+        if (!XQueryPointer(g_display, g_root, &root, &child, &px, &py, &wx, &wy, &mask)) return -2;
+        int dx = x - px, dy = y - py;
+        int width, height;
+        x11_get_dimensions(&width, &height);
+        // A normalized pointer clamps at the last pixel; continued edge input
+        // must still push against the barrier just outside the physical screen.
+        if (x == 0 && dx <= 0) dx -= 20;
+        if (x == width - 1 && dx >= 0) dx += 20;
+        if (y == 0 && dy <= 0) dy -= 20;
+        if (y == height - 1 && dy >= 0) dy += 20;
+        XTestFakeRelativeMotionEvent(g_display, dx, dy, CurrentTime);
+    }
     XFlush(g_display);
     return 0;
 }
@@ -212,11 +252,7 @@ int x11_key_symbol(unsigned long symbol, int is_press) {
     if (!g_display) return -1;
     KeyCode code = XKeysymToKeycode(g_display, (KeySym)symbol);
     if (!code) return -2;
-    if (is_press) track_injected_key(code, 1);
-    XTestFakeKeyEvent(g_display, code, is_press ? True : False, CurrentTime);
-    if (!is_press) track_injected_key(code, 0);
-    XFlush(g_display);
-    return 0;
+    return inject_keycode(code, is_press);
 }
 
 /* Type UTF-8 text the way xdotool does: bind each character's keysym to a spare (unmapped) keycode, press it,
@@ -269,11 +305,7 @@ int x11_type_utf8(const char *text) {
 
 int x11_key_event(int keycode, int is_press) {
     if (!g_display) return -1;
-    if (is_press) track_injected_key(keycode, 1);
-    XTestFakeKeyEvent(g_display, keycode, is_press ? True : False, CurrentTime);
-    if (!is_press) track_injected_key(keycode, 0);
-    XFlush(g_display);
-    return 0;
+    return inject_keycode(keycode, is_press);
 }
 
 /* Session boundaries must also recover XTEST state left by a previous process.

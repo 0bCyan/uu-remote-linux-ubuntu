@@ -1,0 +1,31 @@
+name: Ubuntu fork
+
+on:
+  push:
+    branches: [ubuntu]
+  pull_request:
+    branches: [ubuntu]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  native-host:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install build and test dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential pkg-config ffmpeg \
+            libx11-dev libxext-dev libxtst-dev libxfixes-dev libgtk-3-dev \
+            libva-dev libgbm-dev libx11-xcb-dev libxcb-dri3-dev \
+            libxcb-damage0-dev libxcb-xfixes0-dev libwayland-dev libwayland-bin \
+            libxkbcommon-dev libglib2.0-dev libpipewire-0.3-dev libei-dev
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Native host tests including pacing and feedback
+        run: cargo test --locked --features wayland,portal,engine-plugins,inproc-av --bin uuremote-server
+      - name: Release build
+        run: cargo build --release --locked --features wayland,portal,engine-plugins,inproc-av --bin uuremote-server

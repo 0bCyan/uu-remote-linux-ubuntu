@@ -1,3 +1,4 @@
+// Modified by 0bCyan for the Ubuntu fork, 2026-10-24. See NOTICE.md and docs/UBUNTU_FORK.md.
 //! In-process X11 capture (XDamage + XShm) and NVENC encoding through the NVIDIA driver.
 //! With UU_VIDEO_ENCODER=vaapi, H.264 / HEVC go through VAAPI instead: a DRI3 DMA-BUF of the root window is
 //! imported as a VA surface and converted/scaled by VPP, so the CPU never touches the pixels (XShm upload
@@ -46,6 +47,7 @@ struct VaapiConfigFFI {
     cap_height: u32,
     fps: u32,
     gop: u32,
+    min_qp: u32,
     target_bps: i64,
     max_bps: i64,
     buffer_bits: i64,
@@ -78,6 +80,8 @@ extern "C" {
     fn vaapi_create(config: *const VaapiConfigFFI) -> *mut VaapiEngineOpaque;
     fn vaapi_import_dma_buffer(engine: *mut VaapiEngineOpaque, dma_fd: libc::c_int, stride: u32) -> libc::c_int;
     fn vaapi_upload_host_buffer(engine: *mut VaapiEngineOpaque, host_ptr: *const u8, pitch: u32) -> libc::c_int;
+    fn vaapi_mark_input_dirty(engine: *mut VaapiEngineOpaque);
+    fn vaapi_set_bitrate(engine: *mut VaapiEngineOpaque, target_bps: i64, max_bps: i64, buffer_bits: i64) -> libc::c_int;
     fn vaapi_encode_frame(
         engine: *mut VaapiEngineOpaque,
         force_idr: libc::c_int,
@@ -144,6 +148,7 @@ pub struct Config {
     pub chroma: u64,
     /// UU_VIDEO_ENCODER=vaapi: the VAAPI engine (H.264 / HEVC Main) instead of NVENC.
     pub vaapi: bool,
+    pub network: Option<Arc<crate::video_network::VideoNetwork>>,
 }
 
 pub fn disabled() -> bool {
@@ -246,6 +251,7 @@ fn run_vaapi(
         cap_height,
         fps: config.fps,
         gop: config.gop,
+        min_qp: config.cq,
         target_bps: config.target_bps,
         max_bps: config.max_bps,
         buffer_bits: config.buffer_bits,
@@ -342,6 +348,7 @@ fn run_vaapi(
                     if unsafe { dri3_capture_blit(c.0) } != 0 {
                         return Err("DRI3 blit of the root window failed".into());
                     }
+                    unsafe { vaapi_mark_input_dirty(engine.0) };
                 }
                 (None, Some(c)) => {
                     let pitch = c.size().0 * 4;
@@ -356,6 +363,14 @@ fn run_vaapi(
 
         let mut out_data: *const u8 = std::ptr::null();
         let mut out_len: u32 = 0;
+        if let Some(network) = &config.network {
+            let max_bps = i64::from(network.encoder_bps()).min(config.max_bps).max(1000);
+            let target_bps = config.target_bps.min(max_bps * 3 / 4).max(1);
+            let buffer_bits = (config.buffer_bits * max_bps / config.max_bps.max(1)).max(1000);
+            if unsafe { vaapi_set_bitrate(engine.0, target_bps, max_bps, buffer_bits) } != 0 {
+                return Err("VAAPI live rate update failed".into());
+            }
+        }
         let res = unsafe { vaapi_encode_frame(engine.0, force_idr, &mut out_data, &mut out_len) };
         if res != 0 {
             return Err(format!("vaapi_encode_frame failed with error {res}"));

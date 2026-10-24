@@ -1,3 +1,4 @@
+// Modified by 0bCyan for the Ubuntu fork, 2026-10-24. See NOTICE.md and docs/UBUNTU_FORK.md.
 #[cfg(test)]
 #[path = "video_wake_tests.rs"]
 mod wake_tests;
@@ -681,7 +682,7 @@ async fn read_encoder(
     size: (u32, u32), display: String, portal:Option<Arc<crate::portal::PortalSession>>,
     latest: mpsc::Sender<Arc<CompleteFrame>>,
     mut settings: VideoSettings, sequence: Arc<std::sync::atomic::AtomicU64>, idr: Arc<AtomicBool>, budget: Arc<Semaphore>,
-    selection: crate::video_select::Selection,
+    selection: crate::video_select::Selection, network: Option<Arc<crate::video_network::VideoNetwork>>,
 ) -> Result<(), String> {
     #[cfg(test)]
     if display == wake_tests::DISPLAY { return wake_tests::encode(latest, settings, sequence, budget).await; }
@@ -692,22 +693,22 @@ async fn read_encoder(
         settings.chroma = crate::capture_setting::CHROMA_420;
         log::info!("Chroma 4:4:4 requested; encoder={} source={} encodes 4:2:0", format!("{encoder:?}").to_ascii_lowercase(), crate::video_select::encoder_source_label(selection.encoder_source));
     }
-    if encoder == Encoder::Cpu { return read_encoder_with(size,display,portal,latest,Encoder::Cpu,true,sequence,settings,idr,budget,selection).await; }
+    if encoder == Encoder::Cpu { return read_encoder_with(size,display,portal,latest,Encoder::Cpu,true,sequence,settings,idr,budget,selection,network.clone()).await; }
     #[cfg_attr(not(feature = "inproc-av"), allow(unused_mut))]
-    let mut result = read_encoder_with(size,display.clone(),portal.clone(),latest.clone(),encoder,true,sequence.clone(),settings,idr.clone(),budget.clone(),selection).await;
+    let mut result = read_encoder_with(size,display.clone(),portal.clone(),latest.clone(),encoder,true,sequence.clone(),settings,idr.clone(),budget.clone(),selection,network.clone()).await;
     // A failed native NVENC session (old driver, unsupported mode) still leaves FFmpeg's NVENC process pipeline.
     #[cfg(feature = "inproc-av")]
     if let Err(error) = &result {
         if !latest.is_closed() && native_inproc(&display, portal.is_some(), encoder) && x11_resized(&display, portal.is_some(), size).is_none() {
             log::warn!("In-process {} stream unavailable; switching to the FFmpeg process pipeline: {}",encoder.name_for(settings.codec),error);
-            result = read_encoder_with(size,display.clone(),portal.clone(),latest.clone(),encoder,false,sequence.clone(),settings,idr.clone(),budget.clone(),selection).await;
+            result = read_encoder_with(size,display.clone(),portal.clone(),latest.clone(),encoder,false,sequence.clone(),settings,idr.clone(),budget.clone(),selection,network.clone()).await;
         }
     }
     match result {
         Ok(())=>Ok(()),
         Err(error) if !latest.is_closed() && x11_resized(&display, portal.is_some(), size).is_none()=>{
             log::warn!("{} stream unavailable; switching scoped encoder to CPU: {}",encoder.name_for(settings.codec),error);
-            read_encoder_with(size,display,portal,latest,Encoder::Cpu,true,sequence,settings,idr,budget,selection).await
+            read_encoder_with(size,display,portal,latest,Encoder::Cpu,true,sequence,settings,idr,budget,selection,network.clone()).await
         },
         Err(error)=>Err(error),
     }
@@ -812,7 +813,7 @@ async fn read_encoder_with(
     size: (u32,u32),display:String,portal:Option<Arc<crate::portal::PortalSession>>,latest:mpsc::Sender<Arc<CompleteFrame>>,encoder:Encoder,
     #[cfg_attr(not(feature = "inproc-av"), allow(unused_variables))] allow_inproc: bool,sequence:Arc<std::sync::atomic::AtomicU64>,
     settings: VideoSettings, #[cfg_attr(not(feature = "inproc-av"), allow(unused_variables))] idr: Arc<AtomicBool>, budget: Arc<Semaphore>,
-    selection: crate::video_select::Selection,
+    selection: crate::video_select::Selection, #[cfg_attr(not(feature = "inproc-av"), allow(unused_variables))] network: Option<Arc<crate::video_network::VideoNetwork>>,
 )->Result<(),String>{
     let selected_output=crate::wayland::capture_source(&display,portal.is_some(),settings.source_id);
     let size=selected_output.map_or(size,|s|(s.width,s.height));
@@ -834,7 +835,7 @@ async fn read_encoder_with(
             gop: gop_frames(settings.fps, true) as u32, cq: settings.cq() as u32,
             target_bps: settings.max_kbps().map_or(16_000, |k| i64::from(k) * 3 / 4) * 1000,
             max_bps: max_kbps * 1000, buffer_bits: i64::from(buffer_for(&settings, encoder)) * 1000, codec: settings.codec, chroma: settings.chroma,
-            vaapi: encoder == Encoder::Vaapi,
+            vaapi: encoder == Encoder::Vaapi, network: network.clone(),
         };
         log::info!("Desktop encoder: display={} source={}x{} output={:?} fps={} cq={} maxrate={}k encoder={} source={} pipeline=in-process",
             display,size.0,size.1,settings.output,settings.fps,config.cq,max_kbps,encoder.name_for(settings.codec),
@@ -1116,7 +1117,7 @@ pub async fn probe(size:(u32,u32),display:String,portal:Option<Arc<crate::portal
     let (tx,mut rx)=mpsc::channel(4);
     let sequence=Arc::new(std::sync::atomic::AtomicU64::new(0));
     let (selection, settings)=probe_plan()?;
-    let _reader=EncoderTask(tokio::spawn(read_encoder(size,display,portal,tx,settings,sequence,Arc::new(AtomicBool::new(false)),Arc::new(Semaphore::new(4)),selection)));
+    let _reader=EncoderTask(tokio::spawn(read_encoder(size,display,portal,tx,settings,sequence,Arc::new(AtomicBool::new(false)),Arc::new(Semaphore::new(4)),selection,None)));
     let mut count=0;
     let mut bytes=0;
     // UU_PROBE_FRAMES lengthens the sample for baseline measurements; default is 5 frames.
@@ -1168,6 +1169,7 @@ pub async fn stream_desktop_at(pc: Arc<RTCPeerConnection>, track: Arc<crate::vid
     let budget=Arc::new(Semaphore::new(4));
     let sequence = Arc::new(std::sync::atomic::AtomicU64::new(0));
     let mut current = *settings.borrow_and_update();
+    track.network.set_ceiling(current.max_kbps().unwrap_or(30_000).saturating_mul(1000));
     if !track.supports(current.codec) && track.supports(VideoCodec::H265) {
         current.codec = VideoCodec::H265; // H265-only remote video offer.
         applied.send_replace(current);
@@ -1188,8 +1190,9 @@ pub async fn stream_desktop_at(pc: Arc<RTCPeerConnection>, track: Arc<crate::vid
         let sequence = sequence.clone();
         let idr = idr.clone();
         let budget = budget.clone();
+        let network = track.network.clone();
         move |size: (u32, u32), selection: crate::video_select::Selection, settings: VideoSettings| {
-            read_encoder(size, display.clone(), portal.clone(), latest.clone(), settings, sequence.clone(), idr.clone(), budget.clone(), selection)
+            read_encoder(size, display.clone(), portal.clone(), latest.clone(), settings, sequence.clone(), idr.clone(), budget.clone(), selection, Some(network.clone()))
         }
     };
     let mut reader = EncoderTask(tokio::spawn(open(size, live_selection, current)));
@@ -1205,6 +1208,9 @@ pub async fn stream_desktop_at(pc: Arc<RTCPeerConnection>, track: Arc<crate::vid
     let mut stats = Instant::now();
     // sent/skipped are cumulative; window_* and max_* cover the interval since the last stats line.
     let (mut window_frames, mut window_skipped) = (0u64, 0u64);
+    let (mut window_bytes, mut max_frame_bytes) = (0u64, 0usize);
+    let pacing_enabled = std::env::var("UU_VIDEO_PACING").map_or(true, |v| v != "0");
+    log::info!("Video RTP pacing: enabled={pacing_enabled} transport_budget=true includes_retransmissions=true burst_bytes=3600");
     let mut send_interrupted=false;
     'stream: loop {
         if reload.has_changed().unwrap_or(false) || reload_pending {
@@ -1245,6 +1251,7 @@ pub async fn stream_desktop_at(pc: Arc<RTCPeerConnection>, track: Arc<crate::vid
             }
         }
         let next = *settings.borrow_and_update();
+        track.network.set_ceiling(next.max_kbps().unwrap_or(30_000).saturating_mul(1000));
         if next != current || send_interrupted {
             let discard = next.codec != current.codec || next.source_generation != current.source_generation || next.source_id != current.source_id || send_interrupted;
             current = next;
@@ -1331,16 +1338,21 @@ pub async fn stream_desktop_at(pc: Arc<RTCPeerConnection>, track: Arc<crate::vid
                 previous = Some(frame.sequence);
                 max_send_ms=max_send_ms.max(send_started.elapsed().as_millis());
                 frames += 1;
+                window_bytes += frame.data.len() as u64;
+                max_frame_bytes = max_frame_bytes.max(frame.data.len());
                 #[cfg(test)]
                 if wake_tests::active() { stats = Instant::now() - Duration::from_secs(30); }
                 if stats.elapsed() >= Duration::from_secs(30) {
                     if !portal_stream { keep_stream_display_awake(); }
-                    log::info!("Desktop latest-frame stats: sent={} skipped={} latest_seq={} window_s={} window_sent={} window_skipped={} max_slot_age_ms={} max_send_ms={}",
-                        frames, skipped, frame.sequence, stats.elapsed().as_secs(), frames - window_frames, skipped - window_skipped, max_age_ms, max_send_ms);
+                    log::info!("Desktop latest-frame stats: sent={} skipped={} latest_seq={} window_s={} window_sent={} window_skipped={} max_slot_age_ms={} max_send_ms={} video_kbps={} max_frame_bytes={} encoder_budget_kbps={}",
+                        frames, skipped, frame.sequence, stats.elapsed().as_secs(), frames - window_frames, skipped - window_skipped, max_age_ms, max_send_ms,
+                        window_bytes * 8 / stats.elapsed().as_millis().max(1) as u64, max_frame_bytes, track.network.encoder_bps() / 1000);
                     (window_frames, window_skipped) = (frames, skipped);
                     stats = Instant::now();
                     max_age_ms = 0;
                     max_send_ms = 0;
+                    window_bytes = 0;
+                    max_frame_bytes = 0;
                 }
             }
         }

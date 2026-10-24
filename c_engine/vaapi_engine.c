@@ -1,3 +1,4 @@
+// Modified by 0bCyan for the Ubuntu fork, 2026-10-24. See NOTICE.md and docs/UBUNTU_FORK.md.
 #include "vaapi_engine.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -98,6 +99,7 @@ struct VaapiEngine {
     // frame_num / POC bookkeeping since the last IDR; H264 state the driver does not derive itself
     uint32_t frame_num;
     uint32_t rc_mode;
+    int rate_dirty;
 
     // DMA-BUF backing
     int dma_fd;
@@ -122,6 +124,8 @@ struct VaapiEngine {
     // Host upload path: a VAImage the CPU writes, then vaPutImage into in_rgb_surf
     VAImage upload_img;
     int upload_ready;
+    int input_dirty;
+    uint32_t min_qp;
 };
 
 // The VPP pipeline buffer points at the engine-owned rects, so VPP scales cap -> output
@@ -131,6 +135,13 @@ static int vaapi_make_vpp_buffer(VaapiEngine* engine) {
     vpp_param.surface = engine->in_rgb_surf;
     vpp_param.surface_region = &engine->src_rect;
     vpp_param.output_region = &engine->dst_rect;
+    // H.264 VUI below declares this same limited-range BT.709 conversion.
+    if (!engine->is_hevc) {
+        vpp_param.surface_color_standard = VAProcColorStandardSRGB;
+        vpp_param.output_color_standard = VAProcColorStandardBT709;
+        vpp_param.input_color_properties.color_range = VA_SOURCE_RANGE_FULL;
+        vpp_param.output_color_properties.color_range = VA_SOURCE_RANGE_REDUCED;
+    }
     return RT.vaCreateBuffer(engine->va_dpy, engine->vpp_ctx, VAProcPipelineParameterBufferType,
                              sizeof(vpp_param), 1, &vpp_param, &engine->vpp_buf) == VA_STATUS_SUCCESS ? 0 : -1;
 }
@@ -153,6 +164,8 @@ VaapiEngine* vaapi_create(const VaapiConfig* config) {
     engine->max_bps = config->max_bps > engine->target_bps ? config->max_bps : engine->target_bps;
     engine->buffer_bits = config->buffer_bits > 0 ? config->buffer_bits : engine->max_bps;
     engine->is_hevc = config->is_hevc;
+    engine->input_dirty = 1;
+    engine->min_qp = config->min_qp > 0 && config->min_qp <= 44 ? config->min_qp : 16;
     engine->dma_fd = -1;
     // calloc leaves surface/context IDs at 0, which is a valid VA ID; mark them unset.
     engine->in_rgb_surf = VA_INVALID_ID;
@@ -269,6 +282,7 @@ VaapiEngine* vaapi_create(const VaapiConfig* config) {
 
 int vaapi_import_dma_buffer(VaapiEngine* engine, int dma_fd, uint32_t stride) {
     if (!engine || dma_fd < 0) return -1;
+    engine->input_dirty = 1;
 
     if (engine->in_rgb_surf != VA_INVALID_ID) {
         RT.vaDestroySurfaces(engine->va_dpy, &engine->in_rgb_surf, 1);
@@ -296,7 +310,7 @@ int vaapi_import_dma_buffer(VaapiEngine* engine, int dma_fd, uint32_t stride) {
     prime_desc.layers[0].num_planes = 1;
     prime_desc.layers[0].pitch[0] = stride;
 
-    VASurfaceAttrib attribs[2];
+    VASurfaceAttrib attribs[3];
     attribs[0].type = VASurfaceAttribMemoryType;
     attribs[0].flags = VA_SURFACE_ATTRIB_SETTABLE;
     attribs[0].value.type = VAGenericValueTypeInteger;
@@ -305,8 +319,12 @@ int vaapi_import_dma_buffer(VaapiEngine* engine, int dma_fd, uint32_t stride) {
     attribs[1].flags = VA_SURFACE_ATTRIB_SETTABLE;
     attribs[1].value.type = VAGenericValueTypePointer;
     attribs[1].value.value.p = &prime_desc;
+    attribs[2].type = VASurfaceAttribPixelFormat;
+    attribs[2].flags = VA_SURFACE_ATTRIB_SETTABLE;
+    attribs[2].value.type = VAGenericValueTypeInteger;
+    attribs[2].value.value.i = VA_FOURCC_BGRX;
 
-    VAStatus st = RT.vaCreateSurfaces(engine->va_dpy, VA_RT_FORMAT_RGB32, engine->cap_width, engine->cap_height, &engine->in_rgb_surf, 1, attribs, 2);
+    VAStatus st = RT.vaCreateSurfaces(engine->va_dpy, VA_RT_FORMAT_RGB32, engine->cap_width, engine->cap_height, &engine->in_rgb_surf, 1, attribs, 3);
     if (st != VA_STATUS_SUCCESS) {
         fprintf(stderr, "[vaapi] vaCreateSurfaces DRM_PRIME_2 failed: %s\n", RT.vaErrorStr(st));
         return -1;
@@ -324,7 +342,10 @@ int vaapi_upload_host_buffer(VaapiEngine* engine, const uint8_t* host_ptr, uint3
     if (!engine || !host_ptr) return -1;
 
     if (engine->in_rgb_surf == VA_INVALID_ID) {
-        VAStatus st = RT.vaCreateSurfaces(engine->va_dpy, VA_RT_FORMAT_RGB32, engine->cap_width, engine->cap_height, &engine->in_rgb_surf, 1, NULL, 0);
+        // iHD's default RGB32 layout does not match a BGRX upload (striped rows on Meteor Lake).
+        VASurfaceAttrib attr = { .type = VASurfaceAttribPixelFormat, .flags = VA_SURFACE_ATTRIB_SETTABLE,
+            .value = { .type = VAGenericValueTypeInteger, .value.i = VA_FOURCC_BGRX } };
+        VAStatus st = RT.vaCreateSurfaces(engine->va_dpy, VA_RT_FORMAT_RGB32, engine->cap_width, engine->cap_height, &engine->in_rgb_surf, 1, &attr, 1);
         if (st != VA_STATUS_SUCCESS) return -2;
         if (vaapi_make_vpp_buffer(engine) != 0) return -3;
     }
@@ -357,7 +378,12 @@ int vaapi_upload_host_buffer(VaapiEngine* engine, const uint8_t* host_ptr, uint3
     st = RT.vaPutImage(engine->va_dpy, engine->in_rgb_surf, engine->upload_img.image_id,
                        0, 0, engine->cap_width, engine->cap_height, 0, 0, engine->cap_width, engine->cap_height);
     if (st != VA_STATUS_SUCCESS) return -6;
+    engine->input_dirty = 1;
     return 0;
+}
+
+void vaapi_mark_input_dirty(VaapiEngine* engine) {
+    if (engine) engine->input_dirty = 1;
 }
 
 // Sequence-level misc parameter. AMD's Mesa driver feeds the VCN ring message from these;
@@ -448,6 +474,7 @@ static int vaapi_h264_params(VaapiEngine* engine, int is_idr, VASurfaceID curr_r
         seq_p.max_num_ref_frames = 1;
         seq_p.picture_width_in_mbs = mb_w;
         seq_p.picture_height_in_mbs = mb_h;
+        seq_p.seq_fields.bits.chroma_format_idc = 1;
         seq_p.seq_fields.bits.direct_8x8_inference_flag = 1;
         seq_p.seq_fields.bits.frame_mbs_only_flag = 1;
         seq_p.seq_fields.bits.pic_order_cnt_type = 0;
@@ -468,7 +495,13 @@ static int vaapi_h264_params(VaapiEngine* engine, int is_idr, VASurfaceID curr_r
         bw_put(&sps, 1, 1); bw_put(&sps, 1, 1);                           // frame_mbs_only, direct_8x8_inference
         bw_put(&sps, seq_p.frame_cropping_flag, 1);
         if (seq_p.frame_cropping_flag) { bw_ue(&sps, 0); bw_ue(&sps, crop_right); bw_ue(&sps, 0); bw_ue(&sps, crop_bottom); }
-        bw_put(&sps, 0, 1);                                               // no VUI
+        bw_put(&sps, 1, 1);                                               // VUI
+        bw_put(&sps, 0, 1); bw_put(&sps, 0, 1);                           // aspect ratio, overscan
+        bw_put(&sps, 1, 1); bw_put(&sps, 5, 3); bw_put(&sps, 0, 1);      // video signal, unspecified format, limited range
+        bw_put(&sps, 1, 1); bw_put(&sps, 1, 8); bw_put(&sps, 1, 8); bw_put(&sps, 1, 8); // BT.709 primaries/transfer/matrix
+        bw_put(&sps, 0, 1); bw_put(&sps, 0, 1);                           // chroma location, timing
+        bw_put(&sps, 0, 1); bw_put(&sps, 0, 1);                           // NAL/VCL HRD
+        bw_put(&sps, 0, 1); bw_put(&sps, 0, 1);                           // pic struct, bitstream restrictions
         bw_trailing(&sps);
         // PPS: CABAC, one L0 reference, QP 26, default deblocking
         BitWriter pps = {0};
@@ -697,6 +730,15 @@ static int vaapi_hevc_params(VaapiEngine* engine, int is_idr, VASurfaceID curr_r
     return vaapi_add_packed(engine, VAEncPackedHeaderSlice, &sh, 1, b->packed, &b->packed_n);
 }
 
+int vaapi_set_bitrate(VaapiEngine* engine, int64_t target_bps, int64_t max_bps, int64_t buffer_bits) {
+    if (!engine || target_bps <= 0 || max_bps < target_bps || max_bps > UINT32_MAX || buffer_bits <= 0 || buffer_bits > UINT32_MAX) return -1;
+    if (engine->target_bps != target_bps || engine->max_bps != max_bps || engine->buffer_bits != buffer_bits) {
+        engine->target_bps = target_bps; engine->max_bps = max_bps; engine->buffer_bits = buffer_bits;
+        engine->rate_dirty = 1;
+    }
+    return 0;
+}
+
 int vaapi_encode_frame(
     VaapiEngine* engine,
     int force_idr,
@@ -713,25 +755,29 @@ int vaapi_encode_frame(
     VASurfaceID prev_recon = engine->recon_surfs[(engine->frame_count + 1) & 1];
 
     // 1. Hardware VPP Color Conversion + scaling (RGB -> NV12 entirely inside VRAM)
-    VAStatus st = RT.vaBeginPicture(engine->va_dpy, engine->vpp_ctx, engine->nv12_surf);
-    if (st != VA_STATUS_SUCCESS) return -10;
-    st = RT.vaRenderPicture(engine->va_dpy, engine->vpp_ctx, &engine->vpp_buf, 1);
-    if (st != VA_STATUS_SUCCESS) return -10;
-    st = RT.vaEndPicture(engine->va_dpy, engine->vpp_ctx);
-    if (st != VA_STATUS_SUCCESS) return -10;
+    VAStatus st = VA_STATUS_SUCCESS;
+    if (engine->input_dirty) {
+        st = RT.vaBeginPicture(engine->va_dpy, engine->vpp_ctx, engine->nv12_surf);
+        if (st != VA_STATUS_SUCCESS) return -10;
+        st = RT.vaRenderPicture(engine->va_dpy, engine->vpp_ctx, &engine->vpp_buf, 1);
+        if (st != VA_STATUS_SUCCESS) return -10;
+        st = RT.vaEndPicture(engine->va_dpy, engine->vpp_ctx);
+        if (st != VA_STATUS_SUCCESS) return -10;
+        engine->input_dirty = 0;
+    }
 
-    // 2. Rate control (every IDR) and the codec's sequence / picture / slice parameters + packed headers
+    // 2. Rate control (IDR or live budget change) and codec parameters + packed headers
     EncBuffers b = { .seq = VA_INVALID_ID, .pic = VA_INVALID_ID, .slice = VA_INVALID_ID };
     int ret = -11;
-    if (is_idr) {
+    if (is_idr || engine->rate_dirty) {
         VAEncMiscParameterRateControl rc;
         memset(&rc, 0, sizeof(rc));
         // VBR: bits_per_second is the ceiling (maxrate) and target_percentage the average (#33)
         rc.bits_per_second = (uint32_t)engine->max_bps;
         rc.target_percentage = engine->rc_mode == VA_RC_VBR ? (uint32_t)(engine->target_bps * 100 / engine->max_bps) : 100;
         rc.window_size = 1000;
-        rc.initial_qp = 28;
-        rc.min_qp = 16;
+        rc.initial_qp = engine->frame_count == 0 ? (engine->min_qp > 28 ? engine->min_qp : 28) : 0;
+        rc.min_qp = engine->min_qp;
         rc.max_qp = 44;
         rc.rc_flags.bits.disable_frame_skip = 1; // a remote desktop must not drop frames silently
         b.misc[b.misc_n++] = vaapi_create_misc_buffer(engine, VAEncMiscParameterTypeRateControl, &rc, sizeof(rc));
@@ -794,6 +840,7 @@ int vaapi_encode_frame(
     engine->frame_num = is_idr ? 1 : ((engine->frame_num + 1) & 15);
     engine->since_idr = is_idr ? 1 : engine->since_idr + 1;
     engine->frame_count++;
+    engine->rate_dirty = 0;
     ret = 0;
 
 done:

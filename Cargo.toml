@@ -3,11 +3,11 @@ name = "uu-remote-linux"
 version = "0.2.29"
 edition = "2021"
 default-run = "uuremote-server"
-authors = ["uu-remote-linux contributors"]
-description = "Unofficial Linux host for NetEase UU Remote: control a Linux desktop from the official clients"
+authors = ["uu-remote-linux contributors", "0bCyan (Ubuntu fork)"]
+description = "Unofficial Ubuntu optimization fork of VallierDev/uu-remote-linux"
 readme = "README.md"
 license = "GPL-3.0-or-later"
-repository = "https://github.com/VallierDev/uu-remote-linux"
+repository = "https://github.com/0bCyan/uu-remote-linux-ubuntu"
 
 # The executable keeps its established name (deploy scripts, systemd units, docs).
 [[bin]]

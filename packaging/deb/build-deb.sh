@@ -37,14 +37,14 @@ cat > "$pkg/DEBIAN/control" <<CONTROL
 Package: uu-remote-linux
 Version: $version
 Architecture: $arch
-Maintainer: VallierDev <24893073+VallierDev@users.noreply.github.com>
+Maintainer: 0bCyan <259615110+0bCyan@users.noreply.github.com>
 Installed-Size: $size
 Depends: $depends, ffmpeg
 Recommends: ${recommends:+$recommends, }libwayland-client0, libxkbcommon0
 Suggests: libpipewire-0.3-0, libei1, wl-clipboard
 Section: net
 Priority: optional
-Homepage: https://github.com/VallierDev/uu-remote-linux
+Homepage: https://github.com/0bCyan/uu-remote-linux-ubuntu
 Description: Unofficial native Linux host for NetEase UU Remote
  Lets the official NetEase UU Remote clients control this Linux desktop
  (X11, wlroots Wayland and GNOME/KDE Wayland through runtime plugins).

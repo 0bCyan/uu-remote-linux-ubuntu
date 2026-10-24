@@ -1,21 +1,37 @@
-# uu-remote-linux · Unofficial Linux host and viewer for NetEase UU Remote
+# uu-remote-linux-ubuntu · Unofficial Ubuntu optimization fork
 
 [简体中文](README.md) | **English**
 
-> **A note first**
->
-> NetEase UU Remote (网易 UU 远程) is a great remote-desktop tool, but there is no Linux version on its
-> official website. So, with the help of Claude and Codex, I wrote this open-source Linux host: install it,
-> and you can control your Linux machine from the official Mac / Windows / mobile UU Remote clients.
-> It now also ships an **experimental Linux viewer**, `uuremote-viewer`, that controls official Windows / Mac hosts or this
-> project's host from Linux (desktop, file transfer, terminal, port mapping, remote assistance; see
-> [below](#experimental-native-viewer-uuremote-viewer)).
-> Desktop-less **Synology / NAS** boxes can run it in Docker: [deployment guide](docs/deploy-nas-docker.md#english), image
-> [`ghcr.io/vallierdev/uu-remote-linux`](https://github.com/VallierDev/uu-remote-linux/pkgs/container/uu-remote-linux).
->
-> This is a personal hobby project. **It is not affiliated with NetEase and is not an official client.**
-> If NetEase considers this project infringing or inappropriate, please DM me on X
-> **[@ai_fengshou](https://x.com/ai_fengshou)** and I will take it down right away.
+## Fork and attribution
+
+This is an **unofficial Ubuntu-focused derivative** of [VallierDev/uu-remote-linux](https://github.com/VallierDev/uu-remote-linux), maintained by [0bCyan](https://github.com/0bCyan). The original project was developed by VallierDev and the upstream contributors. Upstream history, copyright notices and [LICENSE](LICENSE) are retained; the original implementation is not claimed as this fork's work.
+
+- Base: upstream **v0.2.29**, commit [`c041160d6dbbb48a4d7f2c5ed65cb39c6d6c34c5`](https://github.com/VallierDev/uu-remote-linux/commit/c041160d6dbbb48a4d7f2c5ed65cb39c6d6c34c5).
+- Fork snapshot: **Ubuntu R5**, primarily tested on Ubuntu 24.04 / GNOME X11 / Intel VAAPI H.264.
+- Changes: DRI3 damage updates and caching, BT.709 color, shared original/repair pacing, feedback-driven bitrate adaptation, Dock edge pressure, repeated-key input and a glass-inspired GTK UI. See [fork changes and validation](docs/UBUNTU_FORK.md) and [attribution](NOTICE.md).
+- Same upstream licensing: Cargo SPDX **GPL-3.0-or-later**; third-party components retain their respective licenses.
+- Not affiliated with or endorsed by NetEase, Apple or the upstream maintainer. No NetEase Windows binaries or Apple design assets are distributed.
+
+### Build the Ubuntu X11 fork
+
+Requires Rust stable, Ubuntu development packages and a suitable VAAPI driver:
+
+```sh
+sudo apt install build-essential pkg-config libx11-dev libxext-dev libxtst-dev \
+  libxfixes-dev libgtk-3-dev ffmpeg libva-dev libgbm-dev libx11-xcb-dev \
+  libxcb-dri3-dev libxcb-damage0-dev libxcb-xfixes0-dev
+git clone https://github.com/0bCyan/uu-remote-linux-ubuntu.git
+cd uu-remote-linux-ubuntu
+cargo build --release --locked --features inproc-av --bin uuremote-server
+./target/release/uuremote-server set-encoder vaapi
+./target/release/uuremote-server set-codec h264
+./target/release/uuremote-server login
+./target/release/uuremote-server
+```
+
+See [fork notes](docs/UBUNTU_FORK.md) for driver/runtime settings, services and atomic updates. Choose another encoder on devices without supported VAAPI.
+
+The general documentation and screenshots below are inherited from upstream. Cross-platform acceptance records and historical issue/PR references describe upstream work. Build this fork from source; upstream release packages and NAS images do not include the R1–R5 changes.
 
 <p align="center"><img src="docs/images/viewer-window.png" width="720" alt="Linux viewer launcher: device list (device names redacted)"></p>
 <p align="center"><sub>Linux viewer: device list (device names redacted)</sub></p>
@@ -42,7 +58,7 @@
 | Main window and QR login | One window with "This device" (remote assistance) and "Account": a QR code before sign-in, the account and a sign-out button after; `login --no-gui` prints the QR in a terminal |
 | Remote assistance (experimental) | Like the official client: share the **device ID + verification code**; the other person enters them under 开始协助 in UU Remote. Works before sign-in (guest identity) and after; see below |
 | Remote desktop | H.264 video, NVENC hardware encoding on NVIDIA GPUs, libx264 otherwise; the viewer draws its local pointer, so there is no double cursor |
-| Mouse / keyboard | Absolute and relative motion, clicks, wheel, keys; no spurious key repeat on high-latency links; optional uinput virtual devices on Wayland (layout independent, see below) |
+| Mouse / keyboard | Absolute and relative motion, clicks, wheel, keys; X11 preserves viewer-sent repeats (Backspace, arrows and other non-modifier keys) while suppressing extra host repeats caused by delayed key-up; optional uinput virtual devices on Wayland (layout independent, see below) |
 | Mac shortcuts | **Recommended**: turn off 「使用 macOS 快捷键」 (use macOS shortcuts) in the Mac viewer's remote-window menu; then Cmd+C/V/A/F/X/Z work as on a Mac (Cmd+C/V become Ctrl+Shift+C/V in terminals) and Ctrl+C always interrupts. With the option on, the viewer sends Cmd as Ctrl: in a terminal Ctrl+V / Cmd+V paste, Ctrl+C interrupts, copy is Cmd+Shift+C (X11) |
 | Pointer shape | Remote cursor shape is mirrored to the viewer (X11) |
 | Clipboard | Two-way text sync |
@@ -77,22 +93,22 @@ authorized session. Independent file/terminal tool peers do not reset input.
 | GNOME / KDE Plasma | Wayland (xdg-desktop-portal) | 🧪 Experimental; validation scope and limits below | `--features wayland,portal` |
 
 The GNOME Wayland Portal/EIS path has been checked for video and mouse/keyboard input on Ubuntu 26.04, GNOME 50, with one 4K screen at 200% scale; auto unlock after a cold locked connection is verified with the official Mac and iPhone 4.42.0 viewers, while other lock recovery and reconnection still need hardware acceptance testing. Apart from that path and GNOME on X11, desktop testing has primarily used virtual machines. If something goes wrong on
-real hardware, please [open an issue](../../issues) with the output of `uuremote-server doctor` (v0.2.17+; session, backend,
+real hardware, please [open an issue](https://github.com/0bCyan/uu-remote-linux-ubuntu/issues) with the output of `uuremote-server doctor` (v0.2.17+; session, backend,
 plugins, permissions and encoders only, no account data, tokens or addresses) and the relevant lines from
 `journalctl --user -u uuremote-native.service`.
 
 Wayland limits: captures one screen by default; Hyprland can enable monitor switching as described below. Resolution is fixed. The native Hyprland backend now pipelines two shm screencopy buffers and passes the viewer's requested fps to both capture pacing and the encoder. Actual fps remains limited by the compositor, rendering and readback (the old serial path measured about 16–22 fps at 2560x1600; the pipeline is VM-measured only, not a hardware guarantee). The portal backend does not support dynamic resolution; see below for GNOME wake and lock recovery; the clipboard syncs while the viewer's remote window has focus. On the first connection the desktop asks for "Remote Desktop / Screen Sharing"
 permission; the permission is remembered once granted.
 
-Scaled GNOME desktops using native Portal input use EIS on the same authorized session when `ConnectToEIS` and a screen `mapping_id` are available. Each axis is mapped using the matched region and actual frame dimensions, with no fixed resolution or scale factor. This avoids scaled-coordinate rejection by `NotifyPointerMotionAbsolute`. Portal builds require libei >= 1.1. Missing EIS support retains the legacy input path and its existing scaling limitations; other initialization failures are reported and trigger session recovery. After a successful EIS connection, all input uses EIS. Capture alone and uinput do not initialize EIS; missing optional logical dimensions do not block capture. Keyboard input uses the existing Windows VK to evdev mapping. Recovery keeps the encoder frame dimensions fixed but accepts logical-size changes after scaling. On GNOME, a display-change notification enables earlier recovery when previously streaming Portal capture remains paused without a valid format for a 200 ms grace after both conditions are present. Healthy renegotiation cancels the early check; repeated notifications do not postpone the same interruption. The five-second fallback remains without a related notification. Static video and valid-format pauses do not trigger recovery. Tested while connected on Ubuntu 26.04, GNOME Wayland, one 3840x2160 display: 200% -> 166.67% -> 200%, with continuously updating video and full-screen pointer control after recovery. Switching briefly freezes and goes black before recovering; five seconds is the fallback threshold, not total recovery time. See [#35](../../pull/35) for timing measurements and validation limits. Lock recovery still needs hardware acceptance testing; multi-monitor support, live resolution changes, and rotation/reflection transforms are outside this fix's scope. Capture settings remain at protocol version 4: advertised resolutions use pixel coordinates and DPR 1; Portal logical dimensions are used only for local input mapping.
+Scaled GNOME desktops using native Portal input use EIS on the same authorized session when `ConnectToEIS` and a screen `mapping_id` are available. Each axis is mapped using the matched region and actual frame dimensions, with no fixed resolution or scale factor. This avoids scaled-coordinate rejection by `NotifyPointerMotionAbsolute`. Portal builds require libei >= 1.1. Missing EIS support retains the legacy input path and its existing scaling limitations; other initialization failures are reported and trigger session recovery. After a successful EIS connection, all input uses EIS. Capture alone and uinput do not initialize EIS; missing optional logical dimensions do not block capture. Keyboard input uses the existing Windows VK to evdev mapping. Recovery keeps the encoder frame dimensions fixed but accepts logical-size changes after scaling. On GNOME, a display-change notification enables earlier recovery when previously streaming Portal capture remains paused without a valid format for a 200 ms grace after both conditions are present. Healthy renegotiation cancels the early check; repeated notifications do not postpone the same interruption. The five-second fallback remains without a related notification. Static video and valid-format pauses do not trigger recovery. Tested while connected on Ubuntu 26.04, GNOME Wayland, one 3840x2160 display: 200% -> 166.67% -> 200%, with continuously updating video and full-screen pointer control after recovery. Switching briefly freezes and goes black before recovering; five seconds is the fallback threshold, not total recovery time. See [#35](https://github.com/VallierDev/uu-remote-linux/pull/35) for timing measurements and validation limits. Lock recovery still needs hardware acceptance testing; multi-monitor support, live resolution changes, and rotation/reflection transforms are outside this fix's scope. Capture settings remain at protocol version 4: advertised resolutions use pixel coordinates and DPR 1; Portal logical dimensions are used only for local input mapping.
 
 GNOME Portal CONTROL no longer waits for a consent dialog or the first video frame. It announces the selected desktop before reporting secure-desktop state and receiving the official viewer's “auto unlock host” request. The official Android viewer requires this desktop selection before entering its auto-unlock flow, so the notification must precede capture readiness; actual screen dimensions, codec information and capture permissions still follow their real readiness state. Enable auto unlock in the viewer and use the current Linux user's login password. The host verifies it with PAM, unlocks the existing GNOME session, requests display wake, and restores capture, input and clipboard through the shared Portal session. Initial consent or revoked permissions still require local approval. Reconnect if physical or logical dimensions change.
 
-The host also accepts a desktop connection while GNOME is locked with no Portal session yet (a cold connection): it reports lock state and accepts auto unlock, then restores picture, input and clipboard after unlock. While Portal is pending, the host sends generated black video once per second on the negotiated track by default, allowing the official iPhone viewer to enter its auto-unlock flow without extra configuration. Verified on Ubuntu GNOME Wayland with the official Mac viewer; iPhone 4.42.0 with H.265 completed a same-executable control experiment: black video ON succeeded, OFF failed, and ON succeeded again ([#29](../../issues/29)). **Limitation**: this is synthetic black video, not the GNOME lock screen, and it does not enable native mouse/keyboard input while locked. Enable 「自动解锁被控端」 in the UU client under 控制中心 → 安全 and enter the password. Without saved Portal permission, local consent is still required after unlock before the real desktop can appear.
+The host also accepts a desktop connection while GNOME is locked with no Portal session yet (a cold connection): it reports lock state and accepts auto unlock, then restores picture, input and clipboard after unlock. While Portal is pending, the host sends generated black video once per second on the negotiated track by default, allowing the official iPhone viewer to enter its auto-unlock flow without extra configuration. Verified on Ubuntu GNOME Wayland with the official Mac viewer; iPhone 4.42.0 with H.265 completed a same-executable control experiment: black video ON succeeded, OFF failed, and ON succeeded again ([#29](https://github.com/VallierDev/uu-remote-linux/issues/29)). **Limitation**: this is synthetic black video, not the GNOME lock screen, and it does not enable native mouse/keyboard input while locked. Enable 「自动解锁被控端」 in the UU client under 控制中心 → 安全 and enter the password. Without saved Portal permission, local consent is still required after unlock before the real desktop can appear.
 
 Existing screen-off and lock settings remain unchanged. Only capture recovery in an unlocked session temporarily holds a GNOME idle inhibitor; the first frame, lock, disconnect or initialization failure releases it. An idle viewer still allows the normal screen-off and lock timeout, and manual lock remains effective. Desktop input is blocked and real video is hidden while locked or when lock state is unknown. Independent terminal, file-transfer and port-mapping peers do not wait for video initialization and survive desktop reconnection. Automated protocol and lifecycle regression tests cover this path; auto unlock and capture recovery after a cold locked connection are verified on GNOME hardware with the official Mac and iPhone 4.42.0 viewers, while screen-off and the other scenarios still need acceptance testing. Waking a fully suspended or hibernating machine is outside this CONTROL path.
 
-Locked black video requires FFmpeg's libx264/libx265 encoder for the negotiated H.264/H.265 codec; hardware encoding support alone does not satisfy this dependency. Encoder failures are logged explicitly. Synthetic video does not change capture permissions or advertised monitor dimensions. It pauses on unlock or unknown lock state, ends when capture is ready/rejected or the connection closes, and then hands the same video track to real capture. See [#29](../../issues/29) and [#34](../../pull/34) for the controlled experiment and validation scope.
+Locked black video requires FFmpeg's libx264/libx265 encoder for the negotiated H.264/H.265 codec; hardware encoding support alone does not satisfy this dependency. Encoder failures are logged explicitly. Synthetic video does not change capture permissions or advertised monitor dimensions. It pauses on unlock or unknown lock state, ends when capture is ready/rejected or the connection closes, and then hands the same video track to real capture. See [#29](https://github.com/VallierDev/uu-remote-linux/issues/29) and [#34](https://github.com/VallierDev/uu-remote-linux/pull/34) for the controlled experiment and validation scope.
 
 The native Wayland backend needs `wlr-output-power-management` from the compositor to wake a turned-off screen; without it only wake is unavailable — capture and encoding are unaffected. Display-wake failures at video startup or during streaming are logged and retried at the next interval without ending the video stream; capture, encoder and send errors retain their existing handling.
 
@@ -144,7 +160,7 @@ systemctl --user enable --now uuremote-native.service   # start with the graphic
 The deb installs the binaries, plugins, a systemd user unit and menu entries, and pulls in FFmpeg as a dependency; uinput access stays opt-in (step 5).
 GNOME and KDE pass the display environment to the unit; on desktops that don't (e.g. Xfce) add `DISPLAY` as in step 4.
 
-**Other distributions**: download `uu-remote-linux-<version>-x86_64-linux.tar.gz` (ARM64: `aarch64-linux`) from [Releases](../../releases/latest), extract it, then run as your desktop user (not root):
+**Other distributions**: download `uu-remote-linux-<version>-x86_64-linux.tar.gz` (ARM64: `aarch64-linux`) from [upstream Releases](https://github.com/VallierDev/uu-remote-linux/releases/latest), extract it, then run as your desktop user (not root):
 
 ```sh
 cd uu-remote-linux-<version>-x86_64-linux
@@ -180,7 +196,7 @@ sudo apt install libwayland-dev libxkbcommon-dev wl-clipboard
 # optional: GNOME/KDE portal backend
 sudo apt install libglib2.0-dev libpipewire-0.3-dev libei-dev
 # optional: headers for the inproc-av VAAPI/DRI3 engines (libva itself is loaded at runtime)
-sudo apt install libva-dev libgbm-dev libx11-xcb-dev libxcb-dri3-dev libxcb-damage0-dev
+sudo apt install libva-dev libgbm-dev libx11-xcb-dev libxcb-dri3-dev libxcb-damage0-dev libxcb-xfixes0-dev
 ```
 
 - A Rust toolchain is required (<https://rustup.rs>).
@@ -260,6 +276,8 @@ sudo udevadm control --reload && sudo udevadm trigger --name-match=uinput
 X11 keeps XTest by default because it handles held keys correctly on high-latency links.
 
 ## Remote assistance and the main window (experimental)
+
+The native GTK host window uses a lightweight appearance inspired by Apple Liquid Glass: soft gradients, a floating header, prominent assistance controls and connection details, and a “验证与安全” disclosure for verification settings. The window resizes and scrolls, with keyboard focus and large-text support. Static gradients and highlights simulate the material; there is no live backdrop blur or continuous decorative animation. This changes the local host UI while retaining connection, encoding and security behavior.
 
 As in the official client, this host shows a **device ID** and a **verification code**; whoever you give them to can
 connect from 开始协助 (remote assistance) in UU Remote.
@@ -348,6 +366,8 @@ Common environment variables:
 | `UU_TERMINAL_SHORTCUTS=0` | Disable the Ctrl+V paste rewrite in terminal windows |
 | `UU_VIDEO_ENCODER` | `cpu`: libx264; `vaapi`: opt-in Intel/AMD; `nvenc`: force NVENC; unset or `auto`: a background probe (one synthetic IDR per candidate, 3 s each). With an NVIDIA driver the order is NVENC then CPU; without one the only candidate is CPU and the probe is skipped. A session that starts before the probe finishes uses the previous rule (NVENC if NVIDIA is present, else CPU). On a self-built `--features inproc-av` binary, a process-only failure of NVENC when the in-process engine would try it first on X11 is logged `native_unprobed` and keeps the previous NVENC choice (Wayland, portal, and KMS fall back to CPU). The skipped CPU-only probe is logged `not probed (only candidate)`. A successful probe and that CPU-only skip stay cached while NVIDIA presence matches the report. A later desktop connection whose presence differs starts one background re-probe and still uses the cached encoder until the new result is stored. A hardware-candidate failure (NVENC failed, CPU chosen) is kept for 10 minutes; the next desktop connection after that starts the same re-probe and still uses the cached encoder until the new result is stored. Explicit `cpu` / `vaapi` / `nvenc` does not start the probe. Another failure restarts the 10 minutes. `native_unprobed` is not a temporary failure. A non-`auto` `video_encoder` in `host_settings.json` wins. VAAPI stays out of auto until #33 |
 | `UU_VAAPI_BUFFER_MS` | VAAPI VBV buffer in ms (10-1000, VAAPI only); raise it when keyframes are squeezed into a blur at high resolution |
+| `UU_VIDEO_PACING=0` | Disable shared pacing of original video and repair packets (enabled by default) |
+| `UU_VIDEO_ADAPTIVE=0` | Disable feedback adaptation and use the viewer ceiling; native VAAPI live adaptation is enabled by default |
 | `UU_FFMPEG_ROOT` | Use FFmpeg from this prefix |
 | `UU_AUDIO=0` | Disable sound; `UU_AUDIO_SOURCE` picks the PulseAudio source |
 | `UU_REMOTE_ASSIST=0` | Disable remote assistance (no guest assistance before sign-in either) |
@@ -419,8 +439,7 @@ flowchart LR
 
 ## License
 
-Released under the [GPL-3.0](LICENSE): you may use, modify and redistribute it, but redistributed versions
-(including modified ones) must also be released under the GPL-3.0.
+This fork retains upstream [LICENSE](LICENSE) and GPL licensing (Cargo SPDX: `GPL-3.0-or-later`). Comply with the applicable distribution obligations and retain upstream and third-party copyright notices.
 
 ## Disclaimer
 
@@ -428,10 +447,11 @@ Released under the [GPL-3.0](LICENSE): you may use, modify and redistribute it, 
   affiliated with, authorized or endorsed by NetEase.
 - It was built for interoperability. Use it in accordance with the UU Remote user agreement and your local
   laws, at your own risk.
-- NetEase or other rights holders with concerns: please contact [@ai_fengshou](https://x.com/ai_fengshou)
-  on X and I will cooperate or take the project down.
+- Report fork issues or rights-holder concerns through [this fork’s Issues](https://github.com/0bCyan/uu-remote-linux-ubuntu/issues). Upstream contact details belong to the upstream maintainer, not this fork.
 
 ## Acknowledgements
+
+- [VallierDev](https://github.com/VallierDev) and the [uu-remote-linux upstream contributors](https://github.com/VallierDev/uu-remote-linux/graphs/contributors), for the original project and core implementation.
 
 - The NetEase UU Remote team, for a remote tool that is a pleasure to use.
 - [webrtc-rs](https://github.com/webrtc-rs/webrtc), FFmpeg, GTK and the other open-source projects this builds on.
@@ -457,6 +477,10 @@ one "frame" and the IRAP gate then rejects all of them: the connection stalls at
 sends about 12 kbit/s. `UU_VIDEO_CODEC=h265` selects H.265 explicitly for A/B diagnosis.
 
 ### VAAPI
+
+Local optimization: native H.264 uses explicit limited-range BT.709 conversion and matching SPS VUI, avoiding resolution-dependent decoder guesses. The native VAAPI minimum QP follows the viewer quality preset. Original video RTP and NACK repairs now share a per-peer token bucket (about 3.6 KB burst, wire budget 1.15 times the encoder budget). Large pictures obey the budget without a two-frame pacing cutoff; audio and control retain separate send paths. H.264/H.265 payloads are 1100 bytes for relay headroom. The encoder budget starts at 6 Mbps or the viewer's lower ceiling. Feedback windows require at least two seconds and 80 sent packets; elevated repair demand or sufficiently populated RR loss reports reduce the budget, while six healthy loaded windows allow a small increase. Sparse reports and reports for other streams do not count as loss; idle desktops do not probe upward. Native VAAPI updates bitrate and proportional VBV on its encoder thread without rebuilding the prediction chain. CPU/NVENC/external FFmpeg currently receive transport pacing only, without the same live encoder-rate adaptation. Repair demand is not final unrecovered loss. `UU_VIDEO_ADAPTIVE=0` disables feedback adaptation and uses the viewer ceiling; `UU_VIDEO_PACING=0` disables pacing. Logs include video kbps, maximum frame bytes and the current encoder budget. X11 absolute targets use relative XTEST motion, adding pressure for continued outer-edge input to support GNOME Dock/hot corners; `UU_X11_ABSOLUTE_WARP=1` restores legacy warps. Virtual-link regressions and local VAAPI probes pass; real phone-network smoothness and loss still need end-to-end acceptance.
+
+The in-process X11 VAAPI path updates the DRI3 surface with XDamage/XFixes rectangles after the first full copy. It falls back to full copies for large/fragmented regions or unavailable extensions. Unchanged frames reuse the last NV12 conversion while retaining encoded keepalives and forced IDRs. Set `UU_DRI3_FULL_COPY=1` to compare full copies. RGB upload and DMA-BUF import explicitly request BGRX to avoid Intel iHD layout mismatches. Local generated-content H.264 probes passed on Meteor Lake/iHD for upload, DRI3 import, partial changes and forced IDRs; mobile flicker and network bitrate still need end-to-end acceptance. See [video regression probes](contrib/video-tests/README.md).
 
 `UU_VIDEO_ENCODER=vaapi` or `set-encoder vaapi` selects Intel/AMD H.264 VAAPI explicitly.
 `UU_VAAPI_DEVICE` defaults to `/dev/dri/renderD128` (render-node permissions required).
