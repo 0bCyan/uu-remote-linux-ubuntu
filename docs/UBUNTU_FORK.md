@@ -5,7 +5,7 @@
 **v0.2.29 / c041160d6dbbb48a4d7f2c5ed65cb39c6d6c34c5** 上的二开。
 原项目核心实现与其他平台支持属于上游，完整署名见 [NOTICE.md](../NOTICE.md)。
 
-## R1–R6 改动（2026-10-24）
+## R1–R7 改动（2026-10-24）
 
 | 快照 | 二开内容 |
 |---|---|
@@ -15,10 +15,32 @@
 | R4 | 保留控制端 Backspace/方向键等重复 key-down，修复输入框长按不能连续删除；修饰键维持按住状态 |
 | R5 | 原视频与 NACK 重传共用限速；取消大帧限速时长截断；每连接反馈码率预算；原生 VAAPI 动态调码率与 VBV；1100 字节视频载荷分片 |
 | R6 | 原生采集按开始时间调度，避免超时后额外睡眠；反馈中重复 NACK 去重；健康且受限速阻塞的链路恢复预算；可选全范围 BT.601 色彩兼容模式 |
+| R7 | 合并上游 v0.2.30（QP 51、工具连接启动桌面）；转为桌面的工具连接保留原包/重传统一限速及适配 |
 
 可用 `git diff c041160d6dbbb48a4d7f2c5ed65cb39c6d6c34c5..ubuntu` 查看与上游基线的完整差异。
-后续上游合并及二开变更以 Git 历史为准。Cargo 版本号暂保留 `0.2.29`，不表示本二开由上游发布；
-本轮版本标识为 **Ubuntu R6**。
+后续上游合并及二开变更以 Git 历史为准。Cargo 版本号随上游更新为 `0.2.30`，不表示本二开由上游发布；
+本轮版本标识为 **Ubuntu R7**。
+
+## R7 上游合并与验证（2026-10-24）
+
+合入 [v0.2.30 / 648eeca03d](https://github.com/VallierDev/uu-remote-linux/commit/648eeca03d0c7fc1fec67c08745fec060db10252)
+及其前两个提交，保留真实上游历史。`vaapi_engine.c` 的冲突保留本二开的动态码率、首次帧 QP 初始化、
+按画质选择的 min QP，以及上游 max QP 51；不把每次码率更新改回重置 QP。
+
+- 本地完整测试 **270 passed, 0 failed, 8 ignored**，发布构建通过。
+- 上游真实 SCTP 回归验证 `capture_desktop` 的重复请求、桌面启动/停止/再启动及工具连接响应。
+- 新增真实 SRTP 回归：从工具连接协商 H.264，两轮启动/停止桌面，生成 64 KB 视频在 1 Mbps 预算下
+  每轮发送至少 350 ms，RTP 序号连续，工具通道仍响应。限速器在所有 peer 建立时安装，仅拦截视频流，
+  因此转为桌面的连接也沿用 R5/R6 原包/重传共享预算。
+- Intel iHD、3120×2080、180 帧、384×384 / 768×768 生成变化区域、8→2→6 Mbps 动态预算：
+  R6 与 R7 本轮编码输出一致。384 区域的 2 Mbps 阶段约 2.31 Mbps；768 极端噪声约 9.00 Mbps，仍会超预算。
+  **本机没有测得 max QP 51 的额外码率收益**，不可套用上游 AMD 测量；真实流量仍受传输限速约束。
+- 同一 3120×2080 / 60 Hz 生成动画、300 帧含启动：本轮 R6 42.17 fps、R7 42.74 fps，
+  表现接近；这是本地 Xvfb 上传采集/编码对照，非手机实收帧率。
+- 上传与 GPU 离屏 DMA 各 180 帧，检查完整解码、动态更新、缓存和 IDR 位置通过。
+- 两条路径的 BT.709 和 `bt601-full` 64 色块/灰阶回归通过，R6 色彩转换和元数据保留。
+- 上游限制保留：工具连接启动桌面使用已协商 H.264、无音频；Portal 不支持此路径。
+  本地虚拟链路测试不代替官方 Mac 客户端黑屏问题的实机验收；本轮 R7 手机体验和长期稳定性待复验。
 
 ## R6 验证与色彩兼容（2026-10-24）
 
@@ -136,3 +158,11 @@ color checks. It targets fixed full-range BT.601 renderers like the public WebRT
 The user reconnected with their iOS viewer and confirmed normal color and noticeably smoother motion.
 This is subjective acceptance for this configuration, not measured phone FPS, long-term stability
 or final packet loss across devices/networks. Default color remains BT.709 limited.
+
+R7 merges upstream v0.2.30 and retains R6 behavior. Promotion-capable tool peers install the
+video-only pacing interceptor before negotiation; a real SRTP integration test verifies paced
+video, sequence continuity and usable tool channels across two role changes. 270 local tests
+pass. Intel generated-motion rate comparisons found no additional reduction from max QP 51;
+extreme noise can still exceed the encoder target and remains transport-paced. Generated
+upload/DMA color, cache, IDR and live-rate checks pass. Promoted tool peers have H.264 video
+without audio; Portal promotion and official Mac end-to-end acceptance remain unverified.

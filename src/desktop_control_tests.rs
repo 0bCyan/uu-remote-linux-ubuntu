@@ -14,11 +14,25 @@ struct Viewer {
 
 async fn connect(input: Arc<InputInjector>, desktop: bool,
     portal: Option<Arc<crate::desktop_session::PortalDesktop>>, labels: &[&str]) -> (WebRtcSession, Viewer) {
+    connect_media(input, desktop, portal, labels, false).await
+}
+
+async fn connect_media(input: Arc<InputInjector>, desktop: bool,
+    portal: Option<Arc<crate::desktop_session::PortalDesktop>>, labels: &[&str], video: bool) -> (WebRtcSession, Viewer) {
     let (host_setting, viewer_setting, router) = crate::test_network::virtual_network().await;
     let screen = Arc::new(ScreenCapture::unavailable("synthetic locked desktop".into()));
     let host = WebRtcSession::new(screen, input, crate::signaling::SignalingClient::disconnected(),
         desktop, crate::session_ice::SessionIce::virtual_net(host_setting), portal).await.unwrap();
-    let pc = Arc::new(APIBuilder::new().with_setting_engine(viewer_setting).build().new_peer_connection(RTCConfiguration::default()).await.unwrap());
+    let mut media = MediaEngine::default();
+    if video {
+        media.register_codec(webrtc::rtp_transceiver::rtp_codec::RTCRtpCodecParameters {
+            capability: RTCRtpCodecCapability { mime_type: "video/H264".into(), clock_rate: 90_000,
+                sdp_fmtp_line: "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f".into(), ..Default::default() },
+            payload_type: 102, ..Default::default()
+        }, webrtc::rtp_transceiver::rtp_codec::RTPCodecType::Video).unwrap();
+    }
+    let pc = Arc::new(APIBuilder::new().with_setting_engine(viewer_setting).with_media_engine(media).build().new_peer_connection(RTCConfiguration::default()).await.unwrap());
+    if video { pc.add_transceiver_from_kind(webrtc::rtp_transceiver::rtp_codec::RTPCodecType::Video, None).await.unwrap(); }
     let (tx, messages) = mpsc::unbounded_channel();
     let mut channels = HashMap::new();
     for label in labels {
@@ -214,4 +228,95 @@ async fn locked_control_unlock_requests_and_tools_work_without_a_video_frame() {
         echo.abort();
         drop(lock);
     }).await.expect("locked bootstrap/tool regression exceeded deadline");
+}
+
+#[tokio::test]
+async fn capture_desktop_on_a_port_mapping_peer_promotes_it_once() {
+    tokio::time::timeout(Duration::from_secs(25), async {
+        let input = Arc::new(InputInjector::without_desktop());
+        let (host, mut viewer) = connect(input.clone(), false, None, &["CONTROL_DATA_CHANNEL", "FILE_DATA_CHANNEL"]).await;
+        let (requests, mut requested) = mpsc::unbounded_channel();
+        host.on_desktop_request(move || { let _ = requests.send(()); });
+        receive(&mut viewer.messages, "CONTROL_DATA_CHANNEL", 13).await;
+        assert!(!host.role.is_desktop() && host.role.input().is_none());
+        // The Mac viewer opens the desktop on its existing port-mapping peer (#99).
+        send(&viewer, "CONTROL_DATA_CHANNEL", crate::initialization::envelope(5, 0, 3, &[8, 4])).await;
+        tokio::time::timeout(Duration::from_secs(5), requested.recv()).await.unwrap().unwrap();
+        host.promote(None);
+        assert!(host.role.is_desktop());
+        assert!(host.role.input().is_some_and(|session| session.is_current()));
+        // CONTROL repeats the desktop initialization for the same viewer.
+        receive(&mut viewer.messages, "CONTROL_DATA_CHANNEL", 13).await;
+        // The port-mapping session on this peer still answers.
+        send(&viewer, "FILE_DATA_CHANNEL", mapping(2, b"still mapped")).await;
+        receive(&mut viewer.messages, "FILE_DATA_CHANNEL", 27).await;
+        // A repeated capture_desktop does not ask again, and a later promote is a no-op.
+        send(&viewer, "CONTROL_DATA_CHANNEL", crate::initialization::envelope(6, 0, 3, &[8, 4])).await;
+        send(&viewer, "CONTROL_DATA_CHANNEL", crate::initialization::envelope(7, 0, 3, &[8, 0])).await;
+        receive(&mut viewer.messages, "CONTROL_DATA_CHANNEL", 3).await;
+        assert!(requested.try_recv().is_err());
+        let lease = host.role.input().unwrap();
+        host.promote(None);
+        assert!(lease.is_current());
+        // A newer desktop demotes it; the port mapping stays, and capture_desktop promotes it again.
+        host.demote();
+        assert!(!host.role.is_desktop() && host.role.input().is_none());
+        send(&viewer, "FILE_DATA_CHANNEL", mapping(2, b"after demotion")).await;
+        receive(&mut viewer.messages, "FILE_DATA_CHANNEL", 27).await;
+        send(&viewer, "CONTROL_DATA_CHANNEL", crate::initialization::envelope(8, 0, 3, &[8, 4])).await;
+        tokio::time::timeout(Duration::from_secs(5), requested.recv()).await.unwrap().unwrap();
+        host.promote(None);
+        assert!(host.role.is_desktop() && host.role.input().is_some_and(|session| session.is_current()));
+        receive(&mut viewer.messages, "CONTROL_DATA_CHANNEL", 13).await;
+        host.pc.close().await.unwrap();
+        viewer.pc.close().await.unwrap();
+        viewer.router.lock().await.stop().await.unwrap();
+    }).await.expect("capture_desktop promotion exceeded deadline");
+}
+
+// Ubuntu fork integration regression: promoted peers retain the R5/R6 wire budget.
+#[tokio::test]
+async fn promoted_tool_video_obeys_pacing_across_role_changes() {
+    tokio::time::timeout(Duration::from_secs(20), async {
+        let (host, mut viewer) = connect_media(Arc::new(InputInjector::without_desktop()), false, None,
+            &["CONTROL_DATA_CHANNEL", "FILE_DATA_CHANNEL"], true).await;
+        let (received, mut packets) = mpsc::unbounded_channel();
+        viewer.pc.on_track(Box::new(move |track, _, _| {
+            let received = received.clone();
+            Box::pin(async move { tokio::spawn(async move {
+                while let Ok((packet, _)) = track.read_rtp().await {
+                    if received.send(packet).is_err() { break; }
+                }
+            }); })
+        }));
+        let sender = host.pc.get_senders().await.into_iter().next().unwrap();
+        let local = sender.track().await.unwrap();
+        let video = local.as_any().downcast_ref::<crate::video_track::VideoTrack>().unwrap();
+        video.network.set_ceiling(1_000_000);
+        video.network.pacing.store(true, std::sync::atomic::Ordering::Relaxed);
+        let mut data = vec![0,0,1,0x65]; data.extend(vec![0x55;64_000]);
+        let sample = Sample { data:data.into(), duration:Duration::from_millis(20), ..Default::default() };
+        let mut previous: Option<u16> = None;
+        for _ in 0..2 {
+            host.promote(None);
+            assert!(host.role.is_desktop());
+            let started = std::time::Instant::now();
+            video.write_sample_with_extensions(crate::capture_setting::VideoCodec::H264, &sample, &[]).await.unwrap();
+            assert!(started.elapsed() >= Duration::from_millis(350), "promoted video bypassed the transport budget");
+            let mut count = 0;
+            loop {
+                let packet = tokio::time::timeout(Duration::from_secs(3), packets.recv()).await.unwrap().unwrap();
+                if let Some(sequence) = previous { assert_eq!(packet.header.sequence_number, sequence.wrapping_add(1)); }
+                previous = Some(packet.header.sequence_number); count += 1;
+                if packet.header.marker { break; }
+            }
+            assert!(count >= 50);
+            host.demote();
+            assert!(!host.role.is_desktop());
+            send(&viewer, "FILE_DATA_CHANNEL", mapping(2, b"tools remain available")).await;
+            receive(&mut viewer.messages, "FILE_DATA_CHANNEL", 27).await;
+        }
+        host.pc.close().await.unwrap(); viewer.pc.close().await.unwrap();
+        viewer.router.lock().await.stop().await.unwrap();
+    }).await.expect("promoted video pacing regression exceeded deadline");
 }

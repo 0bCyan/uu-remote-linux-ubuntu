@@ -7,16 +7,17 @@
 This is an **unofficial Ubuntu-focused derivative** of [VallierDev/uu-remote-linux](https://github.com/VallierDev/uu-remote-linux), maintained by [0bCyan](https://github.com/0bCyan). The original project was developed by VallierDev and the upstream contributors. Upstream history, copyright notices and [LICENSE](LICENSE) are retained; the original implementation is not claimed as this fork's work.
 
 - Base: upstream **v0.2.29**, commit [`c041160d6dbbb48a4d7f2c5ed65cb39c6d6c34c5`](https://github.com/VallierDev/uu-remote-linux/commit/c041160d6dbbb48a4d7f2c5ed65cb39c6d6c34c5).
-- Fork snapshot: **Ubuntu R6**, primarily tested on Ubuntu 24.04 / GNOME X11 / Intel VAAPI H.264.
+- Merged upstream: [v0.2.30](https://github.com/VallierDev/uu-remote-linux/releases/tag/v0.2.30).
+- Fork snapshot: **Ubuntu R7**, primarily tested on Ubuntu 24.04 / GNOME X11 / Intel VAAPI H.264.
 - Changes: DRI3 damage updates and caching, BT.709 color, shared original/repair pacing, feedback-driven bitrate adaptation, Dock edge pressure, repeated-key input and a glass-inspired GTK UI. See [fork changes and validation](docs/UBUNTU_FORK.md) and [attribution](NOTICE.md).
 - Same upstream licensing: Cargo SPDX **GPL-3.0-or-later**; third-party components retain their respective licenses.
 - Not affiliated with or endorsed by NetEase, Apple or the upstream maintainer. No NetEase Windows binaries or Apple design assets are distributed.
 
-R6 removes extra sleep after a late native encode, deduplicates repeated NACKs in adaptation
-statistics, and permits slow recovery under healthy pacing pressure. Native VAAPI H.264 supports
-`UU_VAAPI_COLOR=bt601-full` to test fixed full-range BT.601 renderers; limited-range BT.709 remains
-the default. The user confirmed normal color and noticeably smoother motion on their iOS viewer;
-see the [fork notes](docs/UBUNTU_FORK.md) for validation limits.
+R7 merges upstream **v0.2.30** (VAAPI max QP 51 and desktop promotion on an existing tool peer).
+R6 capture scheduling, adaptation and color modes remain; promoted peers also share video/repair pacing.
+270 local tests and generated upload/offscreen color and live-rate checks pass. R7 viewer acceptance
+is pending. A promoted tool peer uses H.264 without audio; Portal promotion is unsupported.
+See the [fork notes](docs/UBUNTU_FORK.md) for measured limits.
 
 ### Build the Ubuntu X11 fork
 
@@ -37,7 +38,7 @@ cargo build --release --locked --features inproc-av --bin uuremote-server
 
 See [fork notes](docs/UBUNTU_FORK.md) for driver/runtime settings, services and atomic updates. Choose another encoder on devices without supported VAAPI.
 
-The general documentation and screenshots below are inherited from upstream. Cross-platform acceptance records and historical issue/PR references describe upstream work. Build this fork from source; upstream release packages and NAS images do not include the R1–R6 changes.
+The general documentation and screenshots below are inherited from upstream. Cross-platform acceptance records and historical issue/PR references describe upstream work. Build this fork from source; upstream release packages and NAS images do not include the R1–R7 changes.
 
 <p align="center"><img src="docs/images/viewer-window.png" width="720" alt="Linux viewer launcher: device list (device names redacted)"></p>
 <p align="center"><sub>Linux viewer: device list (device names redacted)</sub></p>

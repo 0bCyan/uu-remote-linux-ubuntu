@@ -787,7 +787,9 @@ int vaapi_encode_frame(
         rc.window_size = 1000;
         rc.initial_qp = engine->frame_count == 0 ? (engine->min_qp > 28 ? engine->min_qp : 28) : 0;
         rc.min_qp = engine->min_qp;
-        rc.max_qp = 44;
+        // Upstream #102: allow lower rates on hard content while preserving the
+        // fork's viewer-selected minimum QP and live rate-update behavior.
+        rc.max_qp = 51;
         rc.rc_flags.bits.disable_frame_skip = 1; // a remote desktop must not drop frames silently
         b.misc[b.misc_n++] = vaapi_create_misc_buffer(engine, VAEncMiscParameterTypeRateControl, &rc, sizeof(rc));
 

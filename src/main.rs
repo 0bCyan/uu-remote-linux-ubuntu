@@ -739,6 +739,8 @@ async fn serve(mut capture: Arc<ScreenCapture>, input: Arc<InputInjector>, shutd
     let mut capture_types: HashMap<String, (u64,crate::session_ice::SessionIce)> = HashMap::new();
     let mut mac_by_ice: HashMap<String, bool> = HashMap::new();
     let mut next_mac = false;
+    // Tool peers ask here to become the desktop (capture_desktop on an existing connection, #99).
+    let (desktop_requests, mut desktop_requested) = mpsc::unbounded_channel::<String>();
 
     loop {
         if *shutdown.borrow() {
@@ -823,6 +825,7 @@ async fn serve(mut capture: Arc<ScreenCapture>, input: Arc<InputInjector>, shutd
                 _ = shutdown.changed() => Some(SignalingEvent::Stop),
                 command = commands.recv(), if assist.is_some() => Some(SignalingEvent::AssistCommand(command.unwrap_or(assist::Command::Stop))),
                 _ = assist_tick.tick(), if assist.is_some() => Some(SignalingEvent::AssistTick),
+                Some(ice) = desktop_requested.recv() => Some(SignalingEvent::DesktopRequested(ice)),
                 event = rx_event.recv() => event,
             };
             let Some(evt) = event else { break; };
@@ -857,8 +860,8 @@ async fn serve(mut capture: Arc<ScreenCapture>, input: Arc<InputInjector>, shutd
                         ::webrtc::peer_connection::peer_connection_state::RTCPeerConnectionState::Closed |
                         ::webrtc::peer_connection::peer_connection_state::RTCPeerConnectionState::Failed)).map(|(id, _)| id.clone()).collect();
                     let mut desktop_ended = false;
-                    for id in ended { if let Some(s) = sessions.remove(&id) { desktop_ended |= s.desktop; let _ = s.pc.close().await; } }
-                    if desktop_ended && !sessions.values().any(|s| s.desktop) { if let Some(s) = assist.as_mut() { s.session_ended()?; } }
+                    for id in ended { if let Some(s) = sessions.remove(&id) { desktop_ended |= s.role.is_desktop(); let _ = s.pc.close().await; } }
+                    if desktop_ended && !sessions.values().any(|s| s.role.is_desktop()) { if let Some(s) = assist.as_mut() { s.session_ended()?; } }
                     if let Some(s) = assist.as_mut() { s.tick()?; }
                 }
                 SignalingEvent::Connected => {
@@ -945,8 +948,8 @@ async fn serve(mut capture: Arc<ScreenCapture>, input: Arc<InputInjector>, shutd
                         ::webrtc::peer_connection::peer_connection_state::RTCPeerConnectionState::Closed |
                         ::webrtc::peer_connection::peer_connection_state::RTCPeerConnectionState::Failed)).map(|(k, _)| k.clone()).collect();
                     let mut desktop_ended = false;
-                    for k in ended { if let Some(old) = sessions.remove(&k) { desktop_ended |= old.desktop; let _ = old.pc.close().await; } }
-                    if desktop_ended && !sessions.values().any(|s| s.desktop) { if let Some(s) = assist.as_mut() { s.session_ended()?; } }
+                    for k in ended { if let Some(old) = sessions.remove(&k) { desktop_ended |= old.role.is_desktop(); let _ = old.pc.close().await; } }
+                    if desktop_ended && !sessions.values().any(|s| s.role.is_desktop()) { if let Some(s) = assist.as_mut() { s.session_ended()?; } }
                     if let Some(s) = assist.as_mut() { s.tick()?; }
 
                     if soac.msg_type == "offer" {
@@ -962,6 +965,8 @@ async fn serve(mut capture: Arc<ScreenCapture>, input: Arc<InputInjector>, shutd
                         for id in superseded_peer_ids(&sessions, &ice, desktop) {
                             if let Some(old) = sessions.remove(&id) { let _ = old.pc.close().await; }
                         }
+                        // A tool peer promoted by capture_desktop stops its desktop but keeps its tools.
+                        if desktop { for old in sessions.values() { old.demote(); } }
                         if desktop && desktop_backend::headless() {
                             log::info!("Desktop connection ignored: headless mode (terminal, file transfer and port mapping remain available)");
                             continue;
@@ -983,7 +988,12 @@ async fn serve(mut capture: Arc<ScreenCapture>, input: Arc<InputInjector>, shutd
                         if desktop { if let Some(portal) = &portal_desktop { portal.begin(); } }
                         match WebRtcSession::new(session_capture, input.clone(), signaling_client.clone(), desktop, transport,
                             if desktop { portal_desktop.clone() } else { None }).await {
-                            Ok(sess) => {
+                            Ok(mut sess) => {
+                                sess.controller_mac = controller_mac;
+                                if !desktop {
+                                    let (requests, peer) = (desktop_requests.clone(), ice.clone());
+                                    sess.on_desktop_request(move || { let _ = requests.send(peer.clone()); });
+                                }
                                 // Register before awaiting SDP: shutdown can always close
                                 // a peer whose answer may already be queued to the viewer.
                                 sessions.insert(ice.clone(), sess);
@@ -1028,12 +1038,49 @@ async fn serve(mut capture: Arc<ScreenCapture>, input: Arc<InputInjector>, shutd
                     let mut desktop_ended = false;
                     for k in targets {
                         if let Some(old) = sessions.remove(&k) {
-                            desktop_ended |= old.desktop;
+                            desktop_ended |= old.role.is_desktop();
                             if let Err(e) = old.pc.close().await { log::warn!("Close released peer failed: {}", e); }
                         }
                     }
-                    if desktop_ended && !sessions.values().any(|s| s.desktop) { if let Some(s) = assist.as_mut() { s.session_ended()?; } }
+                    if desktop_ended && !sessions.values().any(|s| s.role.is_desktop()) { if let Some(s) = assist.as_mut() { s.session_ended()?; } }
                     if let Some(s) = assist.as_mut() { s.tick()?; }
+                }
+                SignalingEvent::DesktopRequested(ice) => {
+                    let mut sessions = webrtc_sessions.lock().await;
+                    let Some(peer) = sessions.get(&ice).filter(|peer| !peer.role.is_desktop()) else { continue; };
+                    if desktop_backend::headless() {
+                        log::info!("Desktop request on a tool connection ignored: headless mode");
+                        continue;
+                    }
+                    if portal_desktop.is_some() {
+                        log::info!("Desktop request on a tool connection not supported with the Portal backend; open the desktop before port mapping");
+                        continue;
+                    }
+                    let controller_mac = peer.controller_mac;
+                    let current = peer.desktop_capture();
+                    // Same recovery as a desktop offer: the display may have come up or been resized after this peer.
+                    let resized = current.init_error.is_none() && current.backend == desktop_backend::DesktopBackend::X11
+                        && tokio::task::spawn_blocking(crate::capture::x11_size).await.ok().flatten().is_some_and(|size| size != (current.width, current.height));
+                    if resized { log::info!("Desktop geometry changed since this connection opened; reinitializing capture"); }
+                    let screen = if current.init_error.is_some() || resized {
+                        match tokio::task::spawn_blocking(ScreenCapture::new).await {
+                            Ok(Ok(screen)) => { capture = Arc::new(screen); Some(capture.clone()) },
+                            Ok(Err(error)) => { log::info!("Desktop request on a tool connection ignored: {error}"); continue; },
+                            Err(_) => { log::warn!("Desktop initialization worker failed"); continue; },
+                        }
+                    } else { None };
+                    video::warm_auto_probe(); video::check_ffmpeg_usable();
+                    input.set_mac_controller(controller_mac);
+                    input.bind_portal(screen.as_ref().map_or_else(|| sessions[&ice].capture.portal.clone(), |screen| screen.portal.clone()));
+                    // One desktop at a time, as for a new desktop offer. Peers offered as desktops
+                    // close; a promoted tool peer only stops its desktop and keeps its tools.
+                    let superseded: Vec<String> = sessions.iter().filter(|(id, old)| id.as_str() != ice && old.role.is_desktop())
+                        .map(|(id, _)| id.clone()).collect();
+                    for id in superseded {
+                        if sessions[&id].desktop { if let Some(old) = sessions.remove(&id) { let _ = old.pc.close().await; } }
+                        else { sessions[&id].demote(); }
+                    }
+                    if let Some(peer) = sessions.get(&ice) { peer.promote(screen); }
                 }
                 SignalingEvent::Disconnected => {
                     capture_types.clear();

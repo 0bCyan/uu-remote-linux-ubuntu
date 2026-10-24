@@ -7,14 +7,16 @@
 本仓库是 [VallierDev/uu-remote-linux](https://github.com/VallierDev/uu-remote-linux) 的**非官方二次开发版**，由 [0bCyan](https://github.com/0bCyan) 维护，重点优化 Ubuntu 被控端的流畅度、清晰度和交互。原项目由 VallierDev 及上游贡献者开发；本项目保留上游 Git 历史、版权声明与 [LICENSE](LICENSE)，不将原项目成果归为本仓库原创。
 
 - 基线：上游 **v0.2.29**，提交 [`c041160d6dbbb48a4d7f2c5ed65cb39c6d6c34c5`](https://github.com/VallierDev/uu-remote-linux/commit/c041160d6dbbb48a4d7f2c5ed65cb39c6d6c34c5)。
-- 当前二开快照：**Ubuntu R6**，主要在 Ubuntu 24.04 / GNOME X11 / Intel VAAPI H.264 上测试。
+- 已合入上游：[v0.2.30](https://github.com/VallierDev/uu-remote-linux/releases/tag/v0.2.30)。
+- 当前二开快照：**Ubuntu R7**，主要在 Ubuntu 24.04 / GNOME X11 / Intel VAAPI H.264 上测试。
 - 二开内容：DRI3 局部更新与缓存、BT.709 色彩、视频及重传统一限速、反馈码率适配、Dock 边缘手势、长按按键重复、GTK 玻璃风格界面。详见 [二开变更与验证](docs/UBUNTU_FORK.md) 和 [来源与署名](NOTICE.md)。
 - 授权沿用上游：Cargo SPDX 标识为 **GPL-3.0-or-later**；第三方组件保留各自许可证。
 - 本项目与网易、Apple 及上游维护者均无隶属或官方授权关系，不包含网易 Windows 程序或 Apple 设计素材。
 
-R6 修复原生编码超时后额外等待一帧的问题；重复 NACK 在反馈统计中去重，健康但受限速阻塞的链路可缓慢恢复预算。
-新增原生 VAAPI H.264 色彩兼容参数 `UU_VAAPI_COLOR=bt601-full`，用于测试固定全范围 BT.601 渲染器的偏色；
-默认仍为有限范围 BT.709。本次用户在 iOS 控制端确认“颜色正常，明显更流畅”，完整测量与边界见 [二开记录](docs/UBUNTU_FORK.md)。
+R7 已合入上游 **v0.2.30**：VAAPI 最大 QP 放宽至 51，以及端口映射连接转为桌面时的黑屏修复。
+保留 R6 的帧调度、反馈适配和色彩兼容，并补齐转为桌面的连接的视频/重传限速。
+本地 270 项测试与上传/GPU 离屏色彩、动态码率检查通过；R7 尚待控制端实机复验。
+转为桌面的工具连接使用 H.264 且无音频，Portal 暂不支持此路径。详见 [二开记录](docs/UBUNTU_FORK.md)。
 
 ### Ubuntu X11 二开版快速构建
 
@@ -35,7 +37,7 @@ cargo build --release --locked --features inproc-av --bin uuremote-server
 
 驱动与运行参数、安装服务、已安装主机更新方式见 [二开说明](docs/UBUNTU_FORK.md)。不支持 VAAPI 的设备应按下文选择合适编码器。
 
-以下通用功能文档和截图继承自上游；其中跨平台实测记录、历史 issue/PR 编号属于上游。本二开目前以源码构建为准，上游预编译包及 NAS 镜像不包含本仓库 R1–R6 改动。
+以下通用功能文档和截图继承自上游；其中跨平台实测记录、历史 issue/PR 编号属于上游。本二开目前以源码构建为准，上游预编译包及 NAS 镜像不包含本仓库 R1–R7 改动。
 
 <p align="center"><img src="docs/images/viewer-window.png" width="720" alt="Linux 控制端启动窗口：设备列表（设备名已打码）"></p>
 <p align="center"><sub>Linux 控制端：设备列表（设备名已打码）</sub></p>

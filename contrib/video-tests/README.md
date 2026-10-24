@@ -121,3 +121,17 @@ the full-range mode must also satisfy the fixed-shader model. Full-range planes 
 extracted as `yuvj420p`: requesting `yuv420p` can silently rescale them and invalidate the model.
 The compatibility environment variable affects native VAAPI H.264 only; the default is BT.709
 limited. Neither color checks nor the shader model establish actual iPhone/iPad acceptance.
+
+## R7 upstream integration
+
+`cargo test --locked --features inproc-av promoted_tool_video_obeys_pacing` negotiates real
+H.264/SRTP on a tool peer over the private virtual network. It starts/stops the desktop twice,
+checks transmission time against the configured budget and RTP sequence continuity, and verifies
+that FILE tool messages still receive responses. It performs no real desktop/input operations.
+The upstream promotion regression also covers repeated `capture_desktop` and input lease changes.
+This is not an end-to-end official Mac viewer acceptance test.
+
+The native encoder retains the fork's live-rate/min-QP behavior while adopting upstream max QP 51.
+Compare generated motion with R6 rather than assuming the upstream AMD bitrate gain applies to
+Intel. Extreme noise may still exceed the encoder budget; the shared transport limiter remains
+necessary. Test both color modes and both upload and offscreen DMA paths after merging upstream.
