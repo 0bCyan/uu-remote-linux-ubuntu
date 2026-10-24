@@ -780,19 +780,20 @@ async fn read_inprocess(
 /// whole IDR frame, otherwise large desktops get near-grey keyframes that sharpen over the GOP (#8).
 /// Half a second of bitrate still starved repeated 0.5 s-GOP keyframes at 3296x2036/2M; one second did not.
 fn buffer_kbits(max_kbps: u32, encoder: Encoder) -> u32 {
-    if encoder == Encoder::Cpu { max_kbps.clamp(500, 8000) }
-    else if encoder == Encoder::Vaapi {
-        let requested = std::env::var("UU_VAAPI_BUFFER_MS").ok();
-        vaapi_buffer_kbits(max_kbps, requested.as_deref()).unwrap_or((max_kbps / 8).clamp(100, 500))
-    }
-    else { (max_kbps / 8).clamp(100, 500) }
+    let env = match encoder {
+        Encoder::Cpu => return max_kbps.clamp(500, 8000),
+        Encoder::Vaapi => "UU_VAAPI_BUFFER_MS",
+        Encoder::Nvenc => "UU_NVENC_BUFFER_MS",
+    };
+    let requested = std::env::var(env).ok();
+    buffer_ms_kbits(max_kbps, requested.as_deref()).unwrap_or((max_kbps / 8).clamp(100, 500))
 }
 
-/// Opt-in VAAPI VBV buffer: `码率上限 × 毫秒 / 1000` for `UU_VAAPI_BUFFER_MS` in 10-1000 ms.
-/// The 100-500 kbit default is sized for NVENC; VAAPI quantizes a whole desktop keyframe when
-/// the buffer is that small, which reads as a blur that sharpens over each GOP (#42).
+/// Opt-in hardware VBV buffer: `码率上限 × 毫秒 / 1000` for `UU_VAAPI_BUFFER_MS` /
+/// `UU_NVENC_BUFFER_MS` in 10-1000 ms. With the 100-500 kbit default the encoder quantizes a
+/// whole desktop keyframe, which reads as a blur that sharpens over each GOP (#42 VAAPI, #103 NVENC).
 /// Unset, out of range or unparsable values keep the default buffer.
-fn vaapi_buffer_kbits(max_kbps: u32, value: Option<&str>) -> Option<u32> {
+fn buffer_ms_kbits(max_kbps: u32, value: Option<&str>) -> Option<u32> {
     let ms = value?.trim().parse::<u32>().ok().filter(|ms| (10..=1000).contains(ms))?;
     Some((max_kbps.saturating_mul(ms) / 1000).max(1))
 }
@@ -1570,17 +1571,17 @@ mod tests {
     }
 
     #[test]
-    fn vaapi_buffer_env_is_opt_in_and_bounded() {
-        assert_eq!(vaapi_buffer_kbits(30_000, None), None);
-        assert_eq!(vaapi_buffer_kbits(30_000, Some("250")), Some(7500));
-        assert_eq!(vaapi_buffer_kbits(30_000, Some(" 10 ")), Some(300));
-        assert_eq!(vaapi_buffer_kbits(30_000, Some("1000")), Some(30_000));
+    fn hw_buffer_env_is_opt_in_and_bounded() {
+        assert_eq!(buffer_ms_kbits(30_000, None), None);
+        assert_eq!(buffer_ms_kbits(30_000, Some("250")), Some(7500));
+        assert_eq!(buffer_ms_kbits(30_000, Some(" 10 ")), Some(300));
+        assert_eq!(buffer_ms_kbits(30_000, Some("1000")), Some(30_000));
         // Out of the documented range, empty or unparsable keeps the default buffer.
         for value in ["", "9", "1001", "0", "abc", "-250", "250ms"] {
-            assert_eq!(vaapi_buffer_kbits(30_000, Some(value)), None, "{value}");
+            assert_eq!(buffer_ms_kbits(30_000, Some(value)), None, "{value}");
         }
         // A tiny cap must not produce a zero-sized buffer.
-        assert_eq!(vaapi_buffer_kbits(1, Some("10")), Some(1));
+        assert_eq!(buffer_ms_kbits(1, Some("10")), Some(1));
     }
 
     #[test]
