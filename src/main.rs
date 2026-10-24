@@ -73,6 +73,14 @@ fn superseded_peer_ids(sessions: &HashMap<String, WebRtcSession>, ice: &str, des
     sessions.iter().filter(|(id, peer)| id.as_str() == ice || (desktop && peer.desktop))
         .map(|(id, _)| id.clone()).collect()
 }
+
+/// A peer whose transport is already broken can leave `PeerConnection::close`
+/// waiting indefinitely; signaling must keep flowing without it.
+async fn close_peer(pc: &::webrtc::peer_connection::RTCPeerConnection) {
+    if tokio::time::timeout(std::time::Duration::from_secs(5), pc.close()).await.is_err() {
+        log::warn!("Peer connection close timed out; continuing");
+    }
+}
 fn released_peer_ids<T>(sessions: &HashMap<String, T>, ice: Option<&serde_json::Value>) -> Vec<String> {
     let ice = ice.map(|id| id.as_str().map(str::to_owned).unwrap_or_else(|| id.to_string()));
     sessions.keys().filter(|id| ice.as_deref().map_or(true, |ice| id.as_str() == ice)).cloned().collect()
@@ -685,7 +693,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if let Some(task) = command_task { task.abort(); }
     // One exit path for commands, signals, transport failures and UI failures.
     if let Some(session) = assist.as_mut() { session.allowed = false; }
-    for (_, old) in webrtc_sessions.lock().await.drain() { let _ = old.pc.close().await; }
+    for (_, old) in webrtc_sessions.lock().await.drain() { close_peer(&old.pc).await; }
     virtual_audio::disable(); input.shutdown(); terminal::shutdown_all();
     // Switching identity (signed in / out) restarts at once and the new identity republishes the same
     // device share: logout already withdrew it, and after a QR login the cloud moved it to the account
@@ -858,7 +866,7 @@ async fn serve(mut capture: Arc<ScreenCapture>, input: Arc<InputInjector>, shutd
                         ::webrtc::peer_connection::peer_connection_state::RTCPeerConnectionState::Closed |
                         ::webrtc::peer_connection::peer_connection_state::RTCPeerConnectionState::Failed)).map(|(id, _)| id.clone()).collect();
                     let mut desktop_ended = false;
-                    for id in ended { if let Some(s) = sessions.remove(&id) { desktop_ended |= s.role.is_desktop(); let _ = s.pc.close().await; } }
+                    for id in ended { if let Some(s) = sessions.remove(&id) { desktop_ended |= s.role.is_desktop(); close_peer(&s.pc).await; } }
                     if desktop_ended && !sessions.values().any(|s| s.role.is_desktop()) { if let Some(s) = assist.as_mut() { s.session_ended()?; } }
                     if let Some(s) = assist.as_mut() { s.tick()?; }
                 }
@@ -946,7 +954,7 @@ async fn serve(mut capture: Arc<ScreenCapture>, input: Arc<InputInjector>, shutd
                         ::webrtc::peer_connection::peer_connection_state::RTCPeerConnectionState::Closed |
                         ::webrtc::peer_connection::peer_connection_state::RTCPeerConnectionState::Failed)).map(|(k, _)| k.clone()).collect();
                     let mut desktop_ended = false;
-                    for k in ended { if let Some(old) = sessions.remove(&k) { desktop_ended |= old.role.is_desktop(); let _ = old.pc.close().await; } }
+                    for k in ended { if let Some(old) = sessions.remove(&k) { desktop_ended |= old.role.is_desktop(); close_peer(&old.pc).await; } }
                     if desktop_ended && !sessions.values().any(|s| s.role.is_desktop()) { if let Some(s) = assist.as_mut() { s.session_ended()?; } }
                     if let Some(s) = assist.as_mut() { s.tick()?; }
 
@@ -961,7 +969,7 @@ async fn serve(mut capture: Arc<ScreenCapture>, input: Arc<InputInjector>, shutd
                         if desktop { video::warm_auto_probe(); video::check_ffmpeg_usable(); }
                         // Replace only this ICE id or a previous desktop, never tool peers.
                         for id in superseded_peer_ids(&sessions, &ice, desktop) {
-                            if let Some(old) = sessions.remove(&id) { let _ = old.pc.close().await; }
+                            if let Some(old) = sessions.remove(&id) { close_peer(&old.pc).await; }
                         }
                         // A tool peer promoted by capture_desktop stops its desktop but keeps its tools.
                         if desktop { for old in sessions.values() { old.demote(); } }
@@ -1014,7 +1022,7 @@ async fn serve(mut capture: Arc<ScreenCapture>, input: Arc<InputInjector>, shutd
                                 }
                                 Err(_) => {
                                     log::error!("Failed to handle offer (details omitted)");
-                                    if let Some(session) = sessions.remove(&ice) { let _ = session.pc.close().await; }
+                                    if let Some(session) = sessions.remove(&ice) { close_peer(&session.pc).await; }
                                 }
                             }},
                             Err(_) => log::error!("Create peer failed (details omitted)"),
@@ -1037,7 +1045,7 @@ async fn serve(mut capture: Arc<ScreenCapture>, input: Arc<InputInjector>, shutd
                     for k in targets {
                         if let Some(old) = sessions.remove(&k) {
                             desktop_ended |= old.role.is_desktop();
-                            if let Err(e) = old.pc.close().await { log::warn!("Close released peer failed: {}", e); }
+                            close_peer(&old.pc).await;
                         }
                     }
                     if desktop_ended && !sessions.values().any(|s| s.role.is_desktop()) { if let Some(s) = assist.as_mut() { s.session_ended()?; } }
@@ -1075,7 +1083,7 @@ async fn serve(mut capture: Arc<ScreenCapture>, input: Arc<InputInjector>, shutd
                     let superseded: Vec<String> = sessions.iter().filter(|(id, old)| id.as_str() != ice && old.role.is_desktop())
                         .map(|(id, _)| id.clone()).collect();
                     for id in superseded {
-                        if sessions[&id].desktop { if let Some(old) = sessions.remove(&id) { let _ = old.pc.close().await; } }
+                        if sessions[&id].desktop { if let Some(old) = sessions.remove(&id) { close_peer(&old.pc).await; } }
                         else { sessions[&id].demote(); }
                     }
                     if let Some(peer) = sessions.get(&ice) { peer.promote(screen); }
