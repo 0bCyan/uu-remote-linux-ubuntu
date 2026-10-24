@@ -10,16 +10,28 @@ type IResult<T> = std::result::Result<T, interceptor::Error>;
 const START_BPS: u32 = 6_000_000;
 const BURST_BYTES: f64 = 3600.0;
 #[derive(Debug)]
-struct Controller { last: tokio::time::Instant, sent: u64, nacks: u64, bytes: u64, bad: u8, healthy: u8, fraction: u8, report_sequence: Option<u32> }
+struct Controller { last: tokio::time::Instant, sent: u64, nacks: u64, bytes: u64, paced_ns: u64, repairs: Vec<Option<(u16, tokio::time::Instant)>>, bad: u8, healthy: u8, fraction: u8, report_sequence: Option<u32> }
 impl Controller {
-    fn sample(&mut self, sent: u64, nacks: u64, bytes: u64, cap: u32, ceiling: u32) -> Option<(u32, u64)> {
+    // Bound memory and suppress repeated requests for the same missing packet.
+    // Repairs still go through NACK and the shared transport limiter each time.
+    fn new_repair(&mut self, sequence: u16) -> bool {
+        let now = tokio::time::Instant::now();
+        let slot = &mut self.repairs[usize::from(sequence) % 4096];
+        if slot.is_some_and(|(seq, at)| seq == sequence && now.duration_since(at) < Duration::from_secs(2)) {
+            return false;
+        }
+        *slot = Some((sequence, now));
+        true
+    }
+    fn sample(&mut self, sent: u64, nacks: u64, bytes: u64, paced_ns: u64, cap: u32, ceiling: u32) -> Option<(u32, u64)> {
         let packets = sent.saturating_sub(self.sent);
         if self.last.elapsed() < Duration::from_secs(2) || packets < 80 { return None; }
         let repair = nacks.saturating_sub(self.nacks).saturating_mul(1000) / packets;
         let loss = self.fraction;
         // Idle traffic establishes no spare capacity: only probe upward under load.
-        let active = bytes.saturating_sub(self.bytes) as f64 * 8.0 / self.last.elapsed().as_secs_f64() >= f64::from(cap) * 0.5;
-        self.bytes = bytes;
+        let pressured = paced_ns.saturating_sub(self.paced_ns) as f64 >= self.last.elapsed().as_secs_f64() * 1e9 * 0.1;
+        let active = pressured || bytes.saturating_sub(self.bytes) as f64 * 8.0 / self.last.elapsed().as_secs_f64() >= f64::from(cap) * 0.5;
+        self.bytes = bytes; self.paced_ns = paced_ns;
         self.last = tokio::time::Instant::now(); self.sent = sent; self.nacks = nacks; self.fraction = 0;
         let floor = 500_000.min(ceiling);
         let next = if repair >= 100 || loss >= 26 {
@@ -46,6 +58,7 @@ pub(crate) struct VideoNetwork {
     sent: AtomicU64,
     nacks: AtomicU64,
     bytes: AtomicU64,
+    paced_ns: AtomicU64,
     controller: Mutex<Controller>,
     bucket: tokio::sync::Mutex<Bucket>,
 }
@@ -57,8 +70,8 @@ impl VideoNetwork {
     fn configured(pacing: bool, adaptive: bool) -> Self {
         let now = tokio::time::Instant::now();
         Self { pacing: AtomicBool::new(pacing), adaptive, cap: AtomicU32::new(START_BPS), ceiling: AtomicU32::new(30_000_000), ssrc: AtomicU32::new(0),
-            sent: AtomicU64::new(0), nacks: AtomicU64::new(0), bytes: AtomicU64::new(0),
-            controller: Mutex::new(Controller { last: now, sent: 0, nacks: 0, bytes: 0, bad: 0, healthy: 0, fraction: 0, report_sequence: None }),
+            sent: AtomicU64::new(0), nacks: AtomicU64::new(0), bytes: AtomicU64::new(0), paced_ns: AtomicU64::new(0),
+            controller: Mutex::new(Controller { last: now, sent: 0, nacks: 0, bytes: 0, paced_ns: 0, repairs: vec![None; 4096], bad: 0, healthy: 0, fraction: 0, report_sequence: None }),
             bucket: tokio::sync::Mutex::new(Bucket { at: now, credit: BURST_BYTES }) }
     }
     pub(crate) fn set_ceiling(&self, bps: u32) {
@@ -76,7 +89,16 @@ impl VideoNetwork {
         let ssrc = self.ssrc.load(Ordering::Relaxed);
         if let Some(nack) = packet.downcast_ref::<TransportLayerNack>() {
             if ssrc != 0 && nack.media_ssrc != ssrc { return; }
-            self.nacks.fetch_add(nack.nacks.iter().map(|p| 1 + u64::from(p.lost_packets.count_ones())).sum::<u64>(), Ordering::Relaxed);
+            let mut unique = 0;
+            for pair in &nack.nacks {
+                unique += u64::from(state.new_repair(pair.packet_id));
+                for bit in 0..16 {
+                    if pair.lost_packets & (1 << bit) != 0 {
+                        unique += u64::from(state.new_repair(pair.packet_id.wrapping_add(bit + 1)));
+                    }
+                }
+            }
+            self.nacks.fetch_add(unique, Ordering::Relaxed);
         }
         if let Some(rr) = packet.downcast_ref::<ReceiverReport>() {
             for report in &rr.reports {
@@ -89,7 +111,7 @@ impl VideoNetwork {
         }
         if !self.adaptive { return; }
         let cap = self.encoder_bps();
-        if let Some((next, repair)) = state.sample(self.sent.load(Ordering::Relaxed), self.nacks.load(Ordering::Relaxed), self.bytes.load(Ordering::Relaxed), cap, self.ceiling.load(Ordering::Relaxed)) {
+        if let Some((next, repair)) = state.sample(self.sent.load(Ordering::Relaxed), self.nacks.load(Ordering::Relaxed), self.bytes.load(Ordering::Relaxed), self.paced_ns.load(Ordering::Relaxed), cap, self.ceiling.load(Ordering::Relaxed)) {
             self.cap.store(next, Ordering::Relaxed);
             log::info!("Video network budget: encoder_kbps={} repair_per_mille={} (repair demand, not unrecovered loss)", next / 1000, repair);
         }
@@ -108,7 +130,9 @@ impl RTPWriter for PacedWriter {
             bucket.credit = (bucket.credit + now.duration_since(bucket.at).as_secs_f64() * bytes_per_second).min(BURST_BYTES);
             bucket.at = now;
             if bucket.credit < bytes {
+                let waiting = tokio::time::Instant::now();
                 tokio::time::sleep(Duration::from_secs_f64((bytes - bucket.credit) / bytes_per_second)).await;
+                self.network.paced_ns.fetch_add(waiting.elapsed().as_nanos().min(u128::from(u64::MAX)) as u64, Ordering::Relaxed);
                 let now = tokio::time::Instant::now();
                 bucket.credit = (bucket.credit + now.duration_since(bucket.at).as_secs_f64() * bytes_per_second).min(BURST_BYTES);
                 bucket.at = now;
@@ -131,7 +155,7 @@ impl Interceptor for PacingBuilder {
     async fn bind_local_stream(&self, info: &StreamInfo, writer: Arc<dyn RTPWriter + Send + Sync>) -> Arc<dyn RTPWriter + Send + Sync> {
         if info.mime_type.to_ascii_lowercase().starts_with("video/") {
             let mut state = self.0.controller.lock().unwrap();
-            if self.0.ssrc.swap(info.ssrc, Ordering::Relaxed) != info.ssrc { state.report_sequence = None; }
+            if self.0.ssrc.swap(info.ssrc, Ordering::Relaxed) != info.ssrc { state.report_sequence = None; state.repairs.fill(None); }
             Arc::new(PacedWriter { network: self.0.clone(), next: writer })
         } else { writer }
     }
@@ -148,7 +172,7 @@ mod tests {
     use super::*;
     fn window(state: &mut Controller, sent: u64, nack: u64, cap: u32, ceiling: u32) -> Option<(u32,u64)> {
         state.last = tokio::time::Instant::now() - Duration::from_secs(3);
-        state.sample(sent, nack, sent*1180, cap, ceiling)
+        state.sample(sent, nack, sent*1180, 0, cap, ceiling)
     }
     #[test]
     fn budget_backs_off_on_repairs_and_recovers_slowly_within_viewer_ceiling() {
@@ -159,6 +183,27 @@ mod tests {
         assert_eq!(window(&mut s, 8000,1150,500_000,20_000_000),None);
         n.set_ceiling(1_000_000); assert_eq!(n.encoder_bps(),1_000_000);
         n.set_ceiling(20_000_000); assert_eq!(n.encoder_bps(),1_000_000);
+    }
+    #[test]
+    fn repeated_nacks_and_wrapping_sequences_are_counted_once() {
+        use webrtc::rtcp::transport_feedbacks::transport_layer_nack::{TransportLayerNack,NackPair};
+        let n = VideoNetwork::configured(true, true);
+        let nack = TransportLayerNack {nacks:vec![NackPair {packet_id:65535,lost_packets:3}],..Default::default()};
+        for _ in 0..20 { n.feedback(&nack); }
+        assert_eq!(n.nacks.load(Ordering::Relaxed), 3); // 65535, 0, 1
+        let mut s = n.controller.lock().unwrap();
+        s.repairs[0] = Some((0, tokio::time::Instant::now() - Duration::from_secs(3)));
+        assert!(s.new_repair(0));
+        assert!(s.new_repair(4096)); // bounded slot collision never suppresses another sequence
+    }
+    #[test]
+    fn healthy_pacing_pressure_allows_recovery_at_low_average_bitrate() {
+        let n = VideoNetwork::configured(true,true); let mut s = n.controller.lock().unwrap();
+        for i in 1..=6 {
+            s.last = tokio::time::Instant::now() - Duration::from_secs(3);
+            let next = s.sample(i*100,0,i*10000,i*500_000_000,1_000_000,2_000_000);
+            assert_eq!(next, if i == 6 {Some((1_050_000,0))} else {None});
+        }
     }
     #[test]
     fn sparse_idle_reports_do_not_invent_congestion() {
@@ -172,7 +217,7 @@ mod tests {
         let n=VideoNetwork::configured(true,true);let mut s=n.controller.lock().unwrap();
         for i in 1..20 {
             s.last=tokio::time::Instant::now()-Duration::from_secs(3);
-            assert!(s.sample(i*100,0,i*10000,START_BPS,30_000_000).is_none());
+            assert!(s.sample(i*100,0,i*10000,0,START_BPS,30_000_000).is_none());
         }
         assert_eq!(s.healthy,0);
     }

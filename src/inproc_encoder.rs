@@ -202,6 +202,10 @@ fn acquire(
     })
 }
 
+fn next_capture_tick(started: Instant, interval: Duration) -> Instant {
+    started + interval
+}
+
 fn random_keepalive(seed: &mut u32) -> Duration {
     *seed ^= *seed << 13;
     *seed ^= *seed >> 17;
@@ -328,6 +332,7 @@ fn run_vaapi(
             return Ok(());
         }
 
+        let capture_started = Instant::now();
         dirty |= vaapi_wait(&dri3, &mut capture, Duration::ZERO)?;
         let state = *locked.borrow();
         if state != last_locked {
@@ -395,12 +400,9 @@ fn run_vaapi(
 
         let now = Instant::now();
         if dirty {
-            let next = next_tick + frame_interval;
-            next_tick = if next > now {
-                next
-            } else {
-                now + frame_interval
-            };
+            // Work and backpressure consume the interval; do not add another
+            // full frame of sleep after a late encode, or catch up stale slots.
+            next_tick = next_capture_tick(capture_started, frame_interval);
             dirty = false;
         }
         last_send = now;
@@ -539,6 +541,7 @@ fn run_nvenc(
             return Ok(());
         }
 
+        let capture_started = Instant::now();
         dirty |= capture.wait(Duration::ZERO)?;
         let state = *locked.borrow();
         if state != last_locked {
@@ -619,12 +622,9 @@ fn run_nvenc(
 
         let now = Instant::now();
         if dirty {
-            let next = next_tick + frame_interval;
-            next_tick = if next > now {
-                next
-            } else {
-                now + frame_interval
-            };
+            // Work and backpressure consume the interval; do not add another
+            // full frame of sleep after a late encode, or catch up stale slots.
+            next_tick = next_capture_tick(capture_started, frame_interval);
             dirty = false;
         }
         last_send = now;
@@ -704,6 +704,24 @@ mod budget_tests {
 #[cfg(test)]
 mod frame_tests {
     use super::*;
+    #[test]
+    fn capture_cadence_counts_work_and_backpressure_without_catchup() {
+        let epoch = Instant::now();
+        let interval = Duration::from_micros(16_667);
+        for work in [Duration::from_millis(5), Duration::from_millis(20), Duration::from_millis(45)] {
+            let mut start = epoch;
+            for _ in 0..100 {
+                let done = start + work;
+                start = next_capture_tick(start, interval).max(done);
+            }
+            assert_eq!(start.duration_since(epoch), interval.max(work) * 100);
+        }
+        // A transport stall shifts the next fresh capture, without a burst of
+        // overdue frames and without adding sleep to the stall itself.
+        let resumed = epoch + Duration::from_millis(300);
+        assert_eq!(next_capture_tick(resumed, interval), resumed + interval);
+    }
+
     fn image(w: u32, h: u32, pixel: impl Fn(u32, u32) -> [u8; 4]) -> Vec<u8> {
         let pixel = &pixel;
         (0..h).flat_map(|y| (0..w).flat_map(move |x| pixel(x, y))).collect()

@@ -79,3 +79,45 @@ feedback backoff/recovery, idle and sparse-report behavior, stream isolation and
 actual NACK responder writes through the shared budget. The bounded virtual-link
 regression sends a 300 KB picture over 8 Mbps / 12 KB and 3 Mbps / 6 KB virtual links. Neither
 test measures the user's phone-network loss or guarantees zero loss in production.
+
+## R6 scheduling and renderer compatibility
+
+`motion-xvfb.c` generates 60 Hz motion and refuses displays other than `:98`.
+Use it only on your own isolated Xvfb, never the real desktop:
+
+```sh
+cc -O2 contrib/video-tests/motion-xvfb.c -lX11 -o /tmp/uu-motion
+Xvfb :98 -screen 0 3120x2080x24 -nolisten tcp &
+DISPLAY=:98 /tmp/uu-motion &
+# Run each candidate binary against the same fixture. Probe does not need a cloud login.
+time env DISPLAY=:98 UU_VIDEO_ENCODER=vaapi UU_VIDEO_CODEC=h264 \
+  UU_PROBE_FPS=60 UU_PROBE_FRAMES=300 UU_PROBE_QUALITY=4 \
+  UU_CONFIG=/tmp/uu-unused-test-config.json ./target/release/uuremote-server desktop-video-probe
+# Stop only the Xvfb and motion processes you started.
+```
+
+Xvfb tests the upload path. This measures local capture/encode throughput including startup,
+not delivered phone FPS. Native scheduling regressions also cover work slower than the frame
+interval and transport stalls; idle keepalive timing is unchanged.
+
+`color-compat.py` expands the eight bars into 64 grey/mixed/saturated patches and models a
+fixed full-range BT.601 shader, following the public WebRTC
+[RTCMTLNV12Renderer](https://github.com/webrtc-mirror/webrtc/blob/main/sdk/objc/components/renderer/metal/RTCMTLNV12Renderer.mm).
+This does not identify the proprietary viewer's renderer. It uses Python standard libraries
+and FFmpeg, without NumPy:
+
+```sh
+python3 contrib/video-tests/color-compat.py generate patches.ppm 3120 2080
+ffmpeg -i patches.ppm -pix_fmt bgra -f rawvideo patches.bgra
+UU_VAAPI_COLOR=bt709 /tmp/uu-vaapi-test 3120 2080 5 patches.bgra bt709.h264 0
+UU_VAAPI_COLOR=bt601-full /tmp/uu-vaapi-test 3120 2080 5 patches.bgra bt601.h264 0
+python3 contrib/video-tests/color-compat.py check bt709.h264 bt709
+python3 contrib/video-tests/color-compat.py check bt601.h264 bt601-full
+```
+
+Repeat both using `UU_PROBE_DMA=1` with an authenticated X11 display for offscreen GPU tests.
+Also test 640x640. Standard decoded patches must be within 6/255 and metadata must match VPP;
+the full-range mode must also satisfy the fixed-shader model. Full-range planes must be
+extracted as `yuvj420p`: requesting `yuv420p` can silently rescale them and invalidate the model.
+The compatibility environment variable affects native VAAPI H.264 only; the default is BT.709
+limited. Neither color checks nor the shader model establish actual iPhone/iPad acceptance.

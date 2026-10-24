@@ -5,7 +5,7 @@
 **v0.2.29 / c041160d6dbbb48a4d7f2c5ed65cb39c6d6c34c5** 上的二开。
 原项目核心实现与其他平台支持属于上游，完整署名见 [NOTICE.md](../NOTICE.md)。
 
-## R1–R5 改动（2026-10-24）
+## R1–R6 改动（2026-10-24）
 
 | 快照 | 二开内容 |
 |---|---|
@@ -14,12 +14,36 @@
 | R3 | GTK 主窗口的玻璃风格、卡片、滚动、DPI 字体与展开设置；保留账号及协助流程 |
 | R4 | 保留控制端 Backspace/方向键等重复 key-down，修复输入框长按不能连续删除；修饰键维持按住状态 |
 | R5 | 原视频与 NACK 重传共用限速；取消大帧限速时长截断；每连接反馈码率预算；原生 VAAPI 动态调码率与 VBV；1100 字节视频载荷分片 |
+| R6 | 原生采集按开始时间调度，避免超时后额外睡眠；反馈中重复 NACK 去重；健康且受限速阻塞的链路恢复预算；可选全范围 BT.601 色彩兼容模式 |
 
 可用 `git diff c041160d6dbbb48a4d7f2c5ed65cb39c6d6c34c5..ubuntu` 查看与上游基线的完整差异。
 后续上游合并及二开变更以 Git 历史为准。Cargo 版本号暂保留 `0.2.29`，不表示本二开由上游发布；
-本轮版本标识为 **Ubuntu R5**。
+本轮版本标识为 **Ubuntu R6**。
 
-## 已验证范围
+## R6 验证与色彩兼容（2026-10-24）
+
+- 本地完整测试 **268 passed, 0 failed, 8 ignored**，发布构建通过。
+- 同机、同一生成动画、隔离 Xvfb、3120×2080 / 60 Hz / VAAPI 上传、300 帧：
+  R5 耗时 12.505 秒（含启动约 23.99 fps），R6 耗时 6.942 秒（约 43.22 fps）。
+  这是本地编码/采集对照，**不等于手机实收帧率**；实际桌面与移动网络的长期统计尚未完成。
+- 新增的时序回归覆盖快速、慢速编码及传输阻塞；不追赶过时采集时隙，保留静态保活策略。
+- NACK 统计用固定 4096 槽、2 秒窗口去重，避免同一个缺包被重复请求而夸大降速信号。
+  每次真实重传仍经过原有限速器；不以去重数声称最终丢包率下降。
+- 六个健康窗口的原恢复条件之外，累计限速等待占窗口至少 10% 也视为有负载；
+  无流量、无等待的静态画面仍不向上探测。原有反馈降速和控制端码率上限保留。
+- 新增 `UU_VAAPI_COLOR=bt601-full`：VPP 输出全范围 BT.601，SPS 同步声明 full range / SMPTE170M 矩阵；
+  RGB 原色和传递标记保留 BT.709。默认 `bt709` 保留原有限范围 BT.709。仅影响原生 VAAPI H.264。
+- 此兼容模式来自公开 [WebRTC RTCMTLNV12Renderer](https://github.com/webrtc-mirror/webrtc/blob/main/sdk/objc/components/renderer/metal/RTCMTLNV12Renderer.mm)
+  固定全范围 BT.601 系数这一线索；**不能据此确定 UU iOS 使用相同渲染器**。
+- 64 个生成灰阶/混合色/色块、3120×2080，上传与 GPU 离屏 DMA 两条路径结果一致：
+  标准解码最大通道误差 BT.709 为 4/255、兼容模式为 3/255；
+  按上述固定渲染器系数模拟时，平均误差由 10.49 降至 0.92，最大由 35.57 降至 3.83。
+  模拟结果本身不代表实际显示验收，也不包括 ICC、HDR 或系统显示滤镜。
+- 本机启用兼容模式后，用户重连 iOS 控制端确认“颜色正常，明显更流畅”。这是本次配置的主观实机反馈，
+  不代表所有 iPhone/iPad 版本、显示模式或网络均已验证；未测得手机端实际 FPS、长期稳定性或最终丢包率。
+  删除色彩覆盖或设为 `bt709` 后重启服务即可恢复默认颜色模式。
+
+## R5 已验证范围
 
 主要环境：Ubuntu 24.04、GNOME X11、Intel Meteor Lake / iHD、VAAPI H.264，桌面 3120×2080。
 用户在手机控制端确认 R5 体验有所改善；这不是长期可用性或任意网络性能保证。
@@ -59,6 +83,7 @@ CPU/NVENC/外部 FFmpeg 目前只受发送预算限制，尚无同样的实时�
 |---|---|
 | `UU_VIDEO_PACING=0` | 关闭原包与重传的发送节奏控制，默认开启 |
 | `UU_VIDEO_ADAPTIVE=0` | 关闭反馈适配，预算使用控制端选择的码率上限，默认开启 |
+| `UU_VAAPI_COLOR=bt601-full` | R6：原生 VAAPI H.264 全范围 BT.601 兼容模式；默认 `bt709`，本次 iOS 用户确认改善 |
 | `UU_VAAPI_BUFFER_MS=250` | 测试机使用的 250 ms VBV；缓冲较小时高分辨率关键帧可能变糊 |
 | `UU_X11_ABSOLUTE_WARP=1` | 恢复旧的 X11 绝对定位路径，默认使用支持边缘压力的路径 |
 
@@ -102,3 +127,12 @@ currently applies to native VAAPI only. Extreme complexity or congestion can red
 quality and frame rate. Wayland/Portal performance was not revalidated in this fork.
 Build with `--features inproc-av` for the tested X11 path; see the main README for
 setup and the linked probe documentation for reproducible checks.
+
+R6 adds capture-start scheduling (generated Xvfb probe: ~24 to ~43 fps at 3120×2080),
+bounded duplicate-NACK statistics and recovery under healthy pacing pressure. These are
+local measurements, not delivered phone FPS or final packet-loss measurements. A selectable
+native H.264 `bt601-full` mode has matched VPP/SPS signaling and passes generated upload/DMA
+color checks. It targets fixed full-range BT.601 renderers like the public WebRTC Metal shader;
+The user reconnected with their iOS viewer and confirmed normal color and noticeably smoother motion.
+This is subjective acceptance for this configuration, not measured phone FPS, long-term stability
+or final packet loss across devices/networks. Default color remains BT.709 limited.

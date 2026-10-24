@@ -126,6 +126,7 @@ struct VaapiEngine {
     int upload_ready;
     int input_dirty;
     uint32_t min_qp;
+    int color_601_full;
 };
 
 // The VPP pipeline buffer points at the engine-owned rects, so VPP scales cap -> output
@@ -135,12 +136,12 @@ static int vaapi_make_vpp_buffer(VaapiEngine* engine) {
     vpp_param.surface = engine->in_rgb_surf;
     vpp_param.surface_region = &engine->src_rect;
     vpp_param.output_region = &engine->dst_rect;
-    // H.264 VUI below declares this same limited-range BT.709 conversion.
+    // H.264 VUI below must match both the matrix and range used by VPP.
     if (!engine->is_hevc) {
         vpp_param.surface_color_standard = VAProcColorStandardSRGB;
-        vpp_param.output_color_standard = VAProcColorStandardBT709;
+        vpp_param.output_color_standard = engine->color_601_full ? VAProcColorStandardBT601 : VAProcColorStandardBT709;
         vpp_param.input_color_properties.color_range = VA_SOURCE_RANGE_FULL;
-        vpp_param.output_color_properties.color_range = VA_SOURCE_RANGE_REDUCED;
+        vpp_param.output_color_properties.color_range = engine->color_601_full ? VA_SOURCE_RANGE_FULL : VA_SOURCE_RANGE_REDUCED;
     }
     return RT.vaCreateBuffer(engine->va_dpy, engine->vpp_ctx, VAProcPipelineParameterBufferType,
                              sizeof(vpp_param), 1, &vpp_param, &engine->vpp_buf) == VA_STATUS_SUCCESS ? 0 : -1;
@@ -164,6 +165,13 @@ VaapiEngine* vaapi_create(const VaapiConfig* config) {
     engine->max_bps = config->max_bps > engine->target_bps ? config->max_bps : engine->target_bps;
     engine->buffer_bits = config->buffer_bits > 0 ? config->buffer_bits : engine->max_bps;
     engine->is_hevc = config->is_hevc;
+    // Optional compatibility for fixed full-range BT.601 renderers. The public
+    // WebRTC RTCMTLNV12Renderer shader uses these coefficients regardless of VUI;
+    // this does not establish which renderer a proprietary viewer actually uses.
+    const char *color = getenv("UU_VAAPI_COLOR");
+    engine->color_601_full = color && strcmp(color, "bt601-full") == 0;
+    if (!engine->is_hevc)
+        fprintf(stderr, "[vaapi] H.264 color: %s\n", engine->color_601_full ? "bt601-full" : "bt709-limited");
     engine->input_dirty = 1;
     engine->min_qp = config->min_qp > 0 && config->min_qp <= 44 ? config->min_qp : 16;
     engine->dma_fd = -1;
@@ -497,8 +505,9 @@ static int vaapi_h264_params(VaapiEngine* engine, int is_idr, VASurfaceID curr_r
         if (seq_p.frame_cropping_flag) { bw_ue(&sps, 0); bw_ue(&sps, crop_right); bw_ue(&sps, 0); bw_ue(&sps, crop_bottom); }
         bw_put(&sps, 1, 1);                                               // VUI
         bw_put(&sps, 0, 1); bw_put(&sps, 0, 1);                           // aspect ratio, overscan
-        bw_put(&sps, 1, 1); bw_put(&sps, 5, 3); bw_put(&sps, 0, 1);      // video signal, unspecified format, limited range
-        bw_put(&sps, 1, 1); bw_put(&sps, 1, 8); bw_put(&sps, 1, 8); bw_put(&sps, 1, 8); // BT.709 primaries/transfer/matrix
+        bw_put(&sps, 1, 1); bw_put(&sps, 5, 3); bw_put(&sps, engine->color_601_full, 1); // video signal/format/range
+        bw_put(&sps, 1, 1); bw_put(&sps, 1, 8); bw_put(&sps, 1, 8); // BT.709 RGB primaries/transfer
+        bw_put(&sps, engine->color_601_full ? 6 : 1, 8);             // SMPTE170M (601) or 709 matrix
         bw_put(&sps, 0, 1); bw_put(&sps, 0, 1);                           // chroma location, timing
         bw_put(&sps, 0, 1); bw_put(&sps, 0, 1);                           // NAL/VCL HRD
         bw_put(&sps, 0, 1); bw_put(&sps, 0, 1);                           // pic struct, bitstream restrictions

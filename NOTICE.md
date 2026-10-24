@@ -16,7 +16,7 @@ The upstream Git history and existing copyright/license notices are retained.
 
 - 仓库：<https://github.com/0bCyan/uu-remote-linux-ubuntu>
 - 维护者：**0bCyan**。
-- 二开快照：**Ubuntu R5**；修改日期：**2026-10-24**。
+- 二开快照：**Ubuntu R6**；修改日期：**2026-10-24**。
 - 范围：Ubuntu X11 / Intel VAAPI 的采集、色彩、视频发送、网络反馈适配，
   GNOME Dock 边缘输入、长按重复及 GTK 主窗口样式。详见 [变更记录](docs/UBUNTU_FORK.md)。
 - 二开维护与测试借助 Codex 完成；这不改变上游署名或许可证。
