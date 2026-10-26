@@ -5,7 +5,7 @@
 - 项目：**uu-remote-linux**，由 **VallierDev 与上游贡献者**开发。
 - 仓库：<https://github.com/VallierDev/uu-remote-linux>
 - 本二开基线：**v0.2.29**，提交 `c041160d6dbbb48a4d7f2c5ed65cb39c6d6c34c5`。
-- 已合入上游：**v0.2.30**，提交 `648eeca03d0c7fc1fec67c08745fec060db10252`；原始二开基线保留不变。
+- 已合入上游：**v0.2.32**，提交 `ab5d0a656bee2736886321529b72ea6e0bb5130e`；原始二开基线保留不变。
 - 上游贡献记录：<https://github.com/VallierDev/uu-remote-linux/graphs/contributors>
 
 This repository is derived from **VallierDev/uu-remote-linux**, not an independent
@@ -17,7 +17,7 @@ The upstream Git history and existing copyright/license notices are retained.
 
 - 仓库：<https://github.com/0bCyan/uu-remote-linux-ubuntu>
 - 维护者：**0bCyan**。
-- 二开快照：**Ubuntu R7**；修改日期：**2026-10-24**。
+- 二开快照：**Ubuntu R8**；修改日期：**2026-10-26**。
 - 范围：Ubuntu X11 / Intel VAAPI 的采集、色彩、视频发送、网络反馈适配，
   GNOME Dock 边缘输入、长按重复及 GTK 主窗口样式。详见 [变更记录](docs/UBUNTU_FORK.md)。
 - 二开维护与测试借助 Codex 完成；这不改变上游署名或许可证。
