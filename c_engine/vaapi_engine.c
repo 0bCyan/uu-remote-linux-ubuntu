@@ -1,4 +1,4 @@
-// Modified by 0bCyan for the Ubuntu fork, 2026-10-24. See NOTICE.md and docs/UBUNTU_FORK.md.
+// Modified by 0bCyan for the Ubuntu fork, 2026-10-24–26. See NOTICE.md and docs/UBUNTU_FORK.md.
 #include "vaapi_engine.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -6,6 +6,7 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include <dlfcn.h>
+#include <math.h>
 #include <va/va.h>
 #include <va/va_drm.h>
 #include <va/va_drmcommon.h>
@@ -38,6 +39,7 @@ static struct {
     __typeof__(vaRenderPicture) *vaRenderPicture;
     __typeof__(vaEndPicture) *vaEndPicture;
     __typeof__(vaSyncSurface) *vaSyncSurface;
+    __typeof__(vaQueryVideoProcFilterCaps) *vaQueryVideoProcFilterCaps;
 } RT;
 
 static int vaapi_load_runtime(void) {
@@ -74,6 +76,7 @@ static int vaapi_load_runtime(void) {
     VA_LOAD(vaRenderPicture);
     VA_LOAD(vaEndPicture);
     VA_LOAD(vaSyncSurface);
+    VA_LOAD(vaQueryVideoProcFilterCaps);
     #undef VA_LOAD
     return 0;
 }
@@ -113,6 +116,9 @@ struct VaapiEngine {
     VAConfigID vpp_cfg;
     VAContextID vpp_ctx;
     VABufferID vpp_buf;
+    VABufferID saturation_buf;
+    VABufferID saturation_vpp;
+    VASurfaceID before_saturation;
     VARectangle src_rect, dst_rect;
 
     VAConfigID enc_cfg;
@@ -129,8 +135,51 @@ struct VaapiEngine {
     int color_601_full;
 };
 
+// Opt-in display preference. iHD ignores procamp on RGB input, so use a second
+// GPU-only NV12 pass. Default output and hue/brightness/contrast stay unchanged.
+static void vaapi_make_saturation_filter(VaapiEngine* engine) {
+    const char *value = getenv("UU_VAAPI_SATURATION");
+    if (!value || !*value) return;
+    if (engine->is_hevc) {
+        fprintf(stderr, "[vaapi] saturation currently supported on native H.264 only\n");
+        return;
+    }
+    char *end = NULL;
+    float gain = strtof(value, &end);
+    if (end == value || *end || !isfinite(gain) || gain < 0.5f || gain > 1.5f) {
+        fprintf(stderr, "[vaapi] saturation ignored: expected 0.5..1.5\n");
+        return;
+    }
+    if (gain == 1.0f) return;
+    VAProcFilterCapColorBalance caps[VAProcColorBalanceCount] = {0};
+    unsigned count = VAProcColorBalanceCount;
+    if (RT.vaQueryVideoProcFilterCaps(engine->va_dpy, engine->vpp_ctx,
+            VAProcFilterColorBalance, caps, &count) == VA_STATUS_SUCCESS && count <= VAProcColorBalanceCount) {
+        for (unsigned i = 0; i < count; i++) {
+            if (caps[i].type != VAProcColorBalanceSaturation) continue;
+            float adjusted = caps[i].range.default_value * gain;
+            if (caps[i].range.default_value <= 0 || !isfinite(adjusted) ||
+                    adjusted < caps[i].range.min_value || adjusted > caps[i].range.max_value) break;
+            VAProcFilterParameterBufferColorBalance param = {
+                .type = VAProcFilterColorBalance, .attrib = VAProcColorBalanceSaturation, .value = adjusted
+            };
+            if (RT.vaCreateBuffer(engine->va_dpy, engine->vpp_ctx, VAProcFilterParameterBufferType,
+                    sizeof(param), 1, &param, &engine->saturation_buf) == VA_STATUS_SUCCESS) {
+                fprintf(stderr, "[vaapi] saturation gain: %.3f\n", gain);
+                return;
+            }
+            break;
+        }
+    }
+    fprintf(stderr, "[vaapi] saturation unsupported; keeping original color\n");
+}
+
 // The VPP pipeline buffer points at the engine-owned rects, so VPP scales cap -> output
 static int vaapi_make_vpp_buffer(VaapiEngine* engine) {
+    if (engine->saturation_vpp != VA_INVALID_ID) {
+        RT.vaDestroyBuffer(engine->va_dpy, engine->saturation_vpp);
+        engine->saturation_vpp = VA_INVALID_ID;
+    }
     VAProcPipelineParameterBuffer vpp_param;
     memset(&vpp_param, 0, sizeof(vpp_param));
     vpp_param.surface = engine->in_rgb_surf;
@@ -142,6 +191,22 @@ static int vaapi_make_vpp_buffer(VaapiEngine* engine) {
         vpp_param.output_color_standard = engine->color_601_full ? VAProcColorStandardBT601 : VAProcColorStandardBT709;
         vpp_param.input_color_properties.color_range = VA_SOURCE_RANGE_FULL;
         vpp_param.output_color_properties.color_range = engine->color_601_full ? VA_SOURCE_RANGE_FULL : VA_SOURCE_RANGE_REDUCED;
+    }
+    if (engine->saturation_buf != VA_INVALID_ID) {
+        VAProcPipelineParameterBuffer sat = vpp_param;
+        sat.surface = engine->before_saturation;
+        sat.surface_region = &engine->dst_rect;
+        sat.surface_color_standard = sat.output_color_standard;
+        sat.input_color_properties = sat.output_color_properties;
+        sat.filters = &engine->saturation_buf;
+        sat.num_filters = 1;
+        if (RT.vaCreateBuffer(engine->va_dpy, engine->vpp_ctx, VAProcPipelineParameterBufferType,
+                sizeof(sat), 1, &sat, &engine->saturation_vpp) != VA_STATUS_SUCCESS) {
+            RT.vaDestroyBuffer(engine->va_dpy, engine->saturation_buf);
+            RT.vaDestroySurfaces(engine->va_dpy, &engine->before_saturation, 1);
+            engine->saturation_buf = engine->saturation_vpp = engine->before_saturation = VA_INVALID_ID;
+            fprintf(stderr, "[vaapi] saturation pipeline unavailable; keeping original color\n");
+        }
     }
     return RT.vaCreateBuffer(engine->va_dpy, engine->vpp_ctx, VAProcPipelineParameterBufferType,
                              sizeof(vpp_param), 1, &vpp_param, &engine->vpp_buf) == VA_STATUS_SUCCESS ? 0 : -1;
@@ -183,6 +248,9 @@ VaapiEngine* vaapi_create(const VaapiConfig* config) {
     engine->vpp_cfg = VA_INVALID_ID;
     engine->vpp_ctx = VA_INVALID_ID;
     engine->vpp_buf = VA_INVALID_ID;
+    engine->saturation_buf = VA_INVALID_ID;
+    engine->saturation_vpp = VA_INVALID_ID;
+    engine->before_saturation = VA_INVALID_ID;
     engine->enc_cfg = VA_INVALID_ID;
     engine->enc_ctx = VA_INVALID_ID;
     engine->coded_buf = VA_INVALID_ID;
@@ -242,6 +310,13 @@ VaapiEngine* vaapi_create(const VaapiConfig* config) {
     }
 
     // 3. Setup H.264 / HEVC EncSlice
+    vaapi_make_saturation_filter(engine);
+    if (engine->saturation_buf != VA_INVALID_ID && RT.vaCreateSurfaces(engine->va_dpy, VA_RT_FORMAT_YUV420,
+        engine->width, engine->height, &engine->before_saturation, 1, NULL, 0) != VA_STATUS_SUCCESS) {
+        RT.vaDestroyBuffer(engine->va_dpy, engine->saturation_buf);
+        engine->saturation_buf = VA_INVALID_ID;
+        fprintf(stderr, "[vaapi] saturation surface unavailable; keeping original color\n");
+    }
     VAProfile profile = engine->is_hevc ? VAProfileHEVCMain : VAProfileH264Main;
     VAConfigAttrib enc_attrib[3];
     enc_attrib[0].type = VAConfigAttribRTFormat;
@@ -766,12 +841,20 @@ int vaapi_encode_frame(
     // 1. Hardware VPP Color Conversion + scaling (RGB -> NV12 entirely inside VRAM)
     VAStatus st = VA_STATUS_SUCCESS;
     if (engine->input_dirty) {
-        st = RT.vaBeginPicture(engine->va_dpy, engine->vpp_ctx, engine->nv12_surf);
+        st = RT.vaBeginPicture(engine->va_dpy, engine->vpp_ctx, engine->saturation_buf == VA_INVALID_ID ? engine->nv12_surf : engine->before_saturation);
         if (st != VA_STATUS_SUCCESS) return -10;
         st = RT.vaRenderPicture(engine->va_dpy, engine->vpp_ctx, &engine->vpp_buf, 1);
         if (st != VA_STATUS_SUCCESS) return -10;
         st = RT.vaEndPicture(engine->va_dpy, engine->vpp_ctx);
         if (st != VA_STATUS_SUCCESS) return -10;
+        if (engine->saturation_buf != VA_INVALID_ID) {
+            st = RT.vaBeginPicture(engine->va_dpy, engine->vpp_ctx, engine->nv12_surf);
+            if (st != VA_STATUS_SUCCESS) return -10;
+            st = RT.vaRenderPicture(engine->va_dpy, engine->vpp_ctx, &engine->saturation_vpp, 1);
+            if (st != VA_STATUS_SUCCESS) return -10;
+            st = RT.vaEndPicture(engine->va_dpy, engine->vpp_ctx);
+            if (st != VA_STATUS_SUCCESS) return -10;
+        }
         engine->input_dirty = 0;
     }
 
@@ -875,6 +958,9 @@ void vaapi_destroy(VaapiEngine* engine) {
     if (engine->enc_cfg != VA_INVALID_ID) RT.vaDestroyConfig(engine->va_dpy, engine->enc_cfg);
 
     if (engine->vpp_buf != VA_INVALID_ID) RT.vaDestroyBuffer(engine->va_dpy, engine->vpp_buf);
+    if (engine->saturation_vpp != VA_INVALID_ID) RT.vaDestroyBuffer(engine->va_dpy, engine->saturation_vpp);
+    if (engine->before_saturation != VA_INVALID_ID) RT.vaDestroySurfaces(engine->va_dpy, &engine->before_saturation, 1);
+    if (engine->saturation_buf != VA_INVALID_ID) RT.vaDestroyBuffer(engine->va_dpy, engine->saturation_buf);
     if (engine->vpp_ctx != VA_INVALID_ID) RT.vaDestroyContext(engine->va_dpy, engine->vpp_ctx);
     if (engine->vpp_cfg != VA_INVALID_ID) RT.vaDestroyConfig(engine->va_dpy, engine->vpp_cfg);
 

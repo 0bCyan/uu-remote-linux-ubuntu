@@ -8,7 +8,7 @@
 
 - 基线：上游 **v0.2.29**，提交 [`c041160d6dbbb48a4d7f2c5ed65cb39c6d6c34c5`](https://github.com/VallierDev/uu-remote-linux/commit/c041160d6dbbb48a4d7f2c5ed65cb39c6d6c34c5)。
 - 已合入上游：[v0.2.32](https://github.com/VallierDev/uu-remote-linux/releases/tag/v0.2.32)。
-- 当前二开快照：**Ubuntu R8**，主要在 Ubuntu 24.04 / GNOME X11 / Intel VAAPI H.264 上测试。
+- 当前二开快照：**Ubuntu R8.1**，主要在 Ubuntu 24.04 / GNOME X11 / Intel VAAPI H.264 上测试。
 - 二开内容：DRI3 局部更新与缓存、BT.709 色彩、视频及重传统一限速、反馈码率适配、Dock 边缘手势、长按按键重复、GTK 玻璃风格界面。详见 [二开变更与验证](docs/UBUNTU_FORK.md) 和 [来源与署名](NOTICE.md)。
 - 授权沿用上游：Cargo SPDX 标识为 **GPL-3.0-or-later**；第三方组件保留各自许可证。
 - 本项目与网易、Apple 及上游维护者均无隶属或官方授权关系，不包含网易 Windows 程序或 Apple 设计素材。
@@ -19,6 +19,10 @@ R8 已合入上游 **v0.2.32**：修复信令堵塞造成的假在线、ICE 瞬�
 主机端 272 项测试通过（8 项忽略），控制端 163 项测试串行隔离运行通过；瞬断恢复仍待手机端实机验收。
 本轮不声称提高帧率或降低最终丢包率。转为桌面的工具连接仍使用 H.264 且无音频，Portal 暂不支持此路径。
 详见 [二开记录](docs/UBUNTU_FORK.md)。
+
+R8.1 新增可选 `UU_VAAPI_SATURATION=1.05`，轻微增强原生 VAAPI H.264 饱和度；
+默认 `1.0` 保持原色。Intel iHD 使用额外一次 GPU NV12 处理，色块回归保持亮度、灰阶与色彩元数据；
+不改变帧率、码率和网络调度参数。HEVC、CPU、NVENC 和外部 FFmpeg 不应用此参数。详见 [验证与限制](docs/UBUNTU_FORK.md)。
 
 ### Ubuntu X11 二开版快速构建
 
@@ -39,7 +43,7 @@ cargo build --release --locked --features inproc-av --bin uuremote-server
 
 驱动与运行参数、安装服务、已安装主机更新方式见 [二开说明](docs/UBUNTU_FORK.md)。不支持 VAAPI 的设备应按下文选择合适编码器。
 
-以下通用功能文档和截图继承自上游；其中跨平台实测记录、历史 issue/PR 编号属于上游。本二开目前以源码构建为准，上游预编译包及 NAS 镜像不包含本仓库 R1–R8 改动。
+以下通用功能文档和截图继承自上游；其中跨平台实测记录、历史 issue/PR 编号属于上游。本二开目前以源码构建为准，上游预编译包及 NAS 镜像不包含本仓库 R1–R8.1 改动。
 
 <p align="center"><img src="docs/images/viewer-window.png" width="720" alt="Linux 控制端启动窗口：设备列表（设备名已打码）"></p>
 <p align="center"><sub>Linux 控制端：设备列表（设备名已打码）</sub></p>

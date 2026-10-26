@@ -8,7 +8,7 @@ This is an **unofficial Ubuntu-focused derivative** of [VallierDev/uu-remote-lin
 
 - Base: upstream **v0.2.29**, commit [`c041160d6dbbb48a4d7f2c5ed65cb39c6d6c34c5`](https://github.com/VallierDev/uu-remote-linux/commit/c041160d6dbbb48a4d7f2c5ed65cb39c6d6c34c5).
 - Merged upstream: [v0.2.32](https://github.com/VallierDev/uu-remote-linux/releases/tag/v0.2.32).
-- Fork snapshot: **Ubuntu R8**, primarily tested on Ubuntu 24.04 / GNOME X11 / Intel VAAPI H.264.
+- Fork snapshot: **Ubuntu R8.1**, primarily tested on Ubuntu 24.04 / GNOME X11 / Intel VAAPI H.264.
 - Changes: DRI3 damage updates and caching, BT.709 color, shared original/repair pacing, feedback-driven bitrate adaptation, Dock edge pressure, repeated-key input and a glass-inspired GTK UI. See [fork changes and validation](docs/UBUNTU_FORK.md) and [attribution](NOTICE.md).
 - Same upstream licensing: Cargo SPDX **GPL-3.0-or-later**; third-party components retain their respective licenses.
 - Not affiliated with or endorsed by NetEase, Apple or the upstream maintainer. No NetEase Windows binaries or Apple design assets are distributed.
@@ -20,6 +20,12 @@ capture scheduling/caching and shared video/repair pacing remain intact.
 network interruption recovery still needs official-client acceptance. No delivered-FPS or final
 packet-loss improvement is claimed. Promoted tool peers still use H.264 without audio; Portal
 promotion is unsupported. See the [fork notes](docs/UBUNTU_FORK.md).
+
+R8.1 adds optional `UU_VAAPI_SATURATION=1.05` for a subtle native VAAPI H.264 saturation boost.
+The default `1.0` preserves original color. Intel iHD uses one additional GPU NV12 pass;
+generated-patch checks preserve luma, grayscale and color metadata. FPS, bitrate and network
+settings are unchanged. HEVC, CPU, NVENC and external FFmpeg do not apply this setting.
+See [validation and limits](docs/UBUNTU_FORK.md).
 
 ### Build the Ubuntu X11 fork
 
@@ -40,7 +46,7 @@ cargo build --release --locked --features inproc-av --bin uuremote-server
 
 See [fork notes](docs/UBUNTU_FORK.md) for driver/runtime settings, services and atomic updates. Choose another encoder on devices without supported VAAPI.
 
-The general documentation and screenshots below are inherited from upstream. Cross-platform acceptance records and historical issue/PR references describe upstream work. Build this fork from source; upstream release packages and NAS images do not include the R1–R8 changes.
+The general documentation and screenshots below are inherited from upstream. Cross-platform acceptance records and historical issue/PR references describe upstream work. Build this fork from source; upstream release packages and NAS images do not include the R1–R8.1 changes.
 
 <p align="center"><img src="docs/images/viewer-window.png" width="720" alt="Linux viewer launcher: device list (device names redacted)"></p>
 <p align="center"><sub>Linux viewer: device list (device names redacted)</sub></p>

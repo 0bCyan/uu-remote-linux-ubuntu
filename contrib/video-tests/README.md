@@ -135,3 +135,23 @@ The native encoder retains the fork's live-rate/min-QP behavior while adopting u
 Compare generated motion with R6 rather than assuming the upstream AMD bitrate gain applies to
 Intel. Extreme noise may still exceed the encoder budget; the shared transport limiter remains
 necessary. Test both color modes and both upload and offscreen DMA paths after merging upstream.
+
+## R8.1 optional saturation preference
+
+Native H.264 only: `UU_VAAPI_SATURATION=1.05` increases chroma slightly. Unset or `1.0`
+keeps original color and creates no extra pass. Invalid/nonfinite/out-of-range values
+are ignored (supported range 0.5–1.5). Unsupported filter initialization keeps original color.
+Intel iHD ignores ColorBalance on RGB input, so adjustment uses a second GPU NV12 pass;
+static inputs still reuse the processed surface. HEVC/CPU/NVENC/external FFmpeg are unchanged.
+
+```sh
+UU_VAAPI_COLOR=bt601-full UU_VAAPI_SATURATION=1.0 /tmp/uu-vaapi-test 3120 2080 5 patches.bgra neutral.h264 0
+UU_VAAPI_COLOR=bt601-full UU_VAAPI_SATURATION=1.05 /tmp/uu-vaapi-test 3120 2080 5 patches.bgra vivid.h264 0
+python3 contrib/video-tests/color-compat.py check neutral.h264 bt601-full
+python3 contrib/video-tests/saturation-check.py neutral.h264 vivid.h264 1.05
+```
+
+Repeat with BT.709 and offscreen DMA. The comparison checks luma, gray chroma, metadata,
+and actual chroma gain, detecting a silently ignored filter. Compare motion throughput
+with/without the preference using the same isolated fixture. These are local measurements;
+subjective iPhone color and latency still require reconnecting the official client.
