@@ -647,11 +647,17 @@ pub fn write_frames(session: Arc<PortalSession>, mut output: impl std::io::Write
 mod tests {
     #[test]
     fn locked_frames_hide_old_content() { let mut frame = [42; 8]; super::blank(&mut frame); assert_eq!(frame, [0,0,0,255,0,0,0,255]); }
+    // Ubuntu fork: cover missing runtime plugins as well as unbuilt support (0bCyan, 2026-10-26).
     #[test]
     fn errors_never_include_remote_messages_or_identifiers() {
         assert!(super::check(4).unwrap_err().contains("cancelled or denied"));
         assert!(super::check(9).unwrap_err().contains("closed or stream lost"));
-        assert!(super::check(15).unwrap_err().contains("--features wayland,portal"));
+        let unavailable = super::check(15).unwrap_err();
+        if cfg!(feature = "portal") && crate::engine_plugin::load(crate::engine_plugin::Engine::Portal).is_err() {
+            assert!(unavailable.starts_with("GNOME/KDE Wayland (portal) engine unavailable: "));
+        } else {
+            assert_eq!(unavailable, super::NOT_BUILT);
+        }
     }
     #[test]
     fn portal_error_display_is_fixed_and_sanitized() {
