@@ -7,16 +7,18 @@
 本仓库是 [VallierDev/uu-remote-linux](https://github.com/VallierDev/uu-remote-linux) 的**非官方二次开发版**，由 [0bCyan](https://github.com/0bCyan) 维护，重点优化 Ubuntu 被控端的流畅度、清晰度和交互。原项目由 VallierDev 及上游贡献者开发；本项目保留上游 Git 历史、版权声明与 [LICENSE](LICENSE)，不将原项目成果归为本仓库原创。
 
 - 基线：上游 **v0.2.29**，提交 [`c041160d6dbbb48a4d7f2c5ed65cb39c6d6c34c5`](https://github.com/VallierDev/uu-remote-linux/commit/c041160d6dbbb48a4d7f2c5ed65cb39c6d6c34c5)。
-- 已合入上游：[v0.2.30](https://github.com/VallierDev/uu-remote-linux/releases/tag/v0.2.30)。
-- 当前二开快照：**Ubuntu R7**，主要在 Ubuntu 24.04 / GNOME X11 / Intel VAAPI H.264 上测试。
+- 已合入上游：[v0.2.32](https://github.com/VallierDev/uu-remote-linux/releases/tag/v0.2.32)。
+- 当前二开快照：**Ubuntu R8**，主要在 Ubuntu 24.04 / GNOME X11 / Intel VAAPI H.264 上测试。
 - 二开内容：DRI3 局部更新与缓存、BT.709 色彩、视频及重传统一限速、反馈码率适配、Dock 边缘手势、长按按键重复、GTK 玻璃风格界面。详见 [二开变更与验证](docs/UBUNTU_FORK.md) 和 [来源与署名](NOTICE.md)。
 - 授权沿用上游：Cargo SPDX 标识为 **GPL-3.0-or-later**；第三方组件保留各自许可证。
 - 本项目与网易、Apple 及上游维护者均无隶属或官方授权关系，不包含网易 Windows 程序或 Apple 设计素材。
 
-R7 已合入上游 **v0.2.30**：VAAPI 最大 QP 放宽至 51，以及端口映射连接转为桌面时的黑屏修复。
-保留 R6 的帧调度、反馈适配和色彩兼容，并补齐转为桌面的连接的视频/重传限速。
-本地 270 项测试与上传/GPU 离屏色彩、动态码率检查通过；R7 尚待控制端实机复验。
-转为桌面的工具连接使用 H.264 且无音频，Portal 暂不支持此路径。详见 [二开记录](docs/UBUNTU_FORK.md)。
+R8 已合入上游 **v0.2.32**：修复信令堵塞造成的假在线、ICE 瞬断恢复后的连接状态，
+并引入默认关闭的 NVIDIA VBV 缓冲参数及 Linux 控制端的鼠标/滚轮修复。
+保留 R6/R7 的色彩兼容、帧调度、采集缓存和原包/重传统一限速。
+主机端 272 项测试通过（8 项忽略），控制端 163 项测试串行隔离运行通过；瞬断恢复仍待手机端实机验收。
+本轮不声称提高帧率或降低最终丢包率。转为桌面的工具连接仍使用 H.264 且无音频，Portal 暂不支持此路径。
+详见 [二开记录](docs/UBUNTU_FORK.md)。
 
 ### Ubuntu X11 二开版快速构建
 
@@ -37,7 +39,7 @@ cargo build --release --locked --features inproc-av --bin uuremote-server
 
 驱动与运行参数、安装服务、已安装主机更新方式见 [二开说明](docs/UBUNTU_FORK.md)。不支持 VAAPI 的设备应按下文选择合适编码器。
 
-以下通用功能文档和截图继承自上游；其中跨平台实测记录、历史 issue/PR 编号属于上游。本二开目前以源码构建为准，上游预编译包及 NAS 镜像不包含本仓库 R1–R7 改动。
+以下通用功能文档和截图继承自上游；其中跨平台实测记录、历史 issue/PR 编号属于上游。本二开目前以源码构建为准，上游预编译包及 NAS 镜像不包含本仓库 R1–R8 改动。
 
 <p align="center"><img src="docs/images/viewer-window.png" width="720" alt="Linux 控制端启动窗口：设备列表（设备名已打码）"></p>
 <p align="center"><sub>Linux 控制端：设备列表（设备名已打码）</sub></p>
@@ -344,6 +346,7 @@ systemctl --user restart uuremote-native.service
 | `UU_TERMINAL_SHORTCUTS=0` | 关闭终端窗口里的 Ctrl+V 粘贴转换 |
 | `UU_VIDEO_ENCODER` | `cpu` 强制 CPU；`vaapi` 显式启用 Intel/AMD 硬编；`nvenc` 强制 NVENC；未设置或 `auto` 时后台探测（每个候选编码一帧，限时 3 秒）。有 NVIDIA 驱动时顺序是 NVENC → CPU；没有 NVIDIA 时只有 CPU，不探测。探测未完成就建流则沿用旧规则（有 NVIDIA 用 NVENC，否则 CPU）。自行编译的 `--features inproc-av` 上，仅 X11 会先走进程内引擎：外部 FFmpeg 探测失败时记为 `native_unprobed`，沿用旧规则（NVENC）；Wayland、portal、KMS 回退 CPU。只有 CPU 时跳过探测，记为 `not probed (only candidate)`。探测成功和这种只含 CPU 的跳过会缓存到 NVIDIA 是否存在发生变化为止（`/proc/driver/nvidia/version` 或 `/dev/nvidia0`）。之后的桌面连接在后台再探测一次（不挡住这一路，仍用缓存的编码器）。NVENC 探测失败、选用 CPU 时只缓存 10 分钟；到期后下一次桌面连接同样在后台再探测一次，再次失败则重新计 10 分钟。显式 `cpu` / `vaapi` / `nvenc` 不启动探测。`native_unprobed` 不算失败缓存。优先级低于 `host_settings.json` 里非 `auto` 的 `video_encoder`。VAAPI 要等 #33 解决后才会进入 auto |
 | `UU_VAAPI_BUFFER_MS` | VAAPI 的 VBV 缓冲（10–1000 ms，仅 `UU_VIDEO_ENCODER=vaapi` 时生效）；高分辨率下关键帧被压糊时用它换稳定画质 |
+| `UU_NVENC_BUFFER_MS` | NVENC 的 VBV 缓冲（10–1000 ms，仅 NVENC 生效，含进程内引擎）；默认 100–500 kbit，1440p 等高分辨率下关键帧被压糊、按 GOP 周期闪烁时设 `1000`（#103） |
 | `UU_VIDEO_PACING=0` | 关闭视频原包及重传共享的发送节奏控制（默认开启） |
 | `UU_VIDEO_ADAPTIVE=0` | 关闭反馈码率适配，发送预算直接使用控制端上限；原生 VAAPI 实时适配默认开启 |
 | `UU_FFMPEG_ROOT` | 使用指定目录下的 FFmpeg |

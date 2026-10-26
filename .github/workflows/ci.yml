@@ -70,7 +70,8 @@ jobs:
             libx11-dev libxext-dev libxtst-dev libxfixes-dev libgtk-3-dev libsdl2-dev ffmpeg
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - run: cargo test --locked --features native-viewer,viewer-sdl --bin uuremote-viewer
+      # IPC tests change the process-wide runtime directory; serialize them.
+      - run: cargo test --locked --features native-viewer,viewer-sdl --bin uuremote-viewer -- --test-threads=1
       - run: cargo build --locked --features native-viewer,viewer-sdl --bin uuremote-viewer
 
   test-wayland:

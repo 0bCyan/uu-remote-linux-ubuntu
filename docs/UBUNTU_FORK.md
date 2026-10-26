@@ -5,7 +5,7 @@
 **v0.2.29 / c041160d6dbbb48a4d7f2c5ed65cb39c6d6c34c5** 上的二开。
 原项目核心实现与其他平台支持属于上游，完整署名见 [NOTICE.md](../NOTICE.md)。
 
-## R1–R7 改动（2026-10-24）
+## R1–R8 改动（2026-10-24 至 2026-10-26）
 
 | 快照 | 二开内容 |
 |---|---|
@@ -16,10 +16,29 @@
 | R5 | 原视频与 NACK 重传共用限速；取消大帧限速时长截断；每连接反馈码率预算；原生 VAAPI 动态调码率与 VBV；1100 字节视频载荷分片 |
 | R6 | 原生采集按开始时间调度，避免超时后额外睡眠；反馈中重复 NACK 去重；健康且受限速阻塞的链路恢复预算；可选全范围 BT.601 色彩兼容模式 |
 | R7 | 合并上游 v0.2.30（QP 51、工具连接启动桌面）；转为桌面的工具连接保留原包/重传统一限速及适配 |
+| R8 | 合并上游 v0.2.32；信令堵塞与 ICE 恢复修复、可选 NVENC 缓冲、Linux 控制端鼠标/滚轮修复 |
 
 可用 `git diff c041160d6dbbb48a4d7f2c5ed65cb39c6d6c34c5..ubuntu` 查看与上游基线的完整差异。
-后续上游合并及二开变更以 Git 历史为准。Cargo 版本号随上游更新为 `0.2.30`，不表示本二开由上游发布；
-本轮版本标识为 **Ubuntu R7**。
+后续上游合并及二开变更以 Git 历史为准。Cargo 版本号随上游更新为 `0.2.32`，不表示本二开由上游发布；
+本轮版本标识为 **Ubuntu R8**。
+
+## R8 上游合并与验证（2026-10-26）
+
+合入 [v0.2.32 / ab5d0a656b](https://github.com/VallierDev/uu-remote-linux/commit/ab5d0a656bee2736886321529b72ea6e0bb5130e)，
+保留真实上游提交历史、署名与许可证。程序源码无合并冲突，两处 README 冲突保留本二开说明并补充新参数。
+
+- 独立心跳看门狗及发送/关闭超时，避免事件队列堵塞后长时间假在线。
+- ICE 回调通过弱引用读取真实 DTLS transport 状态，避免网络瞬断恢复后连接误停在 New、续房时拆掉仍在使用的工具连接。
+- 可选 `UU_NVENC_BUFFER_MS` 默认不启用；VAAPI 的 250 ms 配置及缓冲计算保留。
+- 合入 Linux 控制端非 16:9 画面的鼠标坐标映射和滚轮/触控板转发修复。
+- 主机端 `272 passed, 0 failed, 8 ignored`，含队列堵塞和断线通知回归；控制端 `163 passed, 0 failed`。
+  控制端已有 IPC 测试会修改进程共享的 `XDG_RUNTIME_DIR`，并行执行存在干扰；本轮使用短的私有运行目录及 `--test-threads=1` 验证。
+  CI 的控制端测试同步改为串行，发布构建通过。
+- 隔离 Xvfb 上的 180 帧生成动画通过原生 VAAPI H.264 采集/编码检查；没有采集真实桌面，不代表手机实收帧率。
+- 色彩、DRI3 采集、键鼠、UI、反馈预算与视频限速的九个关键文件相对 R7 字节一致，视频模块只更新可选硬件缓冲解析。
+- 本机强制直连由外部 systemd/cgroup 路由配置管理，合并不包含机器信息、不改变该配置。
+- 尚未完成官方手机端的真实网络瞬断恢复与长期稳定性验收；不以单元测试声称手机帧率或最终丢包率提升。
+  NVIDIA 新参数没有本机硬件验证。R7 可按本次保存的二进制回退。
 
 ## R7 上游合并与验证（2026-10-24）
 
@@ -166,3 +185,10 @@ pass. Intel generated-motion rate comparisons found no additional reduction from
 extreme noise can still exceed the encoder target and remains transport-paced. Generated
 upload/DMA color, cache, IDR and live-rate checks pass. Promoted tool peers have H.264 video
 without audio; Portal promotion and official Mac end-to-end acceptance remain unverified.
+
+R8 merges upstream v0.2.32 with its real history and attribution. Host tests: 272 passed,
+8 ignored; viewer tests: 163 passed in an isolated serial run (existing process-environment
+mutation can race under parallel tests). Ubuntu video/color/input code and external per-service
+direct routing are retained. Stalled signaling and ICE recovery are covered at source/test level;
+official-phone network interruption and long-term stability acceptance remain pending. No new
+phone FPS or final packet-loss improvement is claimed.

@@ -7,17 +7,19 @@
 This is an **unofficial Ubuntu-focused derivative** of [VallierDev/uu-remote-linux](https://github.com/VallierDev/uu-remote-linux), maintained by [0bCyan](https://github.com/0bCyan). The original project was developed by VallierDev and the upstream contributors. Upstream history, copyright notices and [LICENSE](LICENSE) are retained; the original implementation is not claimed as this fork's work.
 
 - Base: upstream **v0.2.29**, commit [`c041160d6dbbb48a4d7f2c5ed65cb39c6d6c34c5`](https://github.com/VallierDev/uu-remote-linux/commit/c041160d6dbbb48a4d7f2c5ed65cb39c6d6c34c5).
-- Merged upstream: [v0.2.30](https://github.com/VallierDev/uu-remote-linux/releases/tag/v0.2.30).
-- Fork snapshot: **Ubuntu R7**, primarily tested on Ubuntu 24.04 / GNOME X11 / Intel VAAPI H.264.
+- Merged upstream: [v0.2.32](https://github.com/VallierDev/uu-remote-linux/releases/tag/v0.2.32).
+- Fork snapshot: **Ubuntu R8**, primarily tested on Ubuntu 24.04 / GNOME X11 / Intel VAAPI H.264.
 - Changes: DRI3 damage updates and caching, BT.709 color, shared original/repair pacing, feedback-driven bitrate adaptation, Dock edge pressure, repeated-key input and a glass-inspired GTK UI. See [fork changes and validation](docs/UBUNTU_FORK.md) and [attribution](NOTICE.md).
 - Same upstream licensing: Cargo SPDX **GPL-3.0-or-later**; third-party components retain their respective licenses.
 - Not affiliated with or endorsed by NetEase, Apple or the upstream maintainer. No NetEase Windows binaries or Apple design assets are distributed.
 
-R7 merges upstream **v0.2.30** (VAAPI max QP 51 and desktop promotion on an existing tool peer).
-R6 capture scheduling, adaptation and color modes remain; promoted peers also share video/repair pacing.
-270 local tests and generated upload/offscreen color and live-rate checks pass. R7 viewer acceptance
-is pending. A promoted tool peer uses H.264 without audio; Portal promotion is unsupported.
-See the [fork notes](docs/UBUNTU_FORK.md) for measured limits.
+R8 merges upstream **v0.2.32**: stalled-signaling recovery, corrected peer state after ICE recovery,
+an opt-in NVIDIA VBV buffer, and Linux viewer pointer/wheel fixes. R6/R7 color compatibility,
+capture scheduling/caching and shared video/repair pacing remain intact.
+272 host tests pass (8 ignored); 163 viewer tests pass with isolated serial execution. Physical
+network interruption recovery still needs official-client acceptance. No delivered-FPS or final
+packet-loss improvement is claimed. Promoted tool peers still use H.264 without audio; Portal
+promotion is unsupported. See the [fork notes](docs/UBUNTU_FORK.md).
 
 ### Build the Ubuntu X11 fork
 
@@ -38,7 +40,7 @@ cargo build --release --locked --features inproc-av --bin uuremote-server
 
 See [fork notes](docs/UBUNTU_FORK.md) for driver/runtime settings, services and atomic updates. Choose another encoder on devices without supported VAAPI.
 
-The general documentation and screenshots below are inherited from upstream. Cross-platform acceptance records and historical issue/PR references describe upstream work. Build this fork from source; upstream release packages and NAS images do not include the R1–R7 changes.
+The general documentation and screenshots below are inherited from upstream. Cross-platform acceptance records and historical issue/PR references describe upstream work. Build this fork from source; upstream release packages and NAS images do not include the R1–R8 changes.
 
 <p align="center"><img src="docs/images/viewer-window.png" width="720" alt="Linux viewer launcher: device list (device names redacted)"></p>
 <p align="center"><sub>Linux viewer: device list (device names redacted)</sub></p>
@@ -373,6 +375,7 @@ Common environment variables:
 | `UU_TERMINAL_SHORTCUTS=0` | Disable the Ctrl+V paste rewrite in terminal windows |
 | `UU_VIDEO_ENCODER` | `cpu`: libx264; `vaapi`: opt-in Intel/AMD; `nvenc`: force NVENC; unset or `auto`: a background probe (one synthetic IDR per candidate, 3 s each). With an NVIDIA driver the order is NVENC then CPU; without one the only candidate is CPU and the probe is skipped. A session that starts before the probe finishes uses the previous rule (NVENC if NVIDIA is present, else CPU). On a self-built `--features inproc-av` binary, a process-only failure of NVENC when the in-process engine would try it first on X11 is logged `native_unprobed` and keeps the previous NVENC choice (Wayland, portal, and KMS fall back to CPU). The skipped CPU-only probe is logged `not probed (only candidate)`. A successful probe and that CPU-only skip stay cached while NVIDIA presence matches the report. A later desktop connection whose presence differs starts one background re-probe and still uses the cached encoder until the new result is stored. A hardware-candidate failure (NVENC failed, CPU chosen) is kept for 10 minutes; the next desktop connection after that starts the same re-probe and still uses the cached encoder until the new result is stored. Explicit `cpu` / `vaapi` / `nvenc` does not start the probe. Another failure restarts the 10 minutes. `native_unprobed` is not a temporary failure. A non-`auto` `video_encoder` in `host_settings.json` wins. VAAPI stays out of auto until #33 |
 | `UU_VAAPI_BUFFER_MS` | VAAPI VBV buffer in ms (10-1000, VAAPI only); raise it when keyframes are squeezed into a blur at high resolution |
+| `UU_NVENC_BUFFER_MS` | NVENC VBV buffer in ms (10-1000, NVENC only, including the in-process engine); the default is 100-500 kbit, set `1000` when high-resolution keyframes blur and flicker once per GOP (#103) |
 | `UU_VIDEO_PACING=0` | Disable shared pacing of original video and repair packets (enabled by default) |
 | `UU_VIDEO_ADAPTIVE=0` | Disable feedback adaptation and use the viewer ceiling; native VAAPI live adaptation is enabled by default |
 | `UU_FFMPEG_ROOT` | Use FFmpeg from this prefix |
